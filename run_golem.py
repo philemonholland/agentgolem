@@ -874,6 +874,26 @@ def _human_duration(delta: timedelta) -> str:
 # Dashboard runner
 # ---------------------------------------------------------------------------
 
+def _find_free_port(preferred: int, host: str = "127.0.0.1") -> int:
+    """Find a free port starting from *preferred*, skipping 8000–8100."""
+    import socket
+
+    for offset in range(100):
+        port = preferred + offset
+        if 8000 <= port <= 8100:
+            continue
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind((host, port))
+                return port
+        except OSError:
+            continue
+    # Last resort: let the OS pick
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((host, 0))
+        return s.getsockname()[1]
+
+
 def start_dashboard(store: ParamStore, agents: list[Any]) -> threading.Thread | None:
     """Start the dashboard in a background thread if enabled."""
     enabled = store.get("dashboard_enabled", "bool")
@@ -881,7 +901,11 @@ def start_dashboard(store: ParamStore, agents: list[Any]) -> threading.Thread | 
         return None
 
     host = str(store.get("dashboard_host", "str"))
-    port = int(store.get("dashboard_port", "int"))
+    preferred_port = int(store.get("dashboard_port", "int"))
+    port = _find_free_port(preferred_port, host)
+    if port != preferred_port:
+        cprint(f"  ⚠ Port {preferred_port} in use, using {port} instead", C.YELLOW)
+
     first_agent = agents[0] if agents else None
 
     def _run_dashboard() -> None:

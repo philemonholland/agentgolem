@@ -59,12 +59,15 @@ class WebBrowser:
         await self._check_rate_limit(domain)
 
         start = time.monotonic()
-        async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+        async with httpx.AsyncClient(
+            timeout=self.timeout_seconds,
+            follow_redirects=True,
+        ) as client:
             response = await client.get(url, headers={"User-Agent": self.user_agent})
         duration_ms = (time.monotonic() - start) * 1000
 
         page = WebPage(
-            url=url,
+            url=str(response.url),
             status_code=response.status_code,
             content=response.text,
             headers=dict(response.headers),
@@ -85,12 +88,26 @@ class WebBrowser:
         return page
 
     def extract_text(self, page: WebPage) -> str:
-        """Extract readable text from a WebPage, stripping boilerplate elements."""
+        """Extract readable text from a WebPage, stripping boilerplate elements.
+
+        Falls back to full-page text if stripping yields very little content.
+        """
         soup = BeautifulSoup(page.content, "html.parser")
-        for tag in soup.find_all(["script", "style", "nav", "header", "footer"]):
+
+        # Try aggressive stripping first
+        stripped_soup = BeautifulSoup(page.content, "html.parser")
+        for tag in stripped_soup.find_all(["script", "style", "nav", "header", "footer"]):
             tag.decompose()
-        text = soup.get_text(separator=" ")
-        return re.sub(r"\s+", " ", text).strip()
+        stripped = re.sub(r"\s+", " ", stripped_soup.get_text(separator=" ")).strip()
+
+        if len(stripped) >= 100:
+            return stripped
+
+        # Fall back to full text (only remove script/style)
+        for tag in soup.find_all(["script", "style"]):
+            tag.decompose()
+        full = re.sub(r"\s+", " ", soup.get_text(separator=" ")).strip()
+        return full
 
     def extract_links(self, page: WebPage) -> list[str]:
         """Extract all absolute URLs from anchor tags in a WebPage."""

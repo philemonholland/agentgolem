@@ -326,16 +326,44 @@ class MainLoop:
         """Initial exploration of niscalajyoti.org — the ethical anchor."""
         self._emit("🌐", "Exploring niscalajyoti.org — our ethical anchor…")
         browser = self._get_browser()
+        base_url = "https://www.niscalajyoti.org/"
+
+        all_text_parts: list[str] = []
+        all_links: list[str] = []
 
         try:
-            page = await browser.fetch("https://www.niscalajyoti.org/")
-            text = browser.extract_text(page)
-            links = browser.extract_links(page)
+            # Fetch the main page
+            page = await browser.fetch(base_url)
+            main_text = browser.extract_text(page)
+            main_links = browser.extract_links(page)
+            all_text_parts.append(main_text)
+            all_links.extend(main_links)
             self._emit(
                 "📖",
-                f"Read {len(text)} chars from niscalajyoti.org, "
-                f"found {len(links)} links",
+                f"Read {len(main_text)} chars from niscalajyoti.org, "
+                f"found {len(main_links)} links",
             )
+
+            # Follow internal links to get deeper content
+            nj_links = [
+                l for l in main_links
+                if "niscalajyoti" in l.lower() and l != page.url
+            ]
+            for sub_url in nj_links[:5]:
+                try:
+                    sub_page = await browser.fetch(sub_url)
+                    sub_text = browser.extract_text(sub_page)
+                    sub_links = browser.extract_links(sub_page)
+                    all_text_parts.append(sub_text)
+                    all_links.extend(sub_links)
+                    self._emit(
+                        "📖",
+                        f"Read {len(sub_text)} chars from {sub_url[-40:]}",
+                    )
+                except Exception:
+                    pass  # don't let a sub-page failure stop us
+
+            combined_text = "\n\n---\n\n".join(all_text_parts)
 
             # Have the LLM reflect on what we found
             prompt = (
@@ -343,7 +371,7 @@ class MainLoop:
                 f"Your primary ethical vector is: {self.ethical_vector}.\n\n"
                 f"You have just read the following content from "
                 f"niscalajyoti.org, the ethical anchor that guides your "
-                f"existence:\n\n{text[:4000]}\n\n"
+                f"existence:\n\n{combined_text[:6000]}\n\n"
                 f"Reflect on what this means to you as an agent whose "
                 f"primary ethical orientation is '{self.ethical_vector}'.\n"
                 f"What strikes you? What do you want to explore further? "
@@ -370,21 +398,23 @@ class MainLoop:
                 )
                 self._emit("📤", f"Shared reflection with {count} peers")
 
-            # Queue interesting internal links for later
-            nj_links = [
-                l
-                for l in links
-                if "niscalajyoti" in l.lower() and l != page.url
+            # Queue any remaining niscalajyoti links for later browsing
+            deeper_links = [
+                l for l in all_links
+                if "niscalajyoti" in l.lower()
+                and l not in nj_links
+                and l != page.url
             ]
-            self._browse_queue.extend(nj_links[:5])
+            self._browse_queue.extend(deeper_links[:5])
 
             self._niscalajyoti_visited = True
             self.audit_logger.log(
                 "niscalajyoti_initial_visit",
                 self.agent_name,
                 {
-                    "chars_read": len(text),
-                    "links_found": len(links),
+                    "chars_read": len(combined_text),
+                    "pages_read": len(all_text_parts),
+                    "links_found": len(all_links),
                     "links_queued": len(self._browse_queue),
                 },
             )
