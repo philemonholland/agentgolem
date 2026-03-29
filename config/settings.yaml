@@ -1,6 +1,6 @@
 data_dir: D:\OneDrive\AgentGolem\Data
-awake_duration_minutes: 20.0
-sleep_duration_minutes: 20.0
+awake_duration_minutes: 10.0
+sleep_duration_minutes: 5.0
 wind_down_minutes: 2.0
 soul_update_min_confidence: 0.7
 sleep_cycle_minutes: 5.0
@@ -15,7 +15,7 @@ dry_run_mode: false
 approval_required_actions:
 - email_send
 - moltbook_send
-niscalajyoti_revisit_hours: 2.0
+niscalajyoti_revisit_hours: 6.0
 retention_archive_days: 5
 retention_purge_days: 30
 retention_min_trust_useful: 0.1
@@ -30,3 +30,4 @@ agent_count: 6
 agent_offset_minutes: 1.0
 autonomous_interval_seconds: 15.0
 name_discovery_cycles: 4
+peer_checkin_interval_minutes: 10.0

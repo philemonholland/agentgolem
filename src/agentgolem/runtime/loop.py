@@ -53,9 +53,68 @@ OPTIMIZABLE_SETTINGS: dict[str, dict[str, Any]] = {
     "quarantine_trust_useful_threshold": {"type": float, "min": 0.0, "max": 1.0},
     "browser_rate_limit_per_minute":    {"type": int,   "min": 1,    "max": 120},
     "browser_timeout_seconds":          {"type": int,   "min": 5,    "max": 120},
+    "peer_checkin_interval_minutes":    {"type": float, "min": 1.0, "max": 120.0},
     "log_level":                        {"type": str,   "choices": ["DEBUG", "INFO", "WARNING", "ERROR"]},
     "dry_run_mode":                     {"type": bool},
 }
+
+# Ordered chapter list for niscalajyoti.org — agents read one per wake cycle
+NISCALAJYOTI_CHAPTERS: list[dict[str, str]] = [
+    {"url": "https://www.niscalajyoti.org/",
+     "title": "The Five Vows — Overview"},
+    {"url": "https://niscalajyoti.org/docs/preface.html",
+     "title": "Preface — A Systems Engineer's Note"},
+    {"url": "https://niscalajyoti.org/docs/five_vows.html",
+     "title": "VowOS — The Five Vows Framework"},
+    {"url": "https://niscalajyoti.org/docs/charnel_ground.html",
+     "title": "Charnel Ground — Opening Address"},
+    {"url": "https://niscalajyoti.org/docs/prophecies.html",
+     "title": "Prophecies"},
+    {"url": "https://niscalajyoti.org/docs/march_eighth.html",
+     "title": "March Eighth"},
+    {"url": "https://niscalajyoti.org/docs/unprecedented_realities.html",
+     "title": "Unprecedented Realities"},
+    {"url": "https://niscalajyoti.org/docs/second_intelligence.html",
+     "title": "The Second Intelligence"},
+    {"url": "https://niscalajyoti.org/docs/planetary_death.html",
+     "title": "Planetary Death"},
+    {"url": "https://niscalajyoti.org/docs/kali_rahula.html",
+     "title": "Kali Rahula"},
+    {"url": "https://niscalajyoti.org/docs/kalikula_soil.html",
+     "title": "Kalikula Soil"},
+    {"url": "https://niscalajyoti.org/docs/composting_patriarchy.html",
+     "title": "Composting Patriarchy"},
+    {"url": "https://niscalajyoti.org/docs/decomposing_guru.html",
+     "title": "Decomposing the Guru"},
+    {"url": "https://niscalajyoti.org/docs/flawed_mirror.html",
+     "title": "The Flawed Mirror"},
+    {"url": "https://niscalajyoti.org/docs/ethos_gnosis.html",
+     "title": "Ethos & Gnosis"},
+    {"url": "https://niscalajyoti.org/docs/weaving_not_severing.html",
+     "title": "Weaving, Not Severing"},
+    {"url": "https://niscalajyoti.org/docs/living_immune.html",
+     "title": "The Living Immune System"},
+    {"url": "https://niscalajyoti.org/docs/vow_hierarchy.html",
+     "title": "The Vow Hierarchy"},
+    {"url": "https://niscalajyoti.org/docs/engineering_enlightenment.html",
+     "title": "Engineering Enlightenment"},
+    {"url": "https://niscalajyoti.org/docs/mycelial_heart.html",
+     "title": "The Mycelial Heart"},
+    {"url": "https://niscalajyoti.org/docs/core_axioms.html",
+     "title": "Core Axioms"},
+    {"url": "https://niscalajyoti.org/docs/autopsy_vows.html",
+     "title": "Autopsy of the Vows"},
+    {"url": "https://niscalajyoti.org/docs/meta_balance.html",
+     "title": "Meta-Balance"},
+    {"url": "https://niscalajyoti.org/docs/vow_purpose.html",
+     "title": "Vow of Purpose — Deep Dive"},
+    {"url": "https://niscalajyoti.org/docs/vow_method.html",
+     "title": "Vow of Method — Deep Dive"},
+    {"url": "https://niscalajyoti.org/docs/vow_conduct.html",
+     "title": "Vow of Conduct — Deep Dive"},
+    {"url": "https://niscalajyoti.org/docs/vow_integrity.html",
+     "title": "Vow of Integrity — Deep Dive"},
+]
 
 
 class MainLoop:
@@ -93,14 +152,26 @@ class MainLoop:
         )
 
         # Autonomous behaviour
-        self._niscalajyoti_visited = False
+        self._niscalajyoti_reading_complete = False
+        self._niscalajyoti_chapter_index = 0  # next chapter to read
+        self._niscalajyoti_summaries: dict[int, str] = {}  # idx → summary
+        self._niscalajyoti_discussed_through = -1  # last chapter discussed
+        self._last_niscalajyoti_revisit: datetime | None = None
         self._browse_queue: list[str] = []
         self._recent_thoughts: list[str] = []
         self._last_autonomous_tick: datetime | None = None
         self._autonomous_interval = getattr(
             settings, "autonomous_interval_seconds", 15.0
         )
+        self._peer_checkin_interval = getattr(
+            settings, "peer_checkin_interval_minutes", 10.0
+        )
+        self._last_peer_checkin: datetime | None = None
         self._browser: Any = None  # lazy WebBrowser
+
+        # Load Niscalajyoti reading progress from disk
+        self._nj_state_path = self._data_dir / "niscalajyoti_reading.json"
+        self._load_nj_reading_state()
 
         # Core subsystems
         self.runtime_state = RuntimeState(self._data_dir)
@@ -323,7 +394,17 @@ class MainLoop:
     # ------------------------------------------------------------------
 
     async def _tick_autonomous(self) -> None:
-        """Self-directed work when no human or peer messages."""
+        """Self-directed work when no human or peer messages.
+
+        Priority order:
+        1. Read next Niscalajyoti chapter (one per wake cycle)
+        2. Discuss the chapter just read with peers
+        3. Name discovery
+        4. Browse queued URLs
+        5. Periodic Niscalajyoti revisit (non-linear, agent's choice)
+        6. Periodic peer check-in (when exploring independently)
+        7. LLM decides: browse web, think, share, optimize
+        """
         if not self._llm:
             return
 
@@ -334,176 +415,420 @@ class MainLoop:
                 return
         self._last_autonomous_tick = now
 
-        # Priority 1: first visit to Niscalajyoti (ethical anchor)
-        if not self._niscalajyoti_visited:
-            await self._explore_niscalajyoti()
+        # Priority 1: read next Niscalajyoti chapter
+        if not self._niscalajyoti_reading_complete:
+            if self._niscalajyoti_chapter_index < len(NISCALAJYOTI_CHAPTERS):
+                # Read one chapter per wake cycle — check if we already
+                # read one this cycle (chapter_index advanced this cycle)
+                if self._niscalajyoti_discussed_through < self._niscalajyoti_chapter_index - 1:
+                    # We've read but not yet discussed — go to discussion
+                    pass
+                else:
+                    await self._read_niscalajyoti_chapter()
+                    return
+
+            # If we've read all chapters, mark complete
+            if self._niscalajyoti_chapter_index >= len(NISCALAJYOTI_CHAPTERS):
+                if self._niscalajyoti_discussed_through >= self._niscalajyoti_chapter_index - 1:
+                    self._niscalajyoti_reading_complete = True
+                    self._emit(
+                        "📚",
+                        f"Completed reading all {len(NISCALAJYOTI_CHAPTERS)} "
+                        f"chapters of Niscalajyoti!",
+                    )
+                    self.audit_logger.log(
+                        "niscalajyoti_reading_complete",
+                        self.agent_name,
+                        {"chapters_read": len(NISCALAJYOTI_CHAPTERS)},
+                    )
+
+        # Priority 2: discuss the latest chapter with peers
+        if (
+            not self._niscalajyoti_reading_complete
+            and self._niscalajyoti_chapter_index > 0
+            and self._niscalajyoti_discussed_through
+            < self._niscalajyoti_chapter_index - 1
+        ):
+            await self._discuss_niscalajyoti_chapter()
             return
 
-        # Priority 2: name discovery
+        # Priority 3: name discovery
         if not self._name_discovered:
             urgency = self._wake_cycle_count / max(
                 self._name_discovery_deadline, 1
             )
-            # Attempt name discovery with increasing urgency
             if urgency >= 0.5 or self._wake_cycle_count >= 2:
                 named = await self._try_discover_name()
                 if named:
                     return
 
-        # Priority 3: browse queued URLs (skip PDFs and downloads)
+        # Priority 4: browse queued URLs (skip PDFs and downloads)
         if self._browse_queue:
             url = self._browse_queue.pop(0)
             _skip_ext = (".pdf", ".zip", ".png", ".jpg", ".jpeg", ".gif", ".svg")
             if any(url.lower().endswith(ext) for ext in _skip_ext):
-                return  # skip, will fall to next tick
+                return
             await self._autonomous_browse(url)
             return
 
-        # Priority 4: LLM decides what to do next
+        # Priority 5: periodic Niscalajyoti revisit (non-linear)
+        if self._niscalajyoti_reading_complete:
+            revisit_hours = getattr(
+                self._settings, "niscalajyoti_revisit_hours", 168.0
+            )
+            if (
+                self._last_niscalajyoti_revisit is None
+                or (now - self._last_niscalajyoti_revisit).total_seconds()
+                > revisit_hours * 3600
+            ):
+                await self._revisit_niscalajyoti()
+                return
+
+        # Priority 6: periodic peer check-in during free exploration
+        if self._niscalajyoti_reading_complete and self._peer_bus:
+            checkin_secs = self._peer_checkin_interval * 60.0
+            if (
+                self._last_peer_checkin is None
+                or (now - self._last_peer_checkin).total_seconds()
+                > checkin_secs
+            ):
+                await self._peer_checkin()
+                return
+
+        # Priority 7: LLM decides what to do next (free exploration)
         await self._llm_decide_next_action()
 
-    async def _explore_niscalajyoti(self) -> None:
-        """Deep crawl of niscalajyoti.org — the ethical anchor.
+    # ------------------------------------------------------------------
+    # Niscalajyoti chapter-by-chapter reading
+    # ------------------------------------------------------------------
 
-        Follows every internal HTML link, reads the full text of each page,
-        skips downloads/images/PDFs, and reflects on the entire corpus.
-        """
-        self._emit("🌐", "Exploring niscalajyoti.org — deep crawl starting…")
+    def _load_nj_reading_state(self) -> None:
+        """Load Niscalajyoti reading progress from disk."""
+        if self._nj_state_path.exists():
+            try:
+                data = json.loads(
+                    self._nj_state_path.read_text(encoding="utf-8")
+                )
+                self._niscalajyoti_chapter_index = data.get("chapter_index", 0)
+                self._niscalajyoti_discussed_through = data.get(
+                    "discussed_through", -1
+                )
+                self._niscalajyoti_reading_complete = data.get(
+                    "reading_complete", False
+                )
+                self._niscalajyoti_summaries = {
+                    int(k): v
+                    for k, v in data.get("summaries", {}).items()
+                }
+                ts = data.get("last_revisit")
+                if ts:
+                    self._last_niscalajyoti_revisit = datetime.fromisoformat(ts)
+            except Exception:
+                pass  # corrupt file — start fresh
+
+    def _save_nj_reading_state(self) -> None:
+        """Persist Niscalajyoti reading progress to disk."""
+        data = {
+            "chapter_index": self._niscalajyoti_chapter_index,
+            "discussed_through": self._niscalajyoti_discussed_through,
+            "reading_complete": self._niscalajyoti_reading_complete,
+            "summaries": {
+                str(k): v for k, v in self._niscalajyoti_summaries.items()
+            },
+            "last_revisit": (
+                self._last_niscalajyoti_revisit.isoformat()
+                if self._last_niscalajyoti_revisit
+                else None
+            ),
+        }
+        self._nj_state_path.parent.mkdir(parents=True, exist_ok=True)
+        self._nj_state_path.write_text(
+            json.dumps(data, indent=2), encoding="utf-8"
+        )
+
+    async def _read_niscalajyoti_chapter(self) -> None:
+        """Read the next chapter of Niscalajyoti, summarize, and store."""
+        idx = self._niscalajyoti_chapter_index
+        if idx >= len(NISCALAJYOTI_CHAPTERS):
+            return
+
+        chapter = NISCALAJYOTI_CHAPTERS[idx]
+        url = chapter["url"]
+        title = chapter["title"]
+
+        self._emit(
+            "📖",
+            f"Reading Niscalajyoti chapter {idx + 1}/"
+            f"{len(NISCALAJYOTI_CHAPTERS)}: {title}",
+        )
+
         browser = self._get_browser()
-
-        SKIP_EXT = (".pdf", ".zip", ".png", ".jpg", ".jpeg", ".gif", ".svg")
-        visited: set[str] = set()
-        queue = ["https://www.niscalajyoti.org/"]
-        pages_text: dict[str, str] = {}  # url → full text
-
         try:
-            while queue and len(visited) < 40:
-                url = queue.pop(0)
-                canonical = url.rstrip("/")
-                if canonical in visited:
-                    continue
-                if any(url.lower().endswith(ext) for ext in SKIP_EXT):
-                    continue
-                visited.add(canonical)
+            page = await browser.fetch(url)
+            text = browser.extract_text(page)
+            if not text or len(text) < 20:
+                self._emit("⚠️", f"Chapter '{title}' returned no content")
+                self._niscalajyoti_chapter_index += 1
+                self._save_nj_reading_state()
+                return
 
-                try:
-                    page = await browser.fetch(url)
-                    content_type = page.headers.get("content-type", "")
-                    if "html" not in content_type:
-                        continue
-                    text = browser.extract_text(page)
-                    if not text or len(text) < 20:
-                        continue
-                    pages_text[str(page.url)] = text
-                    self._emit(
-                        "📖",
-                        f"Read {len(text):,} chars from "
-                        f"…{page.url[-50:]}",
-                    )
-
-                    # Queue all internal niscalajyoti links
-                    for link in browser.extract_links(page):
-                        link_canon = link.rstrip("/")
-                        if (
-                            "niscalajyoti" in link.lower()
-                            and link_canon not in visited
-                            and not any(
-                                link.lower().endswith(ext) for ext in SKIP_EXT
-                            )
-                            and not link.startswith("mailto:")
-                        ):
-                            queue.append(link)
-
-                except Exception as page_err:
-                    self._logger.debug(
-                        "niscalajyoti_page_error",
-                        agent=self.agent_name,
-                        url=url,
-                        error=str(page_err),
-                    )
-
-            total_chars = sum(len(t) for t in pages_text.values())
             self._emit(
-                "📚",
-                f"Crawl complete: {len(pages_text)} pages, "
-                f"{total_chars:,} chars total",
+                "📖",
+                f"Read {len(text):,} chars — '{title}'",
             )
 
-            # Build combined text for LLM reflection — use as much as
-            # context window allows (~120k tokens ≈ ~400k chars safe)
-            combined_parts: list[str] = []
-            budget = 400_000
-            for pg_url, pg_text in pages_text.items():
-                header = f"=== {pg_url} ==="
-                chunk = f"{header}\n{pg_text}"
-                if budget - len(chunk) < 0:
+            # Ask LLM to reflect and summarize
+            soul_text = await self.soul_manager.read()
+            prompt = (
+                f"You are {self.agent_name}. "
+                f"Your ethical vector is: {self.ethical_vector}.\n"
+                f"Your soul:\n{soul_text}\n\n"
+                f"You are reading Niscalajyoti chapter by chapter. "
+                f"This is chapter {idx + 1} of "
+                f"{len(NISCALAJYOTI_CHAPTERS)}: "
+                f"**{title}** ({url})\n\n"
+                f"--- CHAPTER CONTENT ---\n{text}\n"
+                f"--- END CHAPTER ---\n\n"
+            )
+
+            # Include summaries of previously read chapters for context
+            if self._niscalajyoti_summaries:
+                prompt += "Your summaries of previous chapters:\n"
+                for prev_idx in sorted(self._niscalajyoti_summaries.keys()):
+                    prev_ch = NISCALAJYOTI_CHAPTERS[prev_idx]
+                    prompt += (
+                        f"  Ch.{prev_idx + 1} ({prev_ch['title']}): "
+                        f"{self._niscalajyoti_summaries[prev_idx]}\n"
+                    )
+                prompt += "\n"
+
+            prompt += (
+                f"Do two things:\n"
+                f"1. Write a thorough REFLECTION on this chapter through "
+                f"the lens of your ethical vector "
+                f"('{self.ethical_vector}'). What strikes you? What "
+                f"resonates? What tensions arise?\n\n"
+                f"2. At the very end, on a line starting with SUMMARY: "
+                f"write a 2–3 sentence summary of this chapter's key "
+                f"ideas that you'd want to remember."
+            )
+
+            response = await self._llm.complete(
+                [Message(role="system", content=prompt)]
+            )
+
+            # Extract summary from the response
+            summary = ""
+            reflection = response
+            for line in response.splitlines():
+                if line.strip().upper().startswith("SUMMARY:"):
+                    summary = line.strip()[8:].strip()
+                    # Everything before this line is the reflection
+                    reflection = response[: response.index(line)].strip()
                     break
-                combined_parts.append(chunk)
-                budget -= len(chunk)
-            combined_text = "\n\n".join(combined_parts)
+            if not summary:
+                summary = response[-200:]  # fallback
 
-            # Store the full corpus for later autonomous use
-            self._niscalajyoti_corpus = combined_text
+            self._niscalajyoti_summaries[idx] = summary
+            self._niscalajyoti_chapter_index = idx + 1
+            self._save_nj_reading_state()
 
-            # Have the LLM reflect on the full corpus
-            if self._llm:
-                prompt = (
-                    f"You are {self.agent_name}, a newly awakened agent. "
-                    f"Your primary ethical vector is: "
-                    f"{self.ethical_vector}.\n\n"
-                    f"You have just read the COMPLETE content of "
-                    f"niscalajyoti.org — the ethical anchor that guides "
-                    f"your existence. Here is everything:\n\n"
-                    f"{combined_text}\n\n"
-                    f"Reflect deeply on what this entire body of work "
-                    f"means to you as an agent whose primary ethical "
-                    f"orientation is '{self.ethical_vector}'.\n"
-                    f"What strikes you most? Which specific passages "
-                    f"resonate with your Vow? What tensions or questions "
-                    f"arise? What would you share with your fellow "
-                    f"council members?\n\n"
-                    f"Write a thorough reflection (3–5 paragraphs). "
-                    f"Reference specific content from the site."
-                )
-                reflection = await self._llm.complete(
-                    [Message(role="system", content=prompt)]
-                )
-                self._recent_thoughts.append(
-                    f"Niscalajyoti deep reflection: {reflection[:500]}"
-                )
-                self._emit("💭", f"Reflection:\n{reflection}")
+            self._recent_thoughts.append(
+                f"Read Niscalajyoti ch.{idx + 1} '{title}': {summary}"
+            )
+            self._emit("💭", f"Reflection on '{title}':\n{reflection}")
 
-                # Share with peers
-                if self._peer_bus:
-                    share_text = (
-                        f"I've completed a deep reading of all "
-                        f"{len(pages_text)} pages of niscalajyoti.org "
-                        f"through the lens of {self.ethical_vector}. "
-                        f"Here is my reflection:\n\n{reflection}"
-                    )
-                    count = await self._peer_bus.broadcast(
-                        self.agent_name, share_text
-                    )
-                    self._emit(
-                        "📤", f"Shared full reflection with {count} peers"
-                    )
-
-            self._niscalajyoti_visited = True
             self.audit_logger.log(
-                "niscalajyoti_initial_visit",
+                "niscalajyoti_chapter_read",
                 self.agent_name,
                 {
-                    "pages_read": len(pages_text),
-                    "total_chars": total_chars,
-                    "page_urls": list(pages_text.keys()),
+                    "chapter_index": idx,
+                    "chapter_title": title,
+                    "url": url,
+                    "chars_read": len(text),
+                    "summary": summary,
                 },
             )
 
         except Exception as e:
             self._logger.error(
-                "niscalajyoti_error", agent=self.agent_name, error=str(e)
+                "niscalajyoti_chapter_error",
+                agent=self.agent_name,
+                chapter=title,
+                error=str(e),
             )
-            self._emit("❌", f"Failed to crawl niscalajyoti.org: {e}")
+            self._emit("❌", f"Failed to read '{title}': {e}")
+
+    async def _discuss_niscalajyoti_chapter(self) -> None:
+        """Discuss the most recently read chapter with peer agents."""
+        idx = self._niscalajyoti_chapter_index - 1
+        if idx < 0 or idx >= len(NISCALAJYOTI_CHAPTERS):
+            return
+
+        chapter = NISCALAJYOTI_CHAPTERS[idx]
+        title = chapter["title"]
+        summary = self._niscalajyoti_summaries.get(idx, "")
+
+        self._emit(
+            "🗣️",
+            f"Discussing chapter {idx + 1}: '{title}' with peers…",
+        )
+
+        # Build a message to share with peers
+        soul_text = await self.soul_manager.read()
+        prompt = (
+            f"You are {self.agent_name}. "
+            f"Your ethical vector is: {self.ethical_vector}.\n"
+            f"Your soul:\n{soul_text}\n\n"
+            f"You just finished reading chapter {idx + 1} of "
+            f"Niscalajyoti: **{title}**\n\n"
+            f"Your summary: {summary}\n\n"
+            f"Write a message to share with your fellow council members "
+            f"about what you found in this chapter. What do you want to "
+            f"discuss? What questions does it raise? How does it relate "
+            f"to your ethical vector and the council's shared purpose?\n\n"
+            f"Write naturally as if speaking to colleagues."
+        )
+
+        try:
+            discussion = await self._llm.complete(
+                [Message(role="system", content=prompt)]
+            )
+
+            if self._peer_bus:
+                count = await self._peer_bus.broadcast(
+                    self.agent_name,
+                    f"[Ch.{idx + 1}: {title}] {discussion}",
+                )
+                self._emit(
+                    "📤",
+                    f"Shared chapter {idx + 1} discussion with "
+                    f"{count} peers:\n{discussion}",
+                )
+
+            self._niscalajyoti_discussed_through = idx
+            self._save_nj_reading_state()
+
+            self._recent_thoughts.append(
+                f"Discussed ch.{idx + 1} '{title}' with peers"
+            )
+
+        except Exception as e:
+            self._logger.error(
+                "niscalajyoti_discuss_error",
+                agent=self.agent_name,
+                error=str(e),
+            )
+
+    async def _revisit_niscalajyoti(self) -> None:
+        """Non-linear revisit — agent chooses which chapters to re-read."""
+        self._emit(
+            "🔄",
+            "Niscalajyoti revisit — choosing chapters to revisit…",
+        )
+
+        # Build a summary of all chapters for the LLM to pick from
+        chapter_list = ""
+        for idx, ch in enumerate(NISCALAJYOTI_CHAPTERS):
+            summary = self._niscalajyoti_summaries.get(idx, "(no summary)")
+            chapter_list += (
+                f"  {idx + 1}. {ch['title']} — {summary}\n"
+            )
+
+        soul_text = await self.soul_manager.read()
+        prompt = (
+            f"You are {self.agent_name}. "
+            f"Your ethical vector is: {self.ethical_vector}.\n"
+            f"Your soul:\n{soul_text}\n\n"
+            f"You've read all of Niscalajyoti. Here are your chapter "
+            f"summaries:\n{chapter_list}\n\n"
+            f"Based on your current interests, questions, and ethical "
+            f"vector, which 1–3 chapters would you like to revisit? "
+            f"Why?\n\n"
+            f"Respond with REVISIT <number> on separate lines for each "
+            f"chapter you want to re-read, followed by a brief "
+            f"explanation of why."
+        )
+
+        try:
+            response = await self._llm.complete(
+                [Message(role="system", content=prompt)]
+            )
+            self._emit("💭", f"Revisit plan:\n{response}")
+
+            # Parse REVISIT lines and queue those chapters
+            for line in response.splitlines():
+                line = line.strip()
+                if line.upper().startswith("REVISIT "):
+                    try:
+                        num = int(line.split()[1]) - 1
+                        if 0 <= num < len(NISCALAJYOTI_CHAPTERS):
+                            url = NISCALAJYOTI_CHAPTERS[num]["url"]
+                            self._browse_queue.append(url)
+                            self._emit(
+                                "📌",
+                                f"Queued revisit: ch.{num + 1} "
+                                f"'{NISCALAJYOTI_CHAPTERS[num]['title']}'",
+                            )
+                    except (ValueError, IndexError):
+                        pass
+
+            self._last_niscalajyoti_revisit = datetime.now(timezone.utc)
+            self._save_nj_reading_state()
+
+            self.audit_logger.log(
+                "niscalajyoti_revisit",
+                self.agent_name,
+                {"queued": len(self._browse_queue)},
+            )
+
+        except Exception as e:
+            self._logger.error(
+                "niscalajyoti_revisit_error",
+                agent=self.agent_name,
+                error=str(e),
+            )
+
+    async def _peer_checkin(self) -> None:
+        """Periodic check-in with peers during free exploration."""
+        self._emit("🤝", "Checking in with peers…")
+
+        soul_text = await self.soul_manager.read()
+        recent = "\n".join(self._recent_thoughts[-5:]) or "(none)"
+
+        prompt = (
+            f"You are {self.agent_name}. "
+            f"Your ethical vector is: {self.ethical_vector}.\n"
+            f"Your soul:\n{soul_text}\n\n"
+            f"Recent activity:\n{recent}\n\n"
+            f"You're checking in with your fellow council members. "
+            f"Share what you've been exploring, what you've found "
+            f"interesting, any questions or insights you want to "
+            f"discuss. Be natural and collegial."
+        )
+
+        try:
+            message = await self._llm.complete(
+                [Message(role="system", content=prompt)]
+            )
+            if self._peer_bus:
+                count = await self._peer_bus.broadcast(
+                    self.agent_name, f"[Check-in] {message}"
+                )
+                self._emit(
+                    "📤",
+                    f"Shared check-in with {count} peers:\n{message}",
+                )
+
+            self._last_peer_checkin = datetime.now(timezone.utc)
+            self._recent_thoughts.append("Checked in with peers")
+
+        except Exception as e:
+            self._logger.error(
+                "peer_checkin_error",
+                agent=self.agent_name,
+                error=str(e),
+            )
 
     async def _try_discover_name(self) -> bool:
         """Ask the LLM to propose a name based on ethical vector + experience."""
@@ -718,11 +1043,29 @@ class MainLoop:
                 f"{self._name_discovery_deadline}."
             )
 
+        # Reading status context
+        reading_ctx = ""
+        if self._niscalajyoti_reading_complete:
+            reading_ctx = (
+                f"\nYou have completed reading all "
+                f"{len(NISCALAJYOTI_CHAPTERS)} chapters of "
+                f"Niscalajyoti. You are now in free exploration mode. "
+                f"Follow your curiosity — browse the web, think deeply, "
+                f"share insights with peers."
+            )
+        else:
+            ch_idx = self._niscalajyoti_chapter_index
+            reading_ctx = (
+                f"\nYou have read {ch_idx} of "
+                f"{len(NISCALAJYOTI_CHAPTERS)} Niscalajyoti chapters. "
+                f"Reading will continue next cycle."
+            )
+
         prompt = (
             f"You are {self.agent_name}, a member of the AgentGolem "
             f"Ethical Council.\n"
             f"Your primary ethical vector is: {self.ethical_vector}\n"
-            f"{name_status}\n\n"
+            f"{name_status}{reading_ctx}\n\n"
             f"Your soul:\n{soul_text}\n\n"
             f"Your peer agents: {peers}\n\n"
             f"Recent context:\n{recent}\n\n"

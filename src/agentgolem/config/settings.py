@@ -42,6 +42,7 @@ class Settings(BaseModel):
     agent_offset_minutes: float = 1.0
     autonomous_interval_seconds: float = 15.0
     name_discovery_cycles: int = 4
+    peer_checkin_interval_minutes: float = 10.0
 
 
 def load_settings(config_path: Path = Path("config/settings.yaml")) -> Settings:

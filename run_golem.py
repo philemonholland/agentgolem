@@ -102,6 +102,7 @@ PARAM_DEFS: list[tuple[str, str, str, str, str]] = [
     ("agent_offset_minutes", "Agent Offset (minutes)", "Wake/sleep cycle offset between agents", "float", "Swarm"),
     ("autonomous_interval_seconds", "Autonomous Interval (s)", "Seconds between autonomous actions", "float", "Swarm"),
     ("name_discovery_cycles", "Name Discovery Deadline", "Wake cycles by which agents must discover a name", "int", "Swarm"),
+    ("peer_checkin_interval_minutes", "Peer Check-in Interval (min)", "Minutes between peer check-ins during free exploration", "float", "Swarm"),
 
     # --- Dashboard (launcher-only, stored in launcher_state.json) ---
     ("dashboard_enabled", "Dashboard Enabled", "Start the web dashboard alongside the agent", "bool", "Dashboard"),
@@ -549,6 +550,7 @@ HELP_TEXT = f"""
   {C.CYAN}/logs [N]{C.RESET}                   Show the last N audit-log entries (default 10).
   {C.CYAN}/dashboard{C.RESET}                  Show the web-dashboard URL.
   {C.CYAN}/restart{C.RESET}                    Stop and restart (re-runs config walkthrough).
+  {C.CYAN}/reset-nj{C.RESET}                   Reset Niscalajyoti reading progress for all agents.
   {C.CYAN}/quit{C.RESET}  or  {C.CYAN}/exit{C.RESET}           Gracefully shut down all agents.
 
   {C.BOLD}━━━ Talking to Agents ━━━{C.RESET}
@@ -665,6 +667,8 @@ class RuntimeConsole:
                 self._cmd_dashboard()
             elif cmd == "/restart":
                 self._cmd_restart()
+            elif cmd == "/reset-nj":
+                self._cmd_reset_nj()
             else:
                 cprint(f"  Unknown command: {cmd}  (type /help for the list)", C.RED)
         except Exception as e:
@@ -857,6 +861,26 @@ class RuntimeConsole:
         for agent in self._agents:
             agent.stop()
 
+    def _cmd_reset_nj(self) -> None:
+        """Reset Niscalajyoti reading progress for all agents."""
+        count = 0
+        for agent in self._agents:
+            nj_path = agent._data_dir / "niscalajyoti_reading.json"
+            if nj_path.exists():
+                nj_path.unlink()
+                count += 1
+            agent._niscalajyoti_chapter_index = 0
+            agent._niscalajyoti_discussed_through = -1
+            agent._niscalajyoti_reading_complete = False
+            agent._niscalajyoti_summaries.clear()
+            agent._last_niscalajyoti_revisit = None
+        cprint(
+            f"\n  🔄 Reset Niscalajyoti reading state for {len(self._agents)} "
+            f"agents ({count} state files cleared). Agents will start reading "
+            f"from chapter 1 on their next wake cycle.",
+            C.YELLOW,
+        )
+
     # ── hot-reload engine ─────────────────────────────────────────────
 
     def _hot_reload(self, key: str, value: Any) -> None:
@@ -885,6 +909,8 @@ class RuntimeConsole:
                 agent.sleep_scheduler.max_time_ms = value
             elif key == "autonomous_interval_seconds":
                 agent._autonomous_interval = value
+            elif key == "peer_checkin_interval_minutes":
+                agent._peer_checkin_interval = value
 
         if key == "log_level":
             import logging
