@@ -2,6 +2,7 @@
 """AgentGolem Launcher — single-click startup with interactive configuration.
 
 Run:  python run_golem.py          (or double-click start.bat on Windows)
+      python run_golem.py --auto   (skip config walkthrough, start immediately)
 
 On first launch, walks through every tuneable parameter showing defaults.
 Press Enter to keep a default; type a new value to change it.
@@ -13,6 +14,7 @@ Any text NOT starting with / is sent as a direct message to the agent.
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import os
@@ -1207,14 +1209,26 @@ async def run_agent(store: ParamStore) -> bool:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="AgentGolem Launcher")
+    parser.add_argument(
+        "--auto",
+        action="store_true",
+        help="Skip interactive config walkthrough and start immediately",
+    )
+    args = parser.parse_args()
+
     os.chdir(ROOT)                           # ensure CWD is repo root
     store = ParamStore()
 
-    try:
-        walkthrough(store)
-    except (EOFError, KeyboardInterrupt):
-        cprint("\n  Aborted.", C.YELLOW)
-        sys.exit(0)
+    if not args.auto:
+        try:
+            walkthrough(store)
+        except (EOFError, KeyboardInterrupt):
+            cprint("\n  Aborted.", C.YELLOW)
+            sys.exit(0)
+    else:
+        cprint(BANNER, C.CYAN)
+        cprint("  --auto: skipping config walkthrough, using saved settings.\n", C.DIM)
 
     while True:
         cprint("  Starting the Ethical Council…\n", C.GREEN)
@@ -1226,7 +1240,7 @@ def main() -> None:
             break
 
         if restart == "evolution":
-            # Spawn start.bat in a new terminal window and exit
+            # Spawn start.bat in a new terminal window with --auto and exit
             bat_path = ROOT / "start.bat"
             if bat_path.exists():
                 cprint(
@@ -1235,7 +1249,8 @@ def main() -> None:
                 )
                 subprocess.Popen(
                     ["cmd", "/c", "start", "AgentGolem (Evolved)",
-                     str(bat_path)],
+                     "cmd", "/c",
+                     str(bat_path), "--auto"],
                     cwd=str(ROOT),
                     creationflags=subprocess.CREATE_NEW_CONSOLE,
                 )
