@@ -18,7 +18,6 @@ import argparse
 import asyncio
 import json
 import os
-import shutil
 import subprocess
 import sys
 import threading
@@ -58,16 +57,19 @@ _OUTPUT_PACE_SECONDS = 0.15  # brief pause between output lines
 
 
 # ---------------------------------------------------------------------------
-# Terminal UI with fixed input area at the bottom
+# Terminal UI — prompt always redrawn after agent output
 # ---------------------------------------------------------------------------
+# Instead of ANSI scroll regions (unreliable on Windows conhost), we use a
+# simpler strategy: before printing agent output, clear the current prompt
+# line, print output, then redraw the prompt + any partially-typed input.
+# This keeps the prompt visually at the bottom at all times.
 
-class _ScrollRegionWriter:
-    """Wraps sys.stdout so that all print() calls route through the scroll region."""
+class _StdoutRedirector:
+    """Wraps sys.stdout so stray print() calls route through TerminalUI."""
 
     def __init__(self, real_stdout: Any, ui: "TerminalUI") -> None:
         self._real = real_stdout
         self._ui = ui
-        # Preserve encoding attributes for structlog / logging
         self.encoding = getattr(real_stdout, "encoding", "utf-8")
         self.errors = getattr(real_stdout, "errors", "replace")
 
@@ -79,7 +81,6 @@ class _ScrollRegionWriter:
             if stripped:
                 self._ui.write_output(stripped)
         except Exception:
-            # Fallback: write directly to real stdout if scroll region fails
             try:
                 self._real.write(text)
                 self._real.flush()
@@ -96,7 +97,6 @@ class _ScrollRegionWriter:
     def isatty(self) -> bool:
         return self._real.isatty()
 
-    # Allow reconfigure calls to pass through
     def reconfigure(self, **kwargs: Any) -> None:
         if hasattr(self._real, "reconfigure"):
             self._real.reconfigure(**kwargs)
@@ -104,150 +104,85 @@ class _ScrollRegionWriter:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._real, name)
 
-class TerminalUI:
-    """ANSI scroll-region terminal: agent output scrolls above, input stays fixed."""
 
-    SEPARATOR = "─"
-    PROMPT = "  golem> "
+class TerminalUI:
+    """Keeps the golem> prompt at the visual bottom of the terminal."""
 
     def __init__(self) -> None:
         self._lock = _output_lock
         self._enabled = False
-        self._rows = 24
-        self._cols = 80
-        self._scroll_end = 20
         self._input_buffer: list[str] = []
-        self._status_text = ""
         self._real_stdout: Any = None
+        self._prompt_visible = False  # True once prompt has been drawn
 
     def setup(self) -> None:
-        """Activate scroll-region mode.  Safe no-op if terminal doesn't support it."""
-        try:
-            size = shutil.get_terminal_size()
-            self._cols = size.columns
-            self._rows = size.lines
-        except Exception:
-            return  # can't detect size, skip
-
-        if self._rows < 10:
-            return  # terminal too small
-
-        # Only enable on Windows with msvcrt available
+        """Enable the terminal UI.  Safe no-op on non-Windows or if msvcrt missing."""
         if sys.platform != "win32":
             return
         try:
-            import msvcrt  # noqa: F401 — verify availability
+            import msvcrt  # noqa: F401
         except ImportError:
             return
 
-        try:
-            # Enable ANSI processing on Windows
-            os.system("")  # triggers VT processing
+        os.system("")  # enable VT processing on Windows
 
-            self._scroll_end = self._rows - 3
-            self._enabled = True
-
-            # Set scroll region (lines 1 through scroll_end)
-            sys.stdout.write(f"\033[1;{self._scroll_end}r")
-            # Move cursor to bottom of scroll region
-            sys.stdout.write(f"\033[{self._scroll_end};1H")
-            sys.stdout.flush()
-            self._draw_chrome()
-
-            # Redirect stdout so all print() calls go through the scroll region
-            self._real_stdout = sys.stdout
-            sys.stdout = _ScrollRegionWriter(self._real_stdout, self)  # type: ignore[assignment]
-        except Exception:
-            # If anything fails, revert to normal mode
-            self._enabled = False
-            if self._real_stdout is not None:
-                sys.stdout = self._real_stdout
-                self._real_stdout = None
+        self._real_stdout = sys.stdout
+        sys.stdout = _StdoutRedirector(self._real_stdout, self)  # type: ignore[assignment]
+        self._enabled = True
 
     def teardown(self) -> None:
-        """Reset terminal to normal."""
         if not self._enabled:
             return
-        # Restore real stdout first
         if self._real_stdout is not None:
             sys.stdout = self._real_stdout
             self._real_stdout = None
-        # Reset scroll region to full terminal
-        sys.stdout.write("\033[r")
-        # Move cursor to bottom
-        sys.stdout.write(f"\033[{self._rows};1H\n")
-        sys.stdout.flush()
         self._enabled = False
 
     @property
     def enabled(self) -> bool:
         return self._enabled
 
-    def set_status(self, text: str) -> None:
-        self._status_text = text
-        if self._enabled:
-            self._draw_chrome()
-
     @property
     def _out(self) -> Any:
-        """The real stdout handle, bypassing the scroll-region wrapper."""
         return self._real_stdout if self._real_stdout is not None else sys.stdout
 
     def write_output(self, text: str) -> None:
-        """Write one or more lines to the scrolling output area."""
+        """Print agent output, keeping the prompt at the bottom."""
         if not self._enabled:
             print(text)
             return
         out = self._out
         with self._lock:
-            # Save cursor position
-            out.write("\033[s")
-            # Move to bottom of scroll region
-            out.write(f"\033[{self._scroll_end};1H")
+            # Clear the current prompt line (if visible)
+            if self._prompt_visible:
+                out.write("\r\033[K")
+            # Print the output lines
             for line in text.split("\n"):
-                out.write(f"\n{line}")
-            # Restore cursor
-            out.write("\033[u")
+                out.write(f"{line}\n")
+            # Redraw the prompt with current input buffer
+            self._write_prompt(out)
             out.flush()
 
-    def _draw_chrome(self) -> None:
-        """Redraw the separator, status, and prompt lines."""
-        if not self._enabled:
-            return
-        out = self._out
-        sep_row = self._scroll_end + 1
-        status_row = self._scroll_end + 2
-        input_row = self._scroll_end + 3
-
-        buf = self._input_buffer_str()
-        status = self._status_text or ""
-
-        # Move out of scroll region to draw chrome
-        out.write(f"\033[{sep_row};1H\033[K")
-        out.write(f"  {C.DIM}{self.SEPARATOR * (self._cols - 4)}{C.RESET}")
-        out.write(f"\033[{status_row};1H\033[K")
-        out.write(f"  {C.DIM}{status}{C.RESET}")
-        out.write(f"\033[{input_row};1H\033[K")
-        out.write(f"  {C.CYAN}golem>{C.RESET} {buf}")
-        out.flush()
-
-    def _input_buffer_str(self) -> str:
-        return "".join(self._input_buffer)
+    def _write_prompt(self, out: Any) -> None:
+        """Draw the prompt (no newline) — caller must flush."""
+        buf = "".join(self._input_buffer)
+        out.write(f"\r\033[K  \033[36mgolem>\033[0m {buf}")
+        self._prompt_visible = True
 
     def read_input(self) -> str | None:
-        """Read a line from the fixed input area using msvcrt (Windows).
-        Returns the typed string on Enter, or raises KeyboardInterrupt / EOFError.
+        """Read a line using msvcrt char-by-char (Windows).
+        Returns typed string on Enter; raises KeyboardInterrupt / EOFError.
         """
-        if not self._enabled:
-            return None  # caller should fall back to input()
-
-        if sys.platform != "win32":
-            return None  # only msvcrt on Windows
+        if not self._enabled or sys.platform != "win32":
+            return None  # caller falls back to plain input()
 
         import msvcrt
 
         self._input_buffer.clear()
-        self._draw_chrome()
+        out = self._out
+        with self._lock:
+            self._write_prompt(out)
+            out.flush()
 
         while True:
             if not msvcrt.kbhit():
@@ -257,41 +192,35 @@ class TerminalUI:
             ch = msvcrt.getwch()
 
             if ch == "\r":  # Enter
-                result = self._input_buffer_str()
+                result = "".join(self._input_buffer)
                 self._input_buffer.clear()
-                # Echo the completed line to the output area
-                if result.strip():
-                    self.write_output(f"  {C.CYAN}golem>{C.RESET} {result}")
-                self._draw_chrome()
+                with self._lock:
+                    # Clear prompt line, echo the input as output, redraw prompt
+                    out.write("\r\033[K")
+                    if result.strip():
+                        out.write(f"  \033[36mgolem>\033[0m {result}\n")
+                    self._write_prompt(out)
+                    out.flush()
                 return result
             elif ch == "\x08":  # Backspace
                 if self._input_buffer:
                     self._input_buffer.pop()
-                    self._redraw_input_line()
+                    with self._lock:
+                        self._write_prompt(out)
+                        out.flush()
             elif ch == "\x03":  # Ctrl+C
                 raise KeyboardInterrupt
             elif ch == "\x04" or ch == "\x1a":  # Ctrl+D / Ctrl+Z
                 raise EOFError
             elif ch in ("\x00", "\xe0"):
-                # Special key prefix (arrows, function keys) — consume next byte
-                msvcrt.getwch()
+                msvcrt.getwch()  # consume special-key second byte
             elif ch == "\x1b":
-                # Escape — ignore (could be start of ANSI sequence)
-                pass
+                pass  # ignore Escape
             elif ord(ch) >= 32:
                 self._input_buffer.append(ch)
-                self._redraw_input_line()
-
-    def _redraw_input_line(self) -> None:
-        """Redraw just the input line with current buffer content."""
-        if not self._enabled:
-            return
-        out = self._out
-        input_row = self._scroll_end + 3
-        buf = self._input_buffer_str()
-        out.write(f"\033[{input_row};1H\033[K")
-        out.write(f"  {C.CYAN}golem>{C.RESET} {buf}")
-        out.flush()
+                with self._lock:
+                    self._write_prompt(out)
+                    out.flush()
 
 
 # Singleton terminal UI

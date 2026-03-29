@@ -19,6 +19,9 @@ ENV/
 # Runtime data
 data/
 
+# Agent-tunable settings (keep template in repo)
+config/settings.yaml
+
 # IDE
 .vscode/
 .idea/

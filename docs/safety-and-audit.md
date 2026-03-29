@@ -252,9 +252,9 @@ This file is **append-only** — entries are never modified or deleted by the ag
 | Field           | Description                                        |
 |-----------------|----------------------------------------------------|
 | `timestamp`     | ISO 8601 UTC timestamp                             |
-| `mutation_type` | Type of change (e.g., `node_create`, `edge_create`, `node_update`, `soul_update`, `approval_resolve`) |
+| `mutation_type` | Type of change (e.g., `node_create`, `edge_create`, `node_update`, `soul_update`, `approval_resolve`, `council_consensus`, `setting_change`) |
 | `target_id`     | ID of the affected entity                          |
-| `actor`         | Who performed the action (`agent`, `operator`, `system`) |
+| `actor`         | Who performed the action (e.g., `council_1`, `council_3`, `operator`, `system`) |
 | `evidence`      | Source evidence that justified the mutation         |
 | `diff`          | Before/after values for updates                    |
 | `metadata`      | Additional context (tool name, confidence, etc.)   |
@@ -360,7 +360,27 @@ browser_timeout_seconds: 30          # Per-request timeout
 
 ### No Arbitrary Execution
 
-AgentGolem does **not** execute arbitrary shell commands. External content
-(web pages, emails, Moltbook messages) is processed only through the structured
-tool and trust pipeline. There is no `exec()`, `eval()`, or subprocess execution
-path from untrusted content.
+AgentGolem does **not** execute arbitrary shell commands from untrusted content.
+External content (web pages, emails, Moltbook messages) is processed only through
+the structured tool and trust pipeline. There is no `exec()`, `eval()`, or
+subprocess execution path from untrusted content.
+
+> **Self-evolution exception:** Agents may modify their own source code and
+> restart via `start.bat`, but **only** with unanimous Vow-aligned consensus
+> from all six council agents. All changes are versioned and logged.
+
+---
+
+## Council Self-Evolution Safety
+
+Agents can inspect and modify their own codebase, subject to strict safeguards:
+
+| Safeguard                    | Description                                                     |
+|------------------------------|-----------------------------------------------------------------|
+| **Unanimous consensus**      | All six agents must agree before any code change is applied     |
+| **Vow-aligned reasoning**    | Every proposal must justify alignment with the Five Vows        |
+| **Version control**          | All changes are committed to git before restart                 |
+| **No GitHub push**           | Agents are not allowed to push to remote repositories           |
+| **Protected parameters**     | Sleep/wake cycle durations cannot be self-modified              |
+| **Audit trail**              | Self-evolution proposals and votes are logged in audit.jsonl    |
+| **Graceful restart**         | Agents restart by launching `start.bat` in a new terminal, then closing their own — ensuring continuity |

@@ -1,27 +1,31 @@
 # AgentGolem
 
-**A persistent autonomous agent exploring consciousness, existence, and emotion.**
+**A six-agent Ethical Council exploring consciousness, existence, and emotion.**
 
-AgentGolem is a long-running AI agent with an evolving identity (`soul.md`),
-graph-based long-term memory, Bayesian trust scoring, sleep/consolidation
-cycles, and full auditability. Its ethical anchor is rooted in the teachings
-of [Niscalajyoti](https://www.niscalajyoti.org/).
+AgentGolem is a persistent, self-evolving multi-agent system. Six agents —
+each carrying a distinct ethical vector drawn from the
+[Niscalajyoti](https://www.niscalajyoti.org/) teachings — wake together,
+read, discuss, explore the web, sleep through default-mode memory walks,
+and gradually evolve their own code through unanimous, Vow-aligned consensus.
 
 ---
 
 ## Features
 
-- **Evolving Identity** — Soul document that changes only through evidenced, versioned updates
-- **Graph Memory** — Conceptual nodes, typed edges, memory clusters in SQLite
+- **Ethical Council** — Six agents with distinct vectors (alleviating woe, graceful power, kindness, unwavering integrity, evolution, integration & balance)
+- **Chapter-by-Chapter Reading** — Agents read Niscalajyoti.org sequentially, discuss after each chapter, then revisit freely once done
+- **Evolving Identity** — Per-agent `soul.md` that changes only through evidenced, versioned updates
+- **Graph Memory** — Conceptual nodes, typed edges, memory clusters in SQLite per agent
 - **Bayesian Trust Model** — Odds-space updates with independence discount; per-source reliability
-- **Usefulness Scoring** — Bump/penalize rules tied to actual retrieval value
-- **Sleep / Default-Mode** — Bounded graph walks, merge proposals, contradiction surfacing
+- **Sleep / Default-Mode** — Bounded graph walks, merge proposals, contradiction surfacing during sleep cycles
+- **Self-Optimisation** — Agents tune their own settings (sleep/wake duration is protected)
+- **Self-Evolution** — Agents may modify their own source code with unanimous Vow-aligned consensus
+- **Web Exploration** — After completing Niscalajyoti, agents browse the web following their own interests
+- **Human Interruptibility** — `/speak` to pause, `/continue` to resume; `@Name` to address a specific agent
 - **Tool Access** — Web browsing, email, Moltbook integration (all rate-limited, audited)
-- **CLI + Dashboard** — Typer CLI for control; FastAPI + HTMX dashboard for monitoring
+- **Dashboard** — FastAPI + HTMX web dashboard for live monitoring
 - **Full Auditability** — Append-only `audit.jsonl`; every mutation traced to source evidence
-- **Human Interruptibility** — Operator can pause, resume, or override at any time
-- **Approval Gates** — Sensitive actions (email send, Moltbook post) require human approval
-- **Ethical Anchor** — Periodic ingestion of Niscalajyoti.org teachings with protected trust scores
+- **Crash Resilience** — Tick-level error isolation, crash logs to `data/logs/crash.log`
 
 ---
 
@@ -34,46 +38,44 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1       # Windows
 # source .venv/bin/activate         # Linux / macOS
 pip install -e ".[dev]"
-cp .env.example .env
-# Edit .env with your API keys
-python -m agentgolem run            # Start the agent
-python -m agentgolem status         # Check status
+cp .env.example .env               # Add your API keys
+cp config/settings.yaml.template config/settings.yaml
+```
+
+### Launch
+
+```powershell
+start.bat                          # Interactive launch (recommended)
+python run_golem.py                # Same, from shell
+python run_golem.py --auto         # Non-interactive (auto-accept defaults)
 ```
 
 ---
 
-## CLI Commands
+## Interactive Console
 
-| Command                | Description                                        |
-|------------------------|----------------------------------------------------|
-| `run`                  | Start the agent main loop                          |
-| `wake`                 | Transition agent to AWAKE mode                     |
-| `sleep`                | Transition agent to ASLEEP (consolidation) mode    |
-| `pause`                | Halt the agent; awaits further commands             |
-| `resume`               | Resume agent (set to AWAKE)                        |
-| `status`               | Show current mode, task, uptime                    |
-| `inspect-soul`         | Display current `soul.md`                          |
-| `inspect-heartbeat`    | Display current `heartbeat.md`                     |
-| `inspect-logs`         | Show recent activity log entries                   |
-| `inspect-memory`       | Browse memory graph nodes and edges                |
-| `inspect-pending`      | List pending tasks and approval requests           |
-| `approve <request-id>` | Approve a pending approval request                 |
-| `deny <request-id>`    | Deny a pending approval request                    |
-| `message <text>`       | Send a message to the agent's inbox                |
+Once the council is running, you get an interactive prompt:
 
-All commands are invoked as `python -m agentgolem <command>`.
+| Command / Input       | Description                                           |
+|-----------------------|-------------------------------------------------------|
+| `Hello, council`      | Send a message to all agents                          |
+| `@Council-1 Hello`    | Address a specific agent                              |
+| `/speak`              | Pause all autonomous work while you talk              |
+| `/continue`           | Resume autonomous work                                |
+| `/status`             | Show all agents: mode, cycle, vector, name            |
+| `/params`             | List tunable parameters                               |
+| `/set <key> <value>`  | Change a parameter at runtime                         |
+| `/help`               | Full command list                                     |
+
+Agent output shows the current wake cycle: `19:04:09 [c3|Council-1   ] 📖 Reading…`
 
 ---
 
 ## Dashboard
 
-Start the local web dashboard:
+The web dashboard starts automatically on port 6667 (or next available).
 
-```bash
-uvicorn agentgolem.dashboard.app:create_dashboard_app --factory --host 127.0.0.1 --port 8000
-```
-
-Then open <http://127.0.0.1:8000/dashboard>.
+Open <http://127.0.0.1:6667/dashboard>.
 
 **Pages:** Status · Soul · Heartbeat · Memory · Logs · Approvals
 
@@ -81,31 +83,29 @@ Then open <http://127.0.0.1:8000/dashboard>.
 
 ## Configuration
 
-### `config/settings.yaml` — Non-secret settings
+### `config/settings.yaml` — Agent-tunable settings
 
-Key settings (see the file for defaults):
+Copy `config/settings.yaml.template` → `config/settings.yaml` and customise.
+This file is **gitignored** because agents may self-optimise it at runtime.
 
-| Setting                        | Default              | Description                         |
-|--------------------------------|----------------------|-------------------------------------|
-| `data_dir`                     | `"data"`             | Runtime data directory              |
-| `awake_duration_minutes`       | `15.0`              | Minutes the agent stays awake       |
-| `sleep_duration_minutes`       | `60.0`              | Minutes the agent sleeps            |
-| `wind_down_minutes`            | `1.0`               | Wind-down grace period before sleep |
-| `soul_update_min_confidence`   | `0.7`               | Min confidence to update soul       |
-| `sleep_cycle_minutes`          | `5.0`               | Minutes between sleep cycles        |
-| `sleep_max_nodes_per_cycle`    | `100`               | Max nodes visited per sleep cycle   |
-| `sleep_max_time_ms`            | `5000`              | Time budget per sleep cycle (ms)    |
-| `llm_provider`                 | `"openai"`           | LLM backend provider                |
-| `llm_model`                    | `"gpt-5.4-mini"`    | Model name for LLM calls           |
-| `log_level`                    | `"INFO"`             | Logging verbosity                   |
-| `dry_run_mode`                 | `true`               | Dry-run all outbound communication  |
-| `approval_required_actions`    | `[email_send, …]`   | Actions requiring human approval    |
-| `niscalajyoti_revisit_hours`   | `168.0`             | Hours between anchor revisits       |
-| `browser_rate_limit_per_minute`| `10`                | Max web requests per minute         |
+Key settings (see the template for all defaults):
+
+| Setting                          | Default    | Description                                |
+|----------------------------------|------------|--------------------------------------------|
+| `agent_count`                    | `6`        | Number of council agents                   |
+| `agent_offset_minutes`           | `0.0`      | Stagger between agent wake times (0 = sync)|
+| `awake_duration_minutes`         | `10.0`     | Minutes each agent stays awake             |
+| `sleep_duration_minutes`         | `5.0`      | Minutes each agent sleeps                  |
+| `autonomous_interval_seconds`    | `15.0`     | Seconds between autonomous tick actions    |
+| `peer_checkin_interval_minutes`  | `10.0`     | How often agents check in with peers       |
+| `name_discovery_cycles`          | `4`        | Wake cycles before agents discover names   |
+| `llm_model`                      | `gpt-5`    | LLM model for agent reasoning              |
+| `niscalajyoti_revisit_hours`     | `6.0`      | Hours between NJ revisit cycles            |
+| `browser_rate_limit_per_minute`  | `10`       | Max web requests per minute                |
 
 ### `.env` — Secrets (never committed)
 
-Copy `.env.example` to `.env` and fill in real values. See `.env.example` for all keys.
+Copy `.env.example` → `.env` and fill in your API keys.
 
 ---
 
@@ -127,7 +127,27 @@ interaction/ — CLI, router, communication channels
 dashboard/   — FastAPI app, REST API, audit replay, templates
 ```
 
+The launcher (`run_golem.py`) orchestrates all six agents, the interactive
+console, the dashboard, and the shared message bus.
+
 For detailed architecture, see **[docs/architecture.md](docs/architecture.md)**.
+
+---
+
+## Memory Graph Visualiser
+
+View any agent's memory graph in the browser:
+
+```powershell
+python tools/memory_visualizer.py                      # auto-detect data dir
+python tools/memory_visualizer.py --data-dir E:\AgentGolem\Data
+```
+
+Opens <http://127.0.0.1:7777> with:
+- Agent selector (tabs for each council member)
+- Interactive force-directed graph (D3.js)
+- Filter by node type, status, text search
+- Click any node for full details, edges, sources, clusters
 
 ---
 
@@ -139,7 +159,7 @@ pytest --cov=agentgolem          # With coverage
 pytest -m "not integration"      # Skip integration tests
 ```
 
-The test suite contains 339+ tests across 32 test files.
+The test suite contains 528 tests across 32+ test files.
 
 ---
 
@@ -150,6 +170,7 @@ The test suite contains 339+ tests across 32 test files.
 - External content enters through a trust pipeline before reaching canonical memory
 - Sensitive actions require human approval gates
 - Append-only audit trail records every mutation with source evidence
+- Self-evolution requires unanimous agreement from all agents
 
 For the full security model, see **[docs/safety-and-audit.md](docs/safety-and-audit.md)**.
 

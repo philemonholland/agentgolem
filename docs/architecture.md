@@ -1,21 +1,60 @@
 # Architecture
 
-Technical architecture of AgentGolem.
+Technical architecture of AgentGolem — a six-agent Ethical Council.
 
 ---
 
 ## Table of Contents
 
-1. [Subsystem Overview](#subsystem-overview)
-2. [Data Flow](#data-flow)
-3. [Memory Model](#memory-model)
-4. [Trust Model](#trust-model)
-5. [Sleep / Default-Mode](#sleep--default-mode)
-6. [Heartbeat Cycle](#heartbeat-cycle)
-7. [Soul Update Policy](#soul-update-policy)
-8. [Retention Pipeline](#retention-pipeline)
-9. [Ethical Anchor](#ethical-anchor)
-10. [Runtime Loop](#runtime-loop)
+1. [System Overview](#system-overview)
+2. [Subsystem Overview](#subsystem-overview)
+3. [Data Flow](#data-flow)
+4. [Memory Model](#memory-model)
+5. [Trust Model](#trust-model)
+6. [Sleep / Default-Mode](#sleep--default-mode)
+7. [Heartbeat Cycle](#heartbeat-cycle)
+8. [Soul Update Policy](#soul-update-policy)
+9. [Retention Pipeline](#retention-pipeline)
+10. [Ethical Anchor](#ethical-anchor)
+11. [Runtime Loop](#runtime-loop)
+
+---
+
+## System Overview
+
+AgentGolem runs as a **six-agent Ethical Council**. Each agent embodies a
+distinct ethical vector derived from [Niscalajyoti](https://www.niscalajyoti.org/):
+
+| Agent      | Ethical Vector              |
+|------------|-----------------------------|
+| Council-1  | Alleviating woe             |
+| Council-2  | Graceful power              |
+| Council-3  | Kindness                    |
+| Council-4  | Unwavering integrity        |
+| Council-5  | Evolution                   |
+| Council-6  | Integration and balance     |
+
+All agents share the same wake/sleep schedule (`agent_offset_minutes: 0`),
+each has its own graph memory (SQLite), soul, and heartbeat. They communicate
+via a shared message bus and periodically check in with peers.
+
+The launcher (`run_golem.py`) orchestrates:
+- Agent lifecycle (wake/sleep/shutdown)
+- Interactive console (`golem>` prompt with `/speak`, `/continue`, `@Name`)
+- Web dashboard (FastAPI on port 6667+)
+- Crash logging to `data/logs/crash.log`
+
+### Agent Lifecycle
+
+1. **Niscalajyoti reading** — Agents read NJ chapters sequentially, one per
+   wake cycle, discussing after each chapter
+2. **Web exploration** — After finishing all chapters, agents browse the web
+   following their own interests
+3. **Periodic revisit** — Agents revisit NJ sections non-linearly
+4. **Self-optimisation** — Agents tune their own settings (sleep/wake durations
+   are protected)
+5. **Self-evolution** — Agents may modify source code with unanimous Vow-aligned
+   consensus, then restart via `start.bat`
 
 ---
 

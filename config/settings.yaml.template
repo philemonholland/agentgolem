@@ -1,4 +1,8 @@
-data_dir: D:\OneDrive\AgentGolem\Data
+# AgentGolem settings — copy to settings.yaml and customise.
+# Agents may self-optimise most values at runtime;
+# sleep/wake durations are protected and cannot be changed by agents.
+
+data_dir: E:\AgentGolem\Data
 awake_duration_minutes: 10.0
 sleep_duration_minutes: 5.0
 wind_down_minutes: 2.0

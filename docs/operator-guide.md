@@ -50,7 +50,7 @@ cp .env.example .env
 After installation you should be able to run:
 
 ```bash
-python -m agentgolem status
+python run_golem.py --help
 ```
 
 ---
@@ -78,77 +78,81 @@ control (listed in `.gitignore`). Copy `.env.example` as a starting point.
 
 \* Required only if the corresponding feature is enabled in `settings.yaml`.
 
-### `config/settings.yaml` — Non-Secret Settings
+### `config/settings.yaml` — Agent-Tunable Settings
 
-All non-secret runtime configuration lives here. The file ships with sensible
-defaults; override only what you need.
+Copy `config/settings.yaml.template` → `config/settings.yaml` and customise.
+This file is **gitignored** because agents may self-optimise it at runtime
+(sleep/wake durations are protected and cannot be changed by agents).
 
 ```yaml
-# Runtime data location (relative to project root)
-data_dir: "data"
+data_dir: E:\AgentGolem\Data          # Runtime data location
+
+# --- Council ---
+agent_count: 6                         # Number of council agents
+agent_offset_minutes: 0.0              # Stagger between agent wake times (0 = sync)
+autonomous_interval_seconds: 15.0      # Seconds between autonomous tick actions
+name_discovery_cycles: 4               # Wake cycles before agents discover names
+peer_checkin_interval_minutes: 10.0    # How often agents check in with peers
 
 # --- Identity ---
-awake_duration_minutes: 15.0          # Minutes the agent stays awake
-sleep_duration_minutes: 60.0          # Minutes the agent sleeps
-wind_down_minutes: 1.0                # Grace period before sleeping
-soul_update_min_confidence: 0.7       # Minimum confidence to accept a soul change
+awake_duration_minutes: 10.0           # Minutes each agent stays awake
+sleep_duration_minutes: 5.0            # Minutes each agent sleeps
+wind_down_minutes: 2.0                 # Grace period before sleeping
+soul_update_min_confidence: 0.7        # Minimum confidence to accept a soul change
 
 # --- Sleep / Default-Mode ---
-sleep_cycle_minutes: 5.0              # Minutes between consolidation cycles
-sleep_max_nodes_per_cycle: 100        # Node budget per cycle
-sleep_max_time_ms: 5000               # Wall-clock budget per cycle (ms)
+sleep_cycle_minutes: 5.0               # Minutes between consolidation cycles
+sleep_max_nodes_per_cycle: 1000        # Node budget per cycle
+sleep_max_time_ms: 5000                # Wall-clock budget per cycle (ms)
 
 # --- LLM ---
-llm_provider: "openai"                # LLM backend (currently only openai)
-llm_model: "gpt-5.4-mini"            # Model name for completions
+llm_provider: "openai"                 # LLM backend (currently only openai)
+llm_model: "gpt-5"                     # Model name for completions
 
 # --- Logging ---
-log_level: "INFO"                     # DEBUG | INFO | WARNING | ERROR
+log_level: "INFO"                      # DEBUG | INFO | WARNING | ERROR
 
 # --- Communication ---
-email_enabled: false                  # Enable email tool
-moltbook_enabled: false               # Enable Moltbook tool
-dry_run_mode: true                    # If true, outbound actions are simulated
-approval_required_actions:            # Actions that need human approval
+email_enabled: false                   # Enable email tool
+moltbook_enabled: false                # Enable Moltbook tool
+dry_run_mode: false                    # If true, outbound actions are simulated
+approval_required_actions:             # Actions that need human approval
   - email_send
   - moltbook_send
 
 # --- Niscalajyoti Ethical Anchor ---
-niscalajyoti_revisit_hours: 168.0     # How often to re-ingest (168 h = weekly)
+niscalajyoti_revisit_hours: 6.0        # Hours between NJ revisit cycles
 
 # --- Retention ---
-retention_archive_days: 30            # Days before archiving inactive nodes
-retention_purge_days: 90              # Days before purging archived nodes
-retention_min_trust_useful: 0.1       # Floor trust_useful to keep a node
-retention_min_centrality: 0.05        # Floor centrality to keep a node
-retention_promote_min_accesses: 10    # Accesses needed to promote a node
+retention_archive_days: 5              # Days before archiving inactive nodes
+retention_purge_days: 30               # Days before purging archived nodes
+retention_min_trust_useful: 0.1
+retention_min_centrality: 0.05
+retention_promote_min_accesses: 10
 retention_promote_min_trust_useful: 0.5
 
 # --- Quarantine ---
-quarantine_emotion_threshold: 0.7     # Emotion score above this flags quarantine
-quarantine_trust_useful_threshold: 0.3 # trust_useful below this flags quarantine
+quarantine_emotion_threshold: 0.7
+quarantine_trust_useful_threshold: 0.3
 
 # --- Web Browsing ---
-browser_rate_limit_per_minute: 10     # Max HTTP requests per minute
-browser_timeout_seconds: 30           # Per-request timeout
+browser_rate_limit_per_minute: 10
+browser_timeout_seconds: 20
 ```
 
 ---
 
-## Starting the Agent
-
-```bash
-python -m agentgolem run
-```
-
-This starts the main async event loop. The agent enters **AWAKE** mode by default
-and begins processing.
-
-To run in the background (Windows):
+## Starting the Council
 
 ```powershell
-Start-Process -NoNewWindow python -ArgumentList "-m", "agentgolem", "run"
+start.bat                              # Interactive launch (recommended)
+python run_golem.py                    # Same, from shell
+python run_golem.py --auto             # Non-interactive (auto-accept defaults)
 ```
+
+The launcher starts all six Ethical Council agents, the interactive console,
+and the web dashboard. Each agent enters **AWAKE** mode and begins reading
+Niscalajyoti chapter-by-chapter, discussing with peers, and exploring.
 
 ---
 
@@ -156,8 +160,8 @@ Start-Process -NoNewWindow python -ArgumentList "-m", "agentgolem", "run"
 
 | Mode       | Behaviour                                                        |
 |------------|------------------------------------------------------------------|
-| **AWAKE**  | Actively processing tasks, ingesting inputs, responding to messages |
-| **ASLEEP** | Running sleep/consolidation cycles (graph walks, merge proposals, contradiction surfacing) |
+| **AWAKE**  | Actively reading, discussing, exploring, responding to messages  |
+| **ASLEEP** | Running default-mode network — graph walks, merge proposals, contradiction surfacing |
 | **PAUSED** | Halted. No processing. Awaits operator commands.                 |
 
 **Legal transitions:**
@@ -172,134 +176,38 @@ PAUSED →  ASLEEP
 
 ---
 
-## CLI Reference
+## Interactive Console
 
-All commands are invoked as `python -m agentgolem <command>`.
+Once the council is running, you interact through the `golem>` prompt:
 
-### `run`
+| Command / Input       | Description                                           |
+|-----------------------|-------------------------------------------------------|
+| `Hello, council`      | Send a message to all agents                          |
+| `@Council-1 Hello`    | Address a specific agent by name                      |
+| `/speak`              | Pause all autonomous work while you talk              |
+| `/continue`           | Resume autonomous work                                |
+| `/status`             | Show all agents: mode, cycle, vector, name            |
+| `/params`             | List all tunable parameters                           |
+| `/set <key> <value>`  | Change a parameter at runtime                         |
+| `/help`               | Full command list                                     |
+| `/quit`               | Shut down the council                                 |
 
-Start the agent main loop.
-
-```bash
-python -m agentgolem run
+Agent output shows the current wake cycle:
+```
+19:04:09 [c3|Council-1   ] 📖 Reading Niscalajyoti chapter 5/27…
 ```
 
-### `status`
-
-Show current mode, task, pending count, uptime.
-
-```bash
-python -m agentgolem status
-```
-
-### `wake`
-
-Transition the agent to AWAKE mode.
-
-```bash
-python -m agentgolem wake
-```
-
-### `sleep`
-
-Transition the agent to ASLEEP (consolidation) mode.
-
-```bash
-python -m agentgolem sleep
-```
-
-### `pause`
-
-Halt the agent immediately.
-
-```bash
-python -m agentgolem pause
-```
-
-### `resume`
-
-Resume a paused agent (sets mode to AWAKE).
-
-```bash
-python -m agentgolem resume
-```
-
-### `inspect-soul`
-
-Print the current `soul.md` contents.
-
-```bash
-python -m agentgolem inspect-soul
-```
-
-### `inspect-heartbeat`
-
-Print the current `heartbeat.md` contents.
-
-```bash
-python -m agentgolem inspect-heartbeat
-```
-
-### `inspect-logs`
-
-Show recent log entries. Defaults to the last 50 lines of the activity log.
-
-```bash
-python -m agentgolem inspect-logs
-python -m agentgolem inspect-logs --tail 100
-```
-
-### `inspect-memory`
-
-Browse memory graph nodes and edges.
-
-```bash
-python -m agentgolem inspect-memory
-```
-
-### `inspect-pending`
-
-List pending tasks and pending approval requests.
-
-```bash
-python -m agentgolem inspect-pending
-```
-
-### `approve <request-id>`
-
-Approve a pending approval request.
-
-```bash
-python -m agentgolem approve abc123
-```
-
-### `deny <request-id>`
-
-Deny a pending approval request.
-
-```bash
-python -m agentgolem deny abc123
-```
-
-### `message <text>`
-
-Send a message to the agent's inbox for processing.
-
-```bash
-python -m agentgolem message "What have you learned about compassion?"
-```
+> **Note:** The legacy `python -m agentgolem <command>` CLI still exists for
+> single-agent use but is not the recommended way to run the council.
 
 ---
 
 ## Dashboard
 
-### Starting the Dashboard
+The dashboard starts automatically alongside the council on port **6667**
+(or next available if in use).
 
-```bash
-uvicorn agentgolem.dashboard.app:create_dashboard_app --factory --host 127.0.0.1 --port 8000
-```
-
-Open <http://127.0.0.1:8000/dashboard> in your browser.
+Open <http://127.0.0.1:6667/dashboard> in your browser.
 
 ### Pages
 
@@ -337,10 +245,10 @@ The dashboard exposes a JSON API under `/api/`. Key endpoints:
 
 ### Check Agent Status
 
+Use `/status` in the interactive console, or via API:
+
 ```bash
-python -m agentgolem status
-# Or via API:
-curl http://127.0.0.1:8000/api/status
+curl http://127.0.0.1:6667/api/status
 ```
 
 ### Inspect Soul Evolution
@@ -394,28 +302,29 @@ trust range, and drill into individual nodes to see their edges and sources.
 
 ---
 
-## Controlling the Agent
+## Controlling the Council
 
-### Wake / Sleep / Pause / Resume
+### Pause / Resume Autonomous Work
 
-```bash
-python -m agentgolem wake      # → AWAKE
-python -m agentgolem sleep     # → ASLEEP
-python -m agentgolem pause     # → PAUSED
-python -m agentgolem resume    # → AWAKE (from PAUSED)
-```
+Use `/speak` to pause all autonomous agent work while you talk. The agents
+will still respond to your direct messages but won't take autonomous actions.
+Use `/continue` to resume.
+
+### Wake / Sleep / Pause
+
+Mode transitions happen automatically on the configured schedule. You can
+also use `/set awake_duration_minutes 20` to change durations at runtime.
 
 Or via the dashboard Status page (buttons) or API:
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/agent/pause
+curl -X POST http://127.0.0.1:6667/api/agent/pause
 ```
 
 ### Send a Message
 
-```bash
-python -m agentgolem message "Reflect on your recent contradictions."
-```
+Type directly at the `golem>` prompt, or use `@AgentName message` to target
+a specific agent.
 
 Messages are queued to the agent's inbox and processed during the next AWAKE
 cycle.
@@ -484,11 +393,9 @@ ModuleNotFoundError: No module named 'agentgolem'
 
 ### Dashboard not loading
 
-**Fix:** Ensure the agent is installed and start the dashboard separately:
-
-```bash
-uvicorn agentgolem.dashboard.app:create_dashboard_app --factory --host 127.0.0.1 --port 8000
-```
+**Fix:** The dashboard starts automatically with the council on port 6667+.
+If it's not loading, check that the council is running and try the next port
+(6668, 6669, etc.) in case of port conflicts.
 
 ### LLM API errors / timeouts
 
