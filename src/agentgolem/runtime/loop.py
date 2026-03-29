@@ -736,9 +736,10 @@ class MainLoop:
                 },
             )
 
-            # Encode chapter content + reflection into memory graph
+            # Encode summary + reflection into memory graph (not full text — too large)
             await self._encode_to_memory(
-                f"{text}\n\n--- REFLECTION ---\n{reflection}",
+                f"Chapter: {title}\n\nSummary: {summary}\n\n"
+                f"Reflection:\n{reflection}",
                 source_kind="niscalajyoti",
                 origin=url,
                 label=f"NJ Ch.{idx + 1}: {title}",
@@ -2117,7 +2118,9 @@ class MainLoop:
             kind_map = {v.value: v for v in SourceKind}
             sk = kind_map.get(source_kind, SourceKind.WEB)
             source = Source(kind=sk, origin=origin, reliability=0.9)
-            nodes = await self._memory_encoder.encode(text, source)
+            # Truncate excessively long text to avoid huge LLM prompts
+            encode_text = text[:8000] if len(text) > 8000 else text
+            nodes = await self._memory_encoder.encode(encode_text, source)
             if nodes:
                 self._emit(
                     "💾",
@@ -2128,7 +2131,8 @@ class MainLoop:
             self._logger.warning(
                 "memory_encode_error",
                 agent=self.agent_name,
-                error=str(e),
+                error=repr(e),
+                label=label,
             )
 
     async def _tick_asleep(self) -> None:

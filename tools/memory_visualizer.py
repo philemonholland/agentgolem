@@ -319,6 +319,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     <label>Search: <input type="text" id="filter-search" placeholder="text contains…" size="18"></label>
     <label>Limit: <input type="number" id="filter-limit" value="500" min="10" max="2000" style="width:60px"></label>
     <span class="btn" onclick="loadGraph()" title="Refresh">🔄 Refresh</span>
+    <span class="btn" id="live-toggle" onclick="toggleLive()" title="Auto-refresh every 5s">▶ Live</span>
     <span class="btn" onclick="fitToScreen()" title="Fit graph to screen">⊞ Fit</span>
     <span class="btn" id="labels-toggle" onclick="toggleLabels()" title="Toggle labels">Aa Labels</span>
   </div>
@@ -433,6 +434,7 @@ async function loadGraph() {
   });
   const r = await fetch('/api/graph?' + params);
   const data = await r.json();
+  lastGraphHash = `${data.stats._total_nodes}:${data.stats._total_edges}`;
   renderGraph(data);
   renderStats(data.stats);
   clearSearch();
@@ -736,6 +738,57 @@ function closeSidebar() { document.getElementById('sidebar').classList.remove('o
 function dragStart(e, d) { if (!e.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; }
 function dragging(e, d) { d.fx = e.x; d.fy = e.y; }
 function dragEnd(e, d) { if (!e.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; }
+
+// ── Live auto-refresh ──
+let liveInterval = null;
+let liveActive = false;
+let lastGraphHash = '';
+
+function toggleLive() {
+  liveActive = !liveActive;
+  const btn = document.getElementById('live-toggle');
+  if (liveActive) {
+    btn.textContent = '⏸ Live';
+    btn.classList.add('active');
+    liveRefresh();
+    liveInterval = setInterval(liveRefresh, 5000);
+  } else {
+    btn.textContent = '▶ Live';
+    btn.classList.remove('active');
+    if (liveInterval) { clearInterval(liveInterval); liveInterval = null; }
+  }
+}
+
+async function liveRefresh() {
+  if (!currentAgent) return;
+  const params = new URLSearchParams({
+    agent: currentAgent,
+    type: document.getElementById('filter-type').value,
+    status: document.getElementById('filter-status').value,
+    search: document.getElementById('filter-search').value,
+    limit: document.getElementById('filter-limit').value,
+  });
+  try {
+    const r = await fetch('/api/graph?' + params);
+    const data = await r.json();
+    const hash = `${data.stats._total_nodes}:${data.stats._total_edges}`;
+    if (hash !== lastGraphHash) {
+      lastGraphHash = hash;
+      // Preserve current zoom transform
+      const savedTransform = currentTransform;
+      renderGraph(data);
+      if (savedTransform && currentZoom) {
+        d3.select('#graph-svg').call(currentZoom.transform, savedTransform);
+      }
+      renderStats(data.stats);
+      // Flash the stats bar to signal update
+      const el = document.getElementById('stats');
+      el.style.transition = 'background 0.3s';
+      el.style.background = '#1f6feb66';
+      setTimeout(() => { el.style.background = ''; }, 800);
+    }
+  } catch (e) { /* ignore fetch errors during live mode */ }
+}
 
 // ── Filter debounce ──
 let debounceTimer;
