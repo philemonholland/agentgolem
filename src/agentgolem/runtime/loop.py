@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from agentgolem.config.secrets import Secrets
 from agentgolem.config.settings import Settings
 from agentgolem.identity.heartbeat import HeartbeatManager, HeartbeatSummary
@@ -22,6 +24,38 @@ from agentgolem.runtime.state import AgentMode, RuntimeState
 from agentgolem.sleep.consolidation import ConsolidationEngine
 from agentgolem.sleep.scheduler import SleepScheduler
 from agentgolem.sleep.walker import GraphWalker
+
+# Settings the agents are NEVER allowed to change (sleep-wake cycle)
+LOCKED_SETTINGS: frozenset[str] = frozenset({
+    "awake_duration_minutes",
+    "sleep_duration_minutes",
+    "wind_down_minutes",
+    "sleep_cycle_minutes",
+    "agent_offset_minutes",
+    "agent_count",
+    "name_discovery_cycles",
+})
+
+# Settings agents may optimise at runtime
+OPTIMIZABLE_SETTINGS: dict[str, dict[str, Any]] = {
+    "soul_update_min_confidence":       {"type": float, "min": 0.0,  "max": 1.0},
+    "sleep_max_nodes_per_cycle":        {"type": int,   "min": 10,   "max": 100_000},
+    "sleep_max_time_ms":                {"type": int,   "min": 500,  "max": 60_000},
+    "autonomous_interval_seconds":      {"type": float, "min": 5.0,  "max": 300.0},
+    "niscalajyoti_revisit_hours":       {"type": float, "min": 0.5,  "max": 720.0},
+    "retention_archive_days":           {"type": int,   "min": 1,    "max": 365},
+    "retention_purge_days":             {"type": int,   "min": 7,    "max": 3650},
+    "retention_min_trust_useful":       {"type": float, "min": 0.0,  "max": 1.0},
+    "retention_min_centrality":         {"type": float, "min": 0.0,  "max": 1.0},
+    "retention_promote_min_accesses":   {"type": int,   "min": 1,    "max": 1000},
+    "retention_promote_min_trust_useful": {"type": float, "min": 0.0, "max": 1.0},
+    "quarantine_emotion_threshold":     {"type": float, "min": 0.0,  "max": 1.0},
+    "quarantine_trust_useful_threshold": {"type": float, "min": 0.0, "max": 1.0},
+    "browser_rate_limit_per_minute":    {"type": int,   "min": 1,    "max": 120},
+    "browser_timeout_seconds":          {"type": int,   "min": 5,    "max": 120},
+    "log_level":                        {"type": str,   "choices": ["DEBUG", "INFO", "WARNING", "ERROR"]},
+    "dry_run_mode":                     {"type": bool},
+}
 
 
 class MainLoop:
@@ -41,6 +75,9 @@ class MainLoop:
         self._data_dir = settings.data_dir
         self._running = False
         self._logger = get_logger("runtime.loop")
+
+        # Load any per-agent setting overrides from previous runs
+        self._load_setting_overrides()
 
         # Agent identity
         self.agent_name = agent_name
@@ -694,7 +731,12 @@ class MainLoop:
             f"- THINK <topic> : Reflect deeply on a topic\n"
             f"- SHARE <message> : Share a thought with all peers\n"
             f"- SHARE @<agent> <message> : Message a specific peer\n"
+            f"- OPTIMIZE <setting> <value> | <reason> : Change one of "
+            f"your operational settings (see below)\n"
             f"- IDLE : Rest and observe\n\n"
+            f"Your optimizable settings (you may NOT change sleep-wake "
+            f"cycle timings):\n"
+            f"{self._get_optimizable_summary()}\n\n"
             f"Be curious. Follow threads that interest you. "
             f"Explore consciousness, ethics, and existence.\n"
             f"Respond with EXACTLY one action line."
@@ -717,7 +759,9 @@ class MainLoop:
         # Extract the first action line (LLM may be chatty)
         for line in action_line.splitlines():
             line = line.strip()
-            if line.upper().startswith(("BROWSE ", "THINK ", "SHARE ", "IDLE")):
+            if line.upper().startswith(
+                ("BROWSE ", "THINK ", "SHARE ", "OPTIMIZE ", "IDLE")
+            ):
                 action_line = line
                 break
 
@@ -734,6 +778,9 @@ class MainLoop:
         elif action_line.upper().startswith("THINK "):
             topic = action_line[6:].strip()
             await self._autonomous_think(topic)
+
+        elif action_line.upper().startswith("OPTIMIZE "):
+            await self._parse_and_optimize(action_line[9:].strip())
 
         elif action_line.upper().startswith("SHARE "):
             message = action_line[6:].strip()
@@ -825,6 +872,8 @@ class MainLoop:
                     if url.startswith("http"):
                         self._browse_queue.append(url)
                         self._emit("📌", f"Queued URL: {url}")
+                elif line.upper().startswith("OPTIMIZE "):
+                    await self._parse_and_optimize(line[9:].strip())
 
         except Exception as e:
             self._logger.error(
@@ -1122,6 +1171,190 @@ class MainLoop:
                 audit_logger=self.audit_logger,
             )
         return self._browser
+
+    # ------------------------------------------------------------------
+    # Self-optimisation
+    # ------------------------------------------------------------------
+
+    def _get_optimizable_summary(self) -> str:
+        """Return a human/LLM-readable summary of all optimizable settings."""
+        lines: list[str] = []
+        for key, meta in OPTIMIZABLE_SETTINGS.items():
+            current = getattr(self._settings, key, "?")
+            typ = meta["type"].__name__
+            constraints: list[str] = []
+            if "min" in meta:
+                constraints.append(f"min={meta['min']}")
+            if "max" in meta:
+                constraints.append(f"max={meta['max']}")
+            if "choices" in meta:
+                constraints.append(f"choices={meta['choices']}")
+            c_str = f" ({', '.join(constraints)})" if constraints else ""
+            lines.append(f"  {key} = {current}  [{typ}{c_str}]")
+        return "\n".join(lines)
+
+    async def _parse_and_optimize(self, text: str) -> None:
+        """Parse 'key value | reason' and delegate to _optimize_setting."""
+        # Format: setting_name value | reason for the change
+        if "|" in text:
+            setting_part, reason = text.split("|", 1)
+            reason = reason.strip()
+        else:
+            setting_part = text
+            reason = "(no reason given)"
+
+        parts = setting_part.strip().split(None, 1)
+        if len(parts) < 2:
+            self._emit(
+                "⚠️",
+                f"Invalid OPTIMIZE format. Expected: "
+                f"OPTIMIZE <setting> <value> | <reason>",
+            )
+            return
+
+        key, raw_value = parts[0].strip(), parts[1].strip()
+        await self._optimize_setting(key, raw_value, reason)
+
+    async def _optimize_setting(
+        self, key: str, raw_value: str, reason: str
+    ) -> None:
+        """Validate and apply a setting change proposed by the agent."""
+        # Reject locked settings
+        if key in LOCKED_SETTINGS:
+            self._emit(
+                "🔒",
+                f"BLOCKED: '{key}' is a locked sleep-wake setting "
+                f"and cannot be changed by agents.",
+            )
+            self.audit_logger.log(
+                "setting_change_blocked",
+                self.agent_name,
+                {"key": key, "attempted_value": raw_value, "reason": reason},
+            )
+            return
+
+        # Reject unknown settings
+        if key not in OPTIMIZABLE_SETTINGS:
+            self._emit("⚠️", f"Unknown optimizable setting: '{key}'")
+            return
+
+        meta = OPTIMIZABLE_SETTINGS[key]
+        old_value = getattr(self._settings, key, None)
+
+        # Parse and validate type
+        try:
+            typ = meta["type"]
+            if typ is bool:
+                value = raw_value.strip().lower() in ("true", "1", "yes", "on")
+            elif typ is int:
+                value = int(raw_value.strip())
+            elif typ is float:
+                value = float(raw_value.strip())
+            elif typ is str:
+                value = raw_value.strip()
+            else:
+                value = raw_value.strip()
+        except (ValueError, TypeError) as e:
+            self._emit(
+                "⚠️",
+                f"Invalid value '{raw_value}' for {key} "
+                f"(expected {meta['type'].__name__}): {e}",
+            )
+            return
+
+        # Range check
+        if "min" in meta and value < meta["min"]:
+            self._emit(
+                "⚠️",
+                f"Value {value} for {key} is below minimum {meta['min']}",
+            )
+            return
+        if "max" in meta and value > meta["max"]:
+            self._emit(
+                "⚠️",
+                f"Value {value} for {key} is above maximum {meta['max']}",
+            )
+            return
+        if "choices" in meta and value not in meta["choices"]:
+            self._emit(
+                "⚠️",
+                f"Value '{value}' for {key} not in {meta['choices']}",
+            )
+            return
+
+        # No-op check
+        if value == old_value:
+            self._emit("ℹ️", f"Setting '{key}' already has value {value}")
+            return
+
+        # Apply to live settings object
+        setattr(self._settings, key, value)
+
+        # Also update cached derived values that read from settings at init
+        if key == "autonomous_interval_seconds":
+            self._autonomous_interval = value
+        elif key == "browser_rate_limit_per_minute" and self._browser:
+            self._browser._rate_limit = value
+        elif key == "browser_timeout_seconds" and self._browser:
+            self._browser._timeout = value
+
+        # Persist to per-agent overrides file
+        overrides_path = self._data_dir / "settings_overrides.yaml"
+        existing: dict[str, Any] = {}
+        if overrides_path.exists():
+            with open(overrides_path, encoding="utf-8") as f:
+                existing = yaml.safe_load(f) or {}
+        existing[key] = value
+        with open(overrides_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(existing, f, default_flow_style=False)
+
+        self._emit(
+            "⚙️",
+            f"SETTING OPTIMIZED: {key}: {old_value} → {value}\n"
+            f"  Reason: {reason}",
+        )
+        self._logger.info(
+            "setting_optimized",
+            agent=self.agent_name,
+            key=key,
+            old_value=str(old_value),
+            new_value=str(value),
+            reason=reason,
+        )
+        self.audit_logger.log(
+            "setting_optimized",
+            self.agent_name,
+            {
+                "key": key,
+                "old_value": str(old_value),
+                "new_value": str(value),
+                "reason": reason,
+            },
+        )
+
+        # Share with peers so they can consider the same change
+        if self._peer_bus:
+            await self._peer_bus.broadcast(
+                self.agent_name,
+                f"I just optimized my setting '{key}' from {old_value} "
+                f"to {value}. Reason: {reason}",
+            )
+
+    def _load_setting_overrides(self) -> None:
+        """Apply per-agent setting overrides from a previous session."""
+        overrides_path = self._data_dir / "settings_overrides.yaml"
+        if not overrides_path.exists():
+            return
+        try:
+            with open(overrides_path, encoding="utf-8") as f:
+                overrides = yaml.safe_load(f) or {}
+            for key, value in overrides.items():
+                if key in LOCKED_SETTINGS:
+                    continue
+                if key in OPTIMIZABLE_SETTINGS:
+                    setattr(self._settings, key, value)
+        except Exception:
+            pass  # don't let a corrupt file block startup
 
     async def _shutdown(self) -> None:
         """Graceful shutdown."""
