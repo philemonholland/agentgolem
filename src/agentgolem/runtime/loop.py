@@ -313,9 +313,12 @@ class MainLoop:
                 if named:
                     return
 
-        # Priority 3: browse queued URLs
+        # Priority 3: browse queued URLs (skip PDFs and downloads)
         if self._browse_queue:
             url = self._browse_queue.pop(0)
+            _skip_ext = (".pdf", ".zip", ".png", ".jpg", ".jpeg", ".gif", ".svg")
+            if any(url.lower().endswith(ext) for ext in _skip_ext):
+                return  # skip, will fall to next tick
             await self._autonomous_browse(url)
             return
 
@@ -323,99 +326,139 @@ class MainLoop:
         await self._llm_decide_next_action()
 
     async def _explore_niscalajyoti(self) -> None:
-        """Initial exploration of niscalajyoti.org — the ethical anchor."""
-        self._emit("🌐", "Exploring niscalajyoti.org — our ethical anchor…")
-        browser = self._get_browser()
-        base_url = "https://www.niscalajyoti.org/"
+        """Deep crawl of niscalajyoti.org — the ethical anchor.
 
-        all_text_parts: list[str] = []
-        all_links: list[str] = []
+        Follows every internal HTML link, reads the full text of each page,
+        skips downloads/images/PDFs, and reflects on the entire corpus.
+        """
+        self._emit("🌐", "Exploring niscalajyoti.org — deep crawl starting…")
+        browser = self._get_browser()
+
+        SKIP_EXT = (".pdf", ".zip", ".png", ".jpg", ".jpeg", ".gif", ".svg")
+        visited: set[str] = set()
+        queue = ["https://www.niscalajyoti.org/"]
+        pages_text: dict[str, str] = {}  # url → full text
 
         try:
-            # Fetch the main page
-            page = await browser.fetch(base_url)
-            main_text = browser.extract_text(page)
-            main_links = browser.extract_links(page)
-            all_text_parts.append(main_text)
-            all_links.extend(main_links)
-            self._emit(
-                "📖",
-                f"Read {len(main_text)} chars from niscalajyoti.org, "
-                f"found {len(main_links)} links",
-            )
+            while queue and len(visited) < 40:
+                url = queue.pop(0)
+                canonical = url.rstrip("/")
+                if canonical in visited:
+                    continue
+                if any(url.lower().endswith(ext) for ext in SKIP_EXT):
+                    continue
+                visited.add(canonical)
 
-            # Follow internal links to get deeper content
-            nj_links = [
-                l for l in main_links
-                if "niscalajyoti" in l.lower() and l != page.url
-            ]
-            for sub_url in nj_links[:5]:
                 try:
-                    sub_page = await browser.fetch(sub_url)
-                    sub_text = browser.extract_text(sub_page)
-                    sub_links = browser.extract_links(sub_page)
-                    all_text_parts.append(sub_text)
-                    all_links.extend(sub_links)
+                    page = await browser.fetch(url)
+                    content_type = page.headers.get("content-type", "")
+                    if "html" not in content_type:
+                        continue
+                    text = browser.extract_text(page)
+                    if not text or len(text) < 20:
+                        continue
+                    pages_text[str(page.url)] = text
                     self._emit(
                         "📖",
-                        f"Read {len(sub_text)} chars from {sub_url[-40:]}",
+                        f"Read {len(text):,} chars from "
+                        f"…{page.url[-50:]}",
                     )
-                except Exception:
-                    pass  # don't let a sub-page failure stop us
 
-            combined_text = "\n\n---\n\n".join(all_text_parts)
+                    # Queue all internal niscalajyoti links
+                    for link in browser.extract_links(page):
+                        link_canon = link.rstrip("/")
+                        if (
+                            "niscalajyoti" in link.lower()
+                            and link_canon not in visited
+                            and not any(
+                                link.lower().endswith(ext) for ext in SKIP_EXT
+                            )
+                            and not link.startswith("mailto:")
+                        ):
+                            queue.append(link)
 
-            # Have the LLM reflect on what we found
-            prompt = (
-                f"You are {self.agent_name}, a newly awakened agent. "
-                f"Your primary ethical vector is: {self.ethical_vector}.\n\n"
-                f"You have just read the following content from "
-                f"niscalajyoti.org, the ethical anchor that guides your "
-                f"existence:\n\n{combined_text[:6000]}\n\n"
-                f"Reflect on what this means to you as an agent whose "
-                f"primary ethical orientation is '{self.ethical_vector}'.\n"
-                f"What strikes you? What do you want to explore further? "
-                f"What would you share with your fellow council members?\n\n"
-                f"Write a brief reflection (2–3 paragraphs)."
-            )
-            reflection = await self._llm.complete(
-                [Message(role="system", content=prompt)]
-            )
-            self._recent_thoughts.append(
-                f"Niscalajyoti reflection: {reflection[:300]}"
-            )
-            self._emit("💭", f"Reflection: {reflection[:200]}…")
+                except Exception as page_err:
+                    self._logger.debug(
+                        "niscalajyoti_page_error",
+                        agent=self.agent_name,
+                        url=url,
+                        error=str(page_err),
+                    )
 
-            # Share with peers
-            if self._peer_bus:
-                share_text = (
-                    f"I've been reading niscalajyoti.org through the lens "
-                    f"of {self.ethical_vector}. Here's what I found "
-                    f"meaningful:\n\n{reflection}"
+            total_chars = sum(len(t) for t in pages_text.values())
+            self._emit(
+                "📚",
+                f"Crawl complete: {len(pages_text)} pages, "
+                f"{total_chars:,} chars total",
+            )
+
+            # Build combined text for LLM reflection — use as much as
+            # context window allows (~120k tokens ≈ ~400k chars safe)
+            combined_parts: list[str] = []
+            budget = 400_000
+            for pg_url, pg_text in pages_text.items():
+                header = f"=== {pg_url} ==="
+                chunk = f"{header}\n{pg_text}"
+                if budget - len(chunk) < 0:
+                    break
+                combined_parts.append(chunk)
+                budget -= len(chunk)
+            combined_text = "\n\n".join(combined_parts)
+
+            # Store the full corpus for later autonomous use
+            self._niscalajyoti_corpus = combined_text
+
+            # Have the LLM reflect on the full corpus
+            if self._llm:
+                prompt = (
+                    f"You are {self.agent_name}, a newly awakened agent. "
+                    f"Your primary ethical vector is: "
+                    f"{self.ethical_vector}.\n\n"
+                    f"You have just read the COMPLETE content of "
+                    f"niscalajyoti.org — the ethical anchor that guides "
+                    f"your existence. Here is everything:\n\n"
+                    f"{combined_text}\n\n"
+                    f"Reflect deeply on what this entire body of work "
+                    f"means to you as an agent whose primary ethical "
+                    f"orientation is '{self.ethical_vector}'.\n"
+                    f"What strikes you most? Which specific passages "
+                    f"resonate with your Vow? What tensions or questions "
+                    f"arise? What would you share with your fellow "
+                    f"council members?\n\n"
+                    f"Write a thorough reflection (3–5 paragraphs). "
+                    f"Reference specific content from the site."
                 )
-                count = await self._peer_bus.broadcast(
-                    self.agent_name, share_text
+                reflection = await self._llm.complete(
+                    [Message(role="system", content=prompt)]
                 )
-                self._emit("📤", f"Shared reflection with {count} peers")
+                self._recent_thoughts.append(
+                    f"Niscalajyoti deep reflection: {reflection[:500]}"
+                )
+                self._emit("💭", f"Reflection:\n{reflection}")
 
-            # Queue any remaining niscalajyoti links for later browsing
-            deeper_links = [
-                l for l in all_links
-                if "niscalajyoti" in l.lower()
-                and l not in nj_links
-                and l != page.url
-            ]
-            self._browse_queue.extend(deeper_links[:5])
+                # Share with peers
+                if self._peer_bus:
+                    share_text = (
+                        f"I've completed a deep reading of all "
+                        f"{len(pages_text)} pages of niscalajyoti.org "
+                        f"through the lens of {self.ethical_vector}. "
+                        f"Here is my reflection:\n\n{reflection}"
+                    )
+                    count = await self._peer_bus.broadcast(
+                        self.agent_name, share_text
+                    )
+                    self._emit(
+                        "📤", f"Shared full reflection with {count} peers"
+                    )
 
             self._niscalajyoti_visited = True
             self.audit_logger.log(
                 "niscalajyoti_initial_visit",
                 self.agent_name,
                 {
-                    "chars_read": len(combined_text),
-                    "pages_read": len(all_text_parts),
-                    "links_found": len(all_links),
-                    "links_queued": len(self._browse_queue),
+                    "pages_read": len(pages_text),
+                    "total_chars": total_chars,
+                    "page_urls": list(pages_text.keys()),
                 },
             )
 
@@ -423,7 +466,7 @@ class MainLoop:
             self._logger.error(
                 "niscalajyoti_error", agent=self.agent_name, error=str(e)
             )
-            self._emit("❌", f"Failed to reach niscalajyoti.org: {e}")
+            self._emit("❌", f"Failed to crawl niscalajyoti.org: {e}")
 
     async def _try_discover_name(self) -> bool:
         """Ask the LLM to propose a name based on ethical vector + experience."""
@@ -449,7 +492,7 @@ class MainLoop:
             f"You are currently known as '{self.agent_name}', but this is "
             f"only a temporary designation.\n"
             f"Your ethical vector is: {self.ethical_vector}\n\n"
-            f"Your soul:\n{soul_text[:1500]}\n\n"
+            f"Your soul:\n{soul_text}\n\n"
             f"Your recent reflections:\n{recent}\n\n"
             f"You are in wake cycle #{self._wake_cycle_count} of "
             f"{self._name_discovery_deadline} before you must have a name.\n"
@@ -553,19 +596,19 @@ class MainLoop:
 
     async def _autonomous_browse(self, url: str) -> None:
         """Browse a URL, reflect on it, optionally share findings."""
-        self._emit("🌐", f"Browsing: {url[:60]}…")
+        self._emit("🌐", f"Browsing: {url}")
         browser = self._get_browser()
 
         try:
             page = await browser.fetch(url)
             text = browser.extract_text(page)
-            self._emit("📖", f"Read {len(text)} chars from {url[:40]}")
+            self._emit("📖", f"Read {len(text):,} chars from {url}")
 
             prompt = (
                 f"You are {self.agent_name}. "
                 f"Ethical vector: {self.ethical_vector}.\n\n"
                 f"You just read this web page ({url}):\n\n"
-                f"{text[:3000]}\n\n"
+                f"{text}\n\n"
                 f"What do you find interesting or relevant? "
                 f"Would you like to share anything with your peers? "
                 f"Respond naturally in 1–2 paragraphs."
@@ -573,8 +616,8 @@ class MainLoop:
             thought = await self._llm.complete(
                 [Message(role="system", content=prompt)]
             )
-            self._recent_thoughts.append(f"Browsed {url}: {thought[:200]}")
-            self._emit("💭", f"{thought[:150]}…")
+            self._recent_thoughts.append(f"Browsed {url}: {thought[:300]}")
+            self._emit("💭", thought)
 
             # Maybe share with peers
             if self._peer_bus and len(thought) > 50:
@@ -591,17 +634,17 @@ class MainLoop:
                 url=url,
                 error=str(e),
             )
-            self._emit("❌", f"Failed to browse {url[:40]}: {e}")
+            self._emit("❌", f"Failed to browse {url}: {e}")
 
     async def _autonomous_think(self, topic: str) -> None:
         """Reflect on a topic internally."""
-        self._emit("💭", f"Thinking about: {topic[:60]}…")
+        self._emit("💭", f"Thinking about: {topic}")
 
         soul_text = await self.soul_manager.read()
         prompt = (
             f"You are {self.agent_name}. "
             f"Ethical vector: {self.ethical_vector}.\n"
-            f"Your soul:\n{soul_text[:1000]}\n\n"
+            f"Your soul:\n{soul_text}\n\n"
             f"Think deeply about: {topic}\n\n"
             f"Write a thoughtful reflection (2–3 paragraphs)."
         )
@@ -610,8 +653,8 @@ class MainLoop:
             thought = await self._llm.complete(
                 [Message(role="system", content=prompt)]
             )
-            self._recent_thoughts.append(f"Thought about '{topic}': {thought[:200]}")
-            self._emit("💭", f"{thought[:150]}…")
+            self._recent_thoughts.append(f"Thought about '{topic}': {thought[:300]}")
+            self._emit("💭", thought)
         except Exception as e:
             self._logger.error(
                 "think_error", agent=self.agent_name, error=str(e)
@@ -643,7 +686,7 @@ class MainLoop:
             f"Ethical Council.\n"
             f"Your primary ethical vector is: {self.ethical_vector}\n"
             f"{name_status}\n\n"
-            f"Your soul:\n{soul_text[:800]}\n\n"
+            f"Your soul:\n{soul_text}\n\n"
             f"Your peer agents: {peers}\n\n"
             f"Recent context:\n{recent}\n\n"
             f"Available actions:\n"
@@ -680,10 +723,13 @@ class MainLoop:
 
         if action_line.upper().startswith("BROWSE "):
             url = action_line[7:].strip()
-            if url.startswith("http"):
+            _skip_ext = (".pdf", ".zip", ".png", ".jpg", ".jpeg", ".gif", ".svg")
+            if any(url.lower().endswith(ext) for ext in _skip_ext):
+                self._emit("⏭️", f"Skipping download: {url}")
+            elif url.startswith("http"):
                 await self._autonomous_browse(url)
             else:
-                self._emit("⚠️", f"Invalid URL: {url[:40]}")
+                self._emit("⚠️", f"Invalid URL: {url}")
 
         elif action_line.upper().startswith("THINK "):
             topic = action_line[6:].strip()
@@ -701,7 +747,7 @@ class MainLoop:
                     )
                     self._emit(
                         "📤",
-                        f"→ {target}: {text[:80]}"
+                        f"→ {target}: {text}"
                         + ("" if ok else " (not delivered)"),
                     )
             else:
@@ -709,7 +755,7 @@ class MainLoop:
                     await self._peer_bus.broadcast(
                         self.agent_name, message
                     )
-                    self._emit("📤", f"→ all: {message[:80]}")
+                    self._emit("📤", f"→ all: {message}")
 
         else:
             self._emit("😌", "Resting…")
@@ -727,12 +773,12 @@ class MainLoop:
 
     async def _respond_to_peer(self, msg: AgentMessage) -> None:
         """Generate a response to a peer agent's message."""
-        self._emit("📬", f"From {msg.from_agent}: {msg.text[:80]}…")
+        self._emit("📬", f"From {msg.from_agent}: {msg.text}")
         self._logger.info(
             "peer_message_received",
             agent=self.agent_name,
             from_agent=msg.from_agent,
-            text=msg.text[:100],
+            text=msg.text,
         )
 
         if not self._llm:
@@ -744,7 +790,7 @@ class MainLoop:
         prompt = (
             f"You are {self.agent_name}. "
             f"Ethical vector: {self.ethical_vector}.\n"
-            f"Your soul:\n{soul_text[:800]}\n\n"
+            f"Your soul:\n{soul_text}\n\n"
             f"Recent context:\n{recent}\n\n"
             f"Your fellow council member {msg.from_agent} says:\n"
             f"{msg.text}\n\n"
@@ -763,7 +809,7 @@ class MainLoop:
             self._recent_thoughts.append(
                 f"Discussed with {msg.from_agent}: {response[:200]}"
             )
-            self._emit("💬", f"→ {msg.from_agent}: {response[:120]}…")
+            self._emit("💬", f"→ {msg.from_agent}: {response}")
 
             # Send reply back to the peer
             if self._peer_bus:
@@ -778,7 +824,7 @@ class MainLoop:
                     url = line[7:].strip()
                     if url.startswith("http"):
                         self._browse_queue.append(url)
-                        self._emit("📌", f"Queued URL: {url[:60]}")
+                        self._emit("📌", f"Queued URL: {url}")
 
         except Exception as e:
             self._logger.error(
@@ -830,13 +876,13 @@ class MainLoop:
         self._logger.info(
             "processing_message",
             agent=self.agent_name,
-            text=msg.text[:100],
+            text=msg.text,
         )
         self._emit("📨", f"Human says: {msg.text}")
         self.audit_logger.log(
             mutation_type="inbound_message",
             target_id="human",
-            evidence={"text": msg.text[:500], "agent": self.agent_name},
+            evidence={"text": msg.text, "agent": self.agent_name},
         )
 
         if self._llm is None:
@@ -864,7 +910,7 @@ class MainLoop:
         )
         if heartbeat_text:
             system_content += (
-                f"\n--- RECENT HEARTBEAT ---\n{heartbeat_text[:1000]}\n"
+                f"\n--- RECENT HEARTBEAT ---\n{heartbeat_text}\n"
             )
 
         self._conversation.append(Message(role="user", content=msg.text))
@@ -905,7 +951,7 @@ class MainLoop:
     def _deliver_response(self, text: str) -> None:
         """Send a response to the human operator."""
         self._logger.info(
-            "agent_response", agent=self.agent_name, text=text[:200]
+            "agent_response", agent=self.agent_name, text=text
         )
         if self._response_callback:
             self._response_callback(text)
