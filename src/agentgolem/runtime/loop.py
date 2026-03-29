@@ -297,17 +297,12 @@ class MainLoop:
         # Generate initial heartbeat if this is a fresh agent
         await self._maybe_generate_initial_heartbeat()
 
-        # Start in AWAKE mode
+        # Always start in AWAKE mode (ignore persisted state from previous run)
         now = datetime.now(timezone.utc)
-        if self.runtime_state.mode == AgentMode.PAUSED:
+        if self.runtime_state.mode != AgentMode.AWAKE:
             await self.runtime_state.transition(AgentMode.AWAKE)
-            self._awoke_at = now
-            self._winding_down = False
-        elif self.runtime_state.mode == AgentMode.AWAKE:
-            self._awoke_at = now
-            self._winding_down = False
-        elif self.runtime_state.mode == AgentMode.ASLEEP:
-            self._fell_asleep_at = now
+        self._awoke_at = now
+        self._winding_down = False
 
         self._wake_cycle_count = 1  # first cycle
 
@@ -323,7 +318,20 @@ class MainLoop:
 
         try:
             while self._running:
-                await self._tick()
+                try:
+                    await self._tick()
+                except asyncio.CancelledError:
+                    raise  # propagate cancellation
+                except Exception as exc:
+                    self._logger.error(
+                        "tick_error",
+                        agent=self.agent_name,
+                        error=str(exc),
+                        exc_info=True,
+                    )
+                    self._emit("⚠️", f"Tick error: {exc}")
+                    await asyncio.sleep(5.0)  # back off before retrying
+                    continue
                 # Check for evolution restart request (own or shared)
                 if self._evolution_restart_requested:
                     self._emit(
