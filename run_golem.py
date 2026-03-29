@@ -1407,9 +1407,10 @@ async def run_agent(store: ParamStore) -> bool:
         )
 
         # Wire colour-coded callbacks
-        def _make_response_cb(a_color: str, a_name_ref: list):
+        def _make_response_cb(a_color: str, a_name_ref: list, a_loop: Any):
             def cb(text: str) -> None:
-                line = f"\n  {a_color}🧠 {a_name_ref[0]}:{C.RESET} {text}\n"
+                cyc = getattr(a_loop, "_wake_cycle_count", 0)
+                line = f"\n  {a_color}🧠 [c{cyc}] {a_name_ref[0]}:{C.RESET} {text}\n"
                 if _terminal_ui.enabled:
                     _terminal_ui.write_output(line)
                     time.sleep(_OUTPUT_PACE_SECONDS)
@@ -1419,10 +1420,11 @@ async def run_agent(store: ParamStore) -> bool:
                         time.sleep(_OUTPUT_PACE_SECONDS)
             return cb
 
-        def _make_activity_cb(a_color: str, a_id_ref: list):
+        def _make_activity_cb(a_color: str, a_id_ref: list, a_loop: Any):
             def cb(icon: str, text: str) -> None:
                 ts = datetime.now().strftime("%H:%M:%S")
-                line = f"  {C.DIM}{ts}{C.RESET} {a_color}[{a_id_ref[0]:<12}]{C.RESET} {icon} {text}"
+                cyc = getattr(a_loop, "_wake_cycle_count", 0)
+                line = f"  {C.DIM}{ts}{C.RESET} {a_color}[c{cyc}|{a_id_ref[0]:<12}]{C.RESET} {icon} {text}"
                 if _terminal_ui.enabled:
                     _terminal_ui.write_output(line)
                     time.sleep(_OUTPUT_PACE_SECONDS)
@@ -1434,8 +1436,8 @@ async def run_agent(store: ParamStore) -> bool:
 
         # Use a mutable list so the closure picks up name changes
         name_ref = [agent_id]
-        loop._response_callback = _make_response_cb(color, name_ref)
-        loop._activity_callback = _make_activity_cb(color, name_ref)
+        loop._response_callback = _make_response_cb(color, name_ref, loop)
+        loop._activity_callback = _make_activity_cb(color, name_ref, loop)
         # Store name_ref on the loop so we can update it if agent renames
         loop._console_name_ref = name_ref  # type: ignore[attr-defined]
 
