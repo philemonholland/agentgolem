@@ -136,7 +136,7 @@ For detailed architecture, see **[docs/architecture.md](docs/architecture.md)**.
 
 ## Memory Graph Visualiser
 
-View any agent's memory graph in the browser:
+Double-click **`visualize.bat`** or run manually:
 
 ```powershell
 python tools/memory_visualizer.py                      # auto-detect data dir
@@ -148,6 +148,17 @@ Opens <http://127.0.0.1:7777> with:
 - Interactive force-directed graph (D3.js)
 - Filter by node type, status, text search
 - Click any node for full details, edges, sources, clusters
+
+---
+
+## Reset Agents
+
+Double-click **`reset.bat`** to wipe agent state and start fresh:
+
+- **Full reset** — clears memory graphs, reading progress, logs, heartbeats
+- **Soft reset** — clears progress & logs but keeps memory graphs intact
+
+`soul.md` files (agent personality) are always preserved.
 
 ---
 
