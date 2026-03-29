@@ -6,6 +6,11 @@ cd /d "%~dp0"
 if exist ".venv\Scripts\activate.bat" (
     call .venv\Scripts\activate.bat
     python run_golem.py %*
+    if errorlevel 1 (
+        echo.
+        echo [AgentGolem exited with an error. Check data\logs\crash.log]
+        pause
+    )
 ) else (
     echo [ERROR] Virtual environment not found.
     echo Run:  py -3.12 -m venv .venv

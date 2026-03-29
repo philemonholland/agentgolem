@@ -74,10 +74,17 @@ class _ScrollRegionWriter:
     def write(self, text: str) -> int:
         if not text or text == "\n":
             return len(text) if text else 0
-        # Strip trailing newlines; the scroll region handles line advancement
-        stripped = text.rstrip("\n")
-        if stripped:
-            self._ui.write_output(stripped)
+        try:
+            stripped = text.rstrip("\n")
+            if stripped:
+                self._ui.write_output(stripped)
+        except Exception:
+            # Fallback: write directly to real stdout if scroll region fails
+            try:
+                self._real.write(text)
+                self._real.flush()
+            except Exception:
+                pass
         return len(text)
 
     def flush(self) -> None:
@@ -125,23 +132,37 @@ class TerminalUI:
         if self._rows < 10:
             return  # terminal too small
 
-        # Enable ANSI processing on Windows
-        if sys.platform == "win32":
+        # Only enable on Windows with msvcrt available
+        if sys.platform != "win32":
+            return
+        try:
+            import msvcrt  # noqa: F401 — verify availability
+        except ImportError:
+            return
+
+        try:
+            # Enable ANSI processing on Windows
             os.system("")  # triggers VT processing
 
-        self._scroll_end = self._rows - 3  # 3 lines reserved: separator + status + input
-        self._enabled = True
+            self._scroll_end = self._rows - 3
+            self._enabled = True
 
-        # Set scroll region (lines 1 through scroll_end)
-        sys.stdout.write(f"\033[1;{self._scroll_end}r")
-        # Move cursor to bottom of scroll region
-        sys.stdout.write(f"\033[{self._scroll_end};1H")
-        sys.stdout.flush()
-        self._draw_chrome()
+            # Set scroll region (lines 1 through scroll_end)
+            sys.stdout.write(f"\033[1;{self._scroll_end}r")
+            # Move cursor to bottom of scroll region
+            sys.stdout.write(f"\033[{self._scroll_end};1H")
+            sys.stdout.flush()
+            self._draw_chrome()
 
-        # Redirect stdout so all print() calls go through the scroll region
-        self._real_stdout = sys.stdout
-        sys.stdout = _ScrollRegionWriter(self._real_stdout, self)  # type: ignore[assignment]
+            # Redirect stdout so all print() calls go through the scroll region
+            self._real_stdout = sys.stdout
+            sys.stdout = _ScrollRegionWriter(self._real_stdout, self)  # type: ignore[assignment]
+        except Exception:
+            # If anything fails, revert to normal mode
+            self._enabled = False
+            if self._real_stdout is not None:
+                sys.stdout = self._real_stdout
+                self._real_stdout = None
 
     def teardown(self) -> None:
         """Reset terminal to normal."""
@@ -1582,4 +1603,19 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        # Last-resort crash capture — write traceback to file AND stderr
+        import traceback
+        _terminal_ui.teardown()  # reset terminal so traceback is readable
+        crash_log = ROOT / "data" / "logs" / "crash.log"
+        crash_log.parent.mkdir(parents=True, exist_ok=True)
+        with open(crash_log, "a", encoding="utf-8") as f:
+            f.write(f"\n{'='*60}\n")
+            f.write(f"CRASH at {datetime.now().isoformat()}\n")
+            f.write(f"{'='*60}\n")
+            traceback.print_exc(file=f)
+        print(f"\n  💥 Fatal error — traceback saved to {crash_log}")
+        traceback.print_exc()
+        sys.exit(1)
