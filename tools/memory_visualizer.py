@@ -52,7 +52,8 @@ def _find_agent_dbs(data_dir: Path) -> dict[str, Path]:
 
 def _query_db(db_path: Path, sql: str, params: tuple = ()) -> list[dict]:
     """Run a read-only query and return rows as dicts."""
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA query_only = ON")
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(sql, params).fetchall()

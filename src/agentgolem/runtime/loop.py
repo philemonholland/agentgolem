@@ -246,6 +246,8 @@ class MainLoop:
         )
         self._graph_walker: GraphWalker | None = None
         self._consolidation_engine: ConsolidationEngine | None = None
+        self._memory_store: Any = None
+        self._memory_encoder: Any = None
 
         # LLM client and conversation
         self._llm: OpenAIClient | None = None
@@ -734,6 +736,14 @@ class MainLoop:
                 },
             )
 
+            # Encode chapter content + reflection into memory graph
+            await self._encode_to_memory(
+                f"{text}\n\n--- REFLECTION ---\n{reflection}",
+                source_kind="niscalajyoti",
+                origin=url,
+                label=f"NJ Ch.{idx + 1}: {title}",
+            )
+
         except Exception as e:
             self._logger.error(
                 "niscalajyoti_chapter_error",
@@ -795,6 +805,14 @@ class MainLoop:
 
             self._recent_thoughts.append(
                 f"Discussed ch.{idx + 1} '{title}' with peers"
+            )
+
+            # Encode discussion into memory graph
+            await self._encode_to_memory(
+                discussion,
+                source_kind="niscalajyoti",
+                origin=f"discussion:ch{idx + 1}",
+                label=f"NJ Discussion Ch.{idx + 1}: {title}",
             )
 
         except Exception as e:
@@ -1797,6 +1815,15 @@ class MainLoop:
             )
             self._emit("💬", f"→ {msg.from_agent}: {response}")
 
+            # Encode peer dialogue into memory graph
+            dialogue = f"From {msg.from_agent}:\n{msg.text}\n\nMy response:\n{response}"
+            await self._encode_to_memory(
+                dialogue,
+                source_kind="human",
+                origin=f"peer:{msg.from_agent}",
+                label=f"Dialogue with {msg.from_agent}",
+            )
+
             # Send reply back to the peer
             if self._peer_bus:
                 await self._peer_bus.send(
@@ -2056,14 +2083,52 @@ class MainLoop:
 
     def set_memory_store(self, store: object) -> None:
         """Wire memory store after DB init (avoids circular init)."""
+        from agentgolem.memory.encoding import MemoryEncoder
         from agentgolem.memory.store import SQLiteMemoryStore
 
         if isinstance(store, SQLiteMemoryStore):
+            self._memory_store = store
             self._graph_walker = GraphWalker(store, self.runtime_state)
             self._consolidation_engine = ConsolidationEngine(
                 store=store,
                 audit=self.audit_logger,
                 state_path=self._data_dir / "state",
+            )
+            if self._llm:
+                self._memory_encoder = MemoryEncoder(
+                    store=store,
+                    llm=self._llm,
+                    audit_logger=self.audit_logger,
+                )
+
+    async def _encode_to_memory(
+        self,
+        text: str,
+        source_kind: str = "web",
+        origin: str = "",
+        label: str = "",
+    ) -> None:
+        """Encode text into the memory graph via MemoryEncoder."""
+        if not self._memory_encoder:
+            return
+        try:
+            from agentgolem.memory.models import Source, SourceKind
+
+            kind_map = {v.value: v for v in SourceKind}
+            sk = kind_map.get(source_kind, SourceKind.WEB)
+            source = Source(kind=sk, origin=origin, reliability=0.9)
+            nodes = await self._memory_encoder.encode(text, source)
+            if nodes:
+                self._emit(
+                    "💾",
+                    f"Encoded {len(nodes)} memory nodes"
+                    + (f" — {label}" if label else ""),
+                )
+        except Exception as e:
+            self._logger.warning(
+                "memory_encode_error",
+                agent=self.agent_name,
+                error=str(e),
             )
 
     async def _tick_asleep(self) -> None:
