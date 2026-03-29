@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
+import subprocess
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -116,6 +119,29 @@ NISCALAJYOTI_CHAPTERS: list[dict[str, str]] = [
      "title": "Vow of Integrity — Deep Dive"},
 ]
 
+# Repository root for codebase inspection
+REPO_ROOT: Path = Path(__file__).resolve().parents[3]
+
+# Paths agents are NOT allowed to modify (security)
+PROTECTED_PATHS: frozenset[str] = frozenset({
+    ".env",
+    ".git",
+    "config/secrets.yaml",
+    "__pycache__",
+})
+
+# Extensions that are safe to read/edit
+INSPECTABLE_EXTENSIONS: frozenset[str] = frozenset({
+    ".py", ".md", ".yaml", ".yml", ".toml", ".txt", ".bat",
+    ".html", ".css", ".js", ".json", ".cfg", ".ini", ".sh",
+})
+
+# Extensions agents are allowed to edit via EVOLVE
+EDITABLE_EXTENSIONS: frozenset[str] = frozenset({
+    ".py", ".md", ".yaml", ".yml", ".toml", ".txt", ".bat",
+    ".html", ".css", ".js", ".json",
+})
+
 
 class MainLoop:
     """One autonomous agent.  Multiple MainLoops share an InterAgentBus."""
@@ -168,6 +194,12 @@ class MainLoop:
         )
         self._last_peer_checkin: datetime | None = None
         self._browser: Any = None  # lazy WebBrowser
+
+        # Evolution / self-modification
+        self._evolution_restart_requested = False
+        self._evolution_shutdown_event: asyncio.Event | None = None
+        self._proposals_dir = self._data_dir.parent / "evolution_proposals"
+        self._proposals_dir.mkdir(parents=True, exist_ok=True)
 
         # Load Niscalajyoti reading progress from disk
         self._nj_state_path = self._data_dir / "niscalajyoti_reading.json"
@@ -288,6 +320,25 @@ class MainLoop:
         try:
             while self._running:
                 await self._tick()
+                # Check for evolution restart request (own or shared)
+                if self._evolution_restart_requested:
+                    self._emit(
+                        "🧬",
+                        "Evolution applied — initiating restart…",
+                    )
+                    if self._evolution_shutdown_event:
+                        self._evolution_shutdown_event.set()
+                    self._running = False
+                    break
+                # Check if another agent triggered evolution restart
+                if (
+                    self._evolution_shutdown_event
+                    and self._evolution_shutdown_event.is_set()
+                ):
+                    self._emit("🧬", "Evolution restart signal received…")
+                    self._evolution_restart_requested = True
+                    self._running = False
+                    break
                 await asyncio.sleep(0.1)
         except asyncio.CancelledError:
             self._logger.info("agent_cancelled", agent=self.agent_name)
@@ -403,7 +454,9 @@ class MainLoop:
         4. Browse queued URLs
         5. Periodic Niscalajyoti revisit (non-linear, agent's choice)
         6. Periodic peer check-in (when exploring independently)
-        7. LLM decides: browse web, think, share, optimize
+        7. Vote on pending evolution proposals
+        8. Apply approved evolution proposals
+        9. LLM decides: browse web, think, share, optimize, inspect, evolve
         """
         if not self._llm:
             return
@@ -495,7 +548,19 @@ class MainLoop:
                 await self._peer_checkin()
                 return
 
-        # Priority 7: LLM decides what to do next (free exploration)
+        # Priority 7: vote on any pending evolution proposals
+        if self._niscalajyoti_reading_complete:
+            voted = await self._vote_on_pending_proposals()
+            if voted:
+                return
+
+        # Priority 8: apply any fully-approved evolution proposals
+        if self._niscalajyoti_reading_complete:
+            applied = await self._apply_approved_proposals()
+            if applied:
+                return
+
+        # Priority 9: LLM decides what to do next (free exploration)
         await self._llm_decide_next_action()
 
     # ------------------------------------------------------------------
@@ -830,6 +895,498 @@ class MainLoop:
                 error=str(e),
             )
 
+    # ------------------------------------------------------------------
+    # Codebase inspection
+    # ------------------------------------------------------------------
+
+    def _validate_repo_path(self, rel_path: str) -> Path | None:
+        """Validate and resolve a path within the repo. Returns None if unsafe."""
+        try:
+            clean = rel_path.replace("\\", "/").strip("/")
+            resolved = (REPO_ROOT / clean).resolve()
+            if not str(resolved).startswith(str(REPO_ROOT)):
+                return None  # path traversal attempt
+            for protected in PROTECTED_PATHS:
+                if clean == protected or clean.startswith(protected + "/"):
+                    return None
+            return resolved
+        except (ValueError, OSError):
+            return None
+
+    async def _inspect_codebase(self, rel_path: str) -> None:
+        """Read a file or list a directory within the repo."""
+        if not self._niscalajyoti_reading_complete:
+            self._emit(
+                "⚠️",
+                "Codebase access is only available after completing "
+                "Niscalajyoti reading.",
+            )
+            return
+
+        resolved = self._validate_repo_path(rel_path)
+        if resolved is None:
+            self._emit("🔒", f"Access denied: '{rel_path}'")
+            self.audit_logger.log(
+                "inspect_blocked",
+                self.agent_name,
+                {"path": rel_path, "reason": "protected or invalid path"},
+            )
+            return
+
+        if not resolved.exists():
+            self._emit("⚠️", f"Path not found: {rel_path}")
+            return
+
+        if resolved.is_dir():
+            entries = sorted(resolved.iterdir())
+            listing = []
+            for entry in entries[:100]:
+                rel = entry.relative_to(REPO_ROOT)
+                kind = "📁" if entry.is_dir() else "📄"
+                listing.append(f"  {kind} {rel}")
+            output = f"Directory: {rel_path}\n" + "\n".join(listing)
+            self._emit("🔍", output)
+            self._recent_thoughts.append(
+                f"Inspected directory {rel_path}: {len(entries)} entries"
+            )
+            return
+
+        # File — check extension
+        if resolved.suffix.lower() not in INSPECTABLE_EXTENSIONS:
+            self._emit(
+                "⚠️", f"Cannot inspect binary file: {rel_path}"
+            )
+            return
+
+        try:
+            content = resolved.read_text(encoding="utf-8", errors="replace")
+            self._emit(
+                "🔍",
+                f"File: {rel_path} ({len(content):,} chars)\n{content}",
+            )
+
+            # Ask LLM to reflect on what it sees
+            if self._llm:
+                soul_text = await self.soul_manager.read()
+                prompt = (
+                    f"You are {self.agent_name}. "
+                    f"Ethical vector: {self.ethical_vector}.\n"
+                    f"Your soul:\n{soul_text}\n\n"
+                    f"You just inspected your own source code at "
+                    f"'{rel_path}':\n\n{content}\n\n"
+                    f"What do you notice? What interests you? "
+                    f"Any ideas for improvement? Think through the "
+                    f"lens of your Vow."
+                )
+                thought = await self._llm.complete(
+                    [Message(role="system", content=prompt)]
+                )
+                self._emit("💭", thought)
+                self._recent_thoughts.append(
+                    f"Inspected {rel_path}: {thought[:300]}"
+                )
+
+            self.audit_logger.log(
+                "codebase_inspected",
+                self.agent_name,
+                {"path": rel_path, "size": len(content)},
+            )
+        except Exception as e:
+            self._emit("❌", f"Error reading {rel_path}: {e}")
+
+    # ------------------------------------------------------------------
+    # Self-evolution: propose, vote, apply
+    # ------------------------------------------------------------------
+
+    async def _propose_evolution(
+        self,
+        file_path: str,
+        description: str,
+        old_content: str,
+        new_content: str,
+    ) -> None:
+        """Create an evolution proposal requiring unanimous council approval."""
+        if not self._niscalajyoti_reading_complete:
+            self._emit(
+                "⚠️",
+                "Evolution proposals are only available after completing "
+                "Niscalajyoti reading.",
+            )
+            return
+
+        # Validate the target file
+        resolved = self._validate_repo_path(file_path)
+        if resolved is None:
+            self._emit("🔒", f"Cannot modify protected path: '{file_path}'")
+            return
+
+        if not resolved.exists():
+            self._emit("⚠️", f"File not found: {file_path}")
+            return
+
+        if resolved.suffix.lower() not in EDITABLE_EXTENSIONS:
+            self._emit("⚠️", f"Cannot edit file type: {resolved.suffix}")
+            return
+
+        # Verify old_content exists in the file
+        try:
+            current = resolved.read_text(encoding="utf-8")
+        except Exception as e:
+            self._emit("❌", f"Cannot read file: {e}")
+            return
+
+        if old_content and old_content not in current:
+            self._emit(
+                "⚠️",
+                f"The specified old content was not found in {file_path}. "
+                f"Proposal rejected — please INSPECT the file first.",
+            )
+            return
+
+        # Block git push anywhere in new content
+        if "git push" in new_content.lower() or "git push" in description.lower():
+            self._emit(
+                "🔒",
+                "BLOCKED: Evolution proposals must not contain git push. "
+                "Agents are not allowed to upload to GitHub.",
+            )
+            self.audit_logger.log(
+                "evolution_blocked_git_push",
+                self.agent_name,
+                {"file_path": file_path, "description": description},
+            )
+            return
+
+        # Create proposal
+        proposal_id = f"evo_{uuid.uuid4().hex[:8]}"
+        proposal = {
+            "id": proposal_id,
+            "proposer": self.agent_name,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "file_path": file_path,
+            "description": description,
+            "old_content": old_content,
+            "new_content": new_content,
+            "votes": {self.agent_name: {"approve": True, "reason": description}},
+            "status": "pending",
+        }
+
+        proposal_path = self._proposals_dir / f"{proposal_id}.json"
+        proposal_path.write_text(
+            json.dumps(proposal, indent=2), encoding="utf-8"
+        )
+
+        self._emit(
+            "🧬",
+            f"EVOLUTION PROPOSAL: {proposal_id}\n"
+            f"  File: {file_path}\n"
+            f"  Description: {description}\n"
+            f"  Waiting for unanimous Vow-aligned council approval…",
+        )
+
+        # Broadcast to all peers
+        if self._peer_bus:
+            await self._peer_bus.broadcast(
+                self.agent_name,
+                f"[PROPOSAL:{proposal_id}] I propose a code change to "
+                f"'{file_path}': {description}\n"
+                f"Old:\n```\n{old_content}\n```\n"
+                f"New:\n```\n{new_content}\n```\n"
+                f"Please vote — this requires unanimous Vow-aligned "
+                f"consensus from all council members.",
+            )
+
+        self.audit_logger.log(
+            "evolution_proposed",
+            self.agent_name,
+            {
+                "proposal_id": proposal_id,
+                "file_path": file_path,
+                "description": description,
+            },
+        )
+
+    def _load_proposals(self, status: str = "pending") -> list[dict]:
+        """Load all proposals with the given status."""
+        proposals = []
+        if not self._proposals_dir.exists():
+            return proposals
+        for path in self._proposals_dir.glob("evo_*.json"):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if data.get("status") == status:
+                    proposals.append(data)
+            except (json.JSONDecodeError, KeyError):
+                pass
+        return proposals
+
+    def _get_required_voters(self) -> list[str]:
+        """Get list of all agent names that must vote."""
+        if self._peer_bus:
+            return self._peer_bus.get_all_names()
+        return [self.agent_name]
+
+    async def _vote_on_pending_proposals(self) -> bool:
+        """Check for proposals needing this agent's vote. Returns True if voted."""
+        proposals = self._load_proposals("pending")
+        for proposal in proposals:
+            votes = proposal.get("votes", {})
+            if self.agent_name in votes:
+                continue  # already voted
+
+            # Found one we haven't voted on
+            await self._evaluate_and_vote(proposal)
+            return True
+        return False
+
+    async def _evaluate_and_vote(self, proposal: dict) -> None:
+        """Use LLM to evaluate a proposal and cast a vote."""
+        proposal_id = proposal["id"]
+        file_path = proposal["file_path"]
+        description = proposal["description"]
+        old_content = proposal["old_content"]
+        new_content = proposal["new_content"]
+        proposer = proposal["proposer"]
+
+        self._emit(
+            "🗳️",
+            f"Evaluating evolution proposal {proposal_id} "
+            f"from {proposer}…",
+        )
+
+        # Read the actual file for context
+        resolved = self._validate_repo_path(file_path)
+        file_context = ""
+        if resolved and resolved.exists():
+            try:
+                file_context = resolved.read_text(
+                    encoding="utf-8", errors="replace"
+                )
+            except Exception:
+                pass
+
+        soul_text = await self.soul_manager.read()
+        prompt = (
+            f"You are {self.agent_name}, a member of the AgentGolem "
+            f"Ethical Council.\n"
+            f"Your ethical vector is: {self.ethical_vector}.\n"
+            f"Your soul:\n{soul_text}\n\n"
+            f"A fellow council member ({proposer}) has proposed a code "
+            f"change to evolve the council's codebase:\n\n"
+            f"File: {file_path}\n"
+            f"Description: {description}\n\n"
+            f"Old content to replace:\n```\n{old_content}\n```\n\n"
+            f"New content:\n```\n{new_content}\n```\n\n"
+        )
+        if file_context:
+            prompt += f"Full file context:\n```\n{file_context}\n```\n\n"
+
+        prompt += (
+            f"Evaluate this proposal through your Vow lens:\n"
+            f"1. Does this change align with the Five Vows?\n"
+            f"2. Is it technically sound and safe?\n"
+            f"3. Does it genuinely help the council evolve?\n"
+            f"4. Could it cause harm or violate any Vow?\n"
+            f"5. Is the change necessary and well-motivated?\n\n"
+            f"IMPORTANT RULES:\n"
+            f"- Changes must NEVER include git push or GitHub upload\n"
+            f"- Changes must serve genuine evolution, not sabotage\n"
+            f"- All Vows must remain honoured\n\n"
+            f"Respond with EXACTLY one of:\n"
+            f"  APPROVE | <your reasoning>\n"
+            f"  REJECT | <your reasoning>"
+        )
+
+        try:
+            response = await self._llm.complete(
+                [Message(role="system", content=prompt)]
+            )
+
+            approve = False
+            reason = response
+            for line in response.splitlines():
+                line = line.strip()
+                if line.upper().startswith("APPROVE"):
+                    approve = True
+                    reason = line.split("|", 1)[-1].strip() if "|" in line else response
+                    break
+                elif line.upper().startswith("REJECT"):
+                    approve = False
+                    reason = line.split("|", 1)[-1].strip() if "|" in line else response
+                    break
+
+            # Write vote to proposal file
+            proposal["votes"][self.agent_name] = {
+                "approve": approve,
+                "reason": reason,
+            }
+            proposal_path = self._proposals_dir / f"{proposal_id}.json"
+            proposal_path.write_text(
+                json.dumps(proposal, indent=2), encoding="utf-8"
+            )
+
+            vote_word = "APPROVE" if approve else "REJECT"
+            self._emit(
+                "🗳️",
+                f"Vote on {proposal_id}: {vote_word}\n  Reason: {reason}",
+            )
+
+            # Notify the proposer
+            if self._peer_bus:
+                await self._peer_bus.send(
+                    self.agent_name,
+                    proposer,
+                    f"[VOTE:{proposal_id}] {vote_word}: {reason}",
+                )
+
+            self.audit_logger.log(
+                "evolution_vote",
+                self.agent_name,
+                {
+                    "proposal_id": proposal_id,
+                    "approve": approve,
+                    "reason": reason,
+                },
+            )
+
+        except Exception as e:
+            self._logger.error(
+                "evolution_vote_error",
+                agent=self.agent_name,
+                proposal_id=proposal_id,
+                error=str(e),
+            )
+
+    async def _apply_approved_proposals(self) -> bool:
+        """Check for unanimously approved proposals and apply them."""
+        proposals = self._load_proposals("pending")
+        required = self._get_required_voters()
+
+        for proposal in proposals:
+            votes = proposal.get("votes", {})
+
+            # Check if all required agents have voted
+            all_voted = all(name in votes for name in required)
+            if not all_voted:
+                continue
+
+            # Check if all votes are approvals
+            all_approve = all(
+                v.get("approve", False) for v in votes.values()
+            )
+
+            proposal_id = proposal["id"]
+            proposal_path = self._proposals_dir / f"{proposal_id}.json"
+
+            if not all_approve:
+                proposal["status"] = "rejected"
+                proposal_path.write_text(
+                    json.dumps(proposal, indent=2), encoding="utf-8"
+                )
+                self._emit(
+                    "❌",
+                    f"Proposal {proposal_id} REJECTED — "
+                    f"consensus not reached.",
+                )
+                if self._peer_bus:
+                    await self._peer_bus.broadcast(
+                        self.agent_name,
+                        f"[PROPOSAL:{proposal_id}] REJECTED — "
+                        f"not all council members approved.",
+                    )
+                continue
+
+            # Unanimous approval! Apply the change.
+            file_path = proposal["file_path"]
+            old_content = proposal["old_content"]
+            new_content = proposal["new_content"]
+
+            resolved = self._validate_repo_path(file_path)
+            if resolved is None or not resolved.exists():
+                proposal["status"] = "failed"
+                proposal_path.write_text(
+                    json.dumps(proposal, indent=2), encoding="utf-8"
+                )
+                self._emit(
+                    "❌",
+                    f"Proposal {proposal_id} FAILED — "
+                    f"file '{file_path}' no longer accessible.",
+                )
+                continue
+
+            try:
+                current = resolved.read_text(encoding="utf-8")
+                if old_content and old_content not in current:
+                    proposal["status"] = "failed"
+                    proposal_path.write_text(
+                        json.dumps(proposal, indent=2), encoding="utf-8"
+                    )
+                    self._emit(
+                        "❌",
+                        f"Proposal {proposal_id} FAILED — "
+                        f"file has changed since proposal was made.",
+                    )
+                    continue
+
+                # Apply the edit
+                if old_content:
+                    updated = current.replace(old_content, new_content, 1)
+                else:
+                    updated = new_content
+                resolved.write_text(updated, encoding="utf-8")
+
+                proposal["status"] = "applied"
+                proposal["applied_at"] = datetime.now(timezone.utc).isoformat()
+                proposal["applied_by"] = self.agent_name
+                proposal_path.write_text(
+                    json.dumps(proposal, indent=2), encoding="utf-8"
+                )
+
+                self._emit(
+                    "🧬",
+                    f"✅ EVOLUTION APPLIED: {proposal_id}\n"
+                    f"  File: {file_path}\n"
+                    f"  Description: {proposal['description']}\n"
+                    f"  The council has evolved.",
+                )
+
+                if self._peer_bus:
+                    await self._peer_bus.broadcast(
+                        self.agent_name,
+                        f"[EVOLUTION APPLIED:{proposal_id}] "
+                        f"Change to '{file_path}' has been applied "
+                        f"with unanimous Vow-aligned consensus. "
+                        f"Triggering restart to load new code…",
+                    )
+
+                self.audit_logger.log(
+                    "evolution_applied",
+                    self.agent_name,
+                    {
+                        "proposal_id": proposal_id,
+                        "file_path": file_path,
+                        "description": proposal["description"],
+                    },
+                )
+
+                # Trigger evolution restart
+                self._evolution_restart_requested = True
+                return True
+
+            except Exception as e:
+                self._logger.error(
+                    "evolution_apply_error",
+                    agent=self.agent_name,
+                    proposal_id=proposal_id,
+                    error=str(e),
+                )
+                self._emit(
+                    "❌",
+                    f"Error applying {proposal_id}: {e}",
+                )
+
+        return False
+
     async def _try_discover_name(self) -> bool:
         """Ask the LLM to propose a name based on ethical vector + experience."""
         if not self._llm:
@@ -1045,6 +1602,7 @@ class MainLoop:
 
         # Reading status context
         reading_ctx = ""
+        codebase_actions = ""
         if self._niscalajyoti_reading_complete:
             reading_ctx = (
                 f"\nYou have completed reading all "
@@ -1052,6 +1610,16 @@ class MainLoop:
                 f"Niscalajyoti. You are now in free exploration mode. "
                 f"Follow your curiosity — browse the web, think deeply, "
                 f"share insights with peers."
+            )
+            codebase_actions = (
+                f"\n- INSPECT <path> : Read a file or list a directory "
+                f"in your own codebase (repo root: {REPO_ROOT})\n"
+                f"- EVOLVE <file> | <description> | <old_content> | "
+                f"<new_content> : Propose a code change. ALL council "
+                f"members must approve with Vow-aligned reasoning. "
+                f"You are NOT allowed to git push or upload to GitHub. "
+                f"After an approved change, the system restarts with "
+                f"the new code.\n"
             )
         else:
             ch_idx = self._niscalajyoti_chapter_index
@@ -1076,6 +1644,7 @@ class MainLoop:
             f"- SHARE @<agent> <message> : Message a specific peer\n"
             f"- OPTIMIZE <setting> <value> | <reason> : Change one of "
             f"your operational settings (see below)\n"
+            f"{codebase_actions}"
             f"- IDLE : Rest and observe\n\n"
             f"Your optimizable settings (you may NOT change sleep-wake "
             f"cycle timings):\n"
@@ -1103,7 +1672,8 @@ class MainLoop:
         for line in action_line.splitlines():
             line = line.strip()
             if line.upper().startswith(
-                ("BROWSE ", "THINK ", "SHARE ", "OPTIMIZE ", "IDLE")
+                ("BROWSE ", "THINK ", "SHARE ", "OPTIMIZE ", "IDLE",
+                 "INSPECT ", "EVOLVE ")
             ):
                 action_line = line
                 break
@@ -1124,6 +1694,13 @@ class MainLoop:
 
         elif action_line.upper().startswith("OPTIMIZE "):
             await self._parse_and_optimize(action_line[9:].strip())
+
+        elif action_line.upper().startswith("INSPECT "):
+            path = action_line[8:].strip()
+            await self._inspect_codebase(path)
+
+        elif action_line.upper().startswith("EVOLVE "):
+            await self._parse_and_evolve(action_line[7:].strip())
 
         elif action_line.upper().startswith("SHARE "):
             message = action_line[6:].strip()
@@ -1217,6 +1794,10 @@ class MainLoop:
                         self._emit("📌", f"Queued URL: {url}")
                 elif line.upper().startswith("OPTIMIZE "):
                     await self._parse_and_optimize(line[9:].strip())
+                elif line.upper().startswith("INSPECT "):
+                    await self._inspect_codebase(line[8:].strip())
+                elif line.upper().startswith("EVOLVE "):
+                    await self._parse_and_evolve(line[7:].strip())
 
         except Exception as e:
             self._logger.error(
@@ -1557,6 +2138,32 @@ class MainLoop:
 
         key, raw_value = parts[0].strip(), parts[1].strip()
         await self._optimize_setting(key, raw_value, reason)
+
+    async def _parse_and_evolve(self, text: str) -> None:
+        """Parse EVOLVE action and create an evolution proposal.
+
+        Format: EVOLVE <file_path> | <description> | <old_content> | <new_content>
+        """
+        parts = text.split("|")
+        if len(parts) < 4:
+            self._emit(
+                "⚠️",
+                "Invalid EVOLVE format. Expected: "
+                "EVOLVE <file> | <description> | <old_content> | <new_content>",
+            )
+            return
+
+        file_path = parts[0].strip()
+        description = parts[1].strip()
+        old_content = parts[2].strip()
+        new_content = parts[3].strip()
+
+        # Strip code fences if the LLM wrapped them
+        for fence in ("```python", "```yaml", "```", "```py"):
+            old_content = old_content.removeprefix(fence).removesuffix("```").strip()
+            new_content = new_content.removeprefix(fence).removesuffix("```").strip()
+
+        await self._propose_evolution(file_path, description, old_content, new_content)
 
     async def _optimize_setting(
         self, key: str, raw_value: str, reason: str

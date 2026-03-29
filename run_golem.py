@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import sys
 import threading
 from datetime import datetime, timedelta, timezone
@@ -1061,6 +1062,9 @@ async def run_agent(store: ParamStore) -> bool:
     # Create shared bus
     bus = InterAgentBus()
 
+    # Shared event for evolution restart (any agent can trigger)
+    evolution_event = asyncio.Event()
+
     agents: list[MainLoop] = []
     dbs: list[Any] = []
 
@@ -1133,6 +1137,9 @@ async def run_agent(store: ParamStore) -> bool:
 
         loop._ensure_dirs()
 
+        # Wire shared evolution shutdown event
+        loop._evolution_shutdown_event = evolution_event
+
         # Register on bus
         bus.register(agent_id)
 
@@ -1173,9 +1180,21 @@ async def run_agent(store: ParamStore) -> bool:
         pass
     finally:
         restart = console._restart_requested
+        # Check if any agent requested an evolution restart
+        evolution_restart = any(
+            getattr(a, "_evolution_restart_requested", False)
+            for a in agents
+        )
         console.stop()
         for db in dbs:
             await db.close()
+
+        if evolution_restart:
+            cprint(
+                "\n  🧬 Evolution applied — restarting with new code…\n",
+                C.CYAN,
+            )
+            return "evolution"
         if restart:
             cprint("\n  Ethical Council stopped for restart.\n", C.YELLOW)
         else:
@@ -1204,6 +1223,28 @@ def main() -> None:
             restart = asyncio.run(run_agent(store))
         except KeyboardInterrupt:
             cprint("\n  Interrupted. Goodbye.", C.YELLOW)
+            break
+
+        if restart == "evolution":
+            # Spawn start.bat in a new terminal window and exit
+            bat_path = ROOT / "start.bat"
+            if bat_path.exists():
+                cprint(
+                    "  🧬 Launching evolved AgentGolem in new window…\n",
+                    C.CYAN,
+                )
+                subprocess.Popen(
+                    ["cmd", "/c", "start", "AgentGolem (Evolved)",
+                     str(bat_path)],
+                    cwd=str(ROOT),
+                    creationflags=subprocess.CREATE_NEW_CONSOLE,
+                )
+            else:
+                cprint(
+                    f"  ⚠ start.bat not found at {bat_path}. "
+                    f"Please restart manually.",
+                    C.YELLOW,
+                )
             break
 
         if not restart:

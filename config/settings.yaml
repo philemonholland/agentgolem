@@ -27,7 +27,7 @@ quarantine_trust_useful_threshold: 0.3
 browser_rate_limit_per_minute: 10
 browser_timeout_seconds: 20
 agent_count: 6
-agent_offset_minutes: 1.0
+agent_offset_minutes: 0.0
 autonomous_interval_seconds: 15.0
 name_discovery_cycles: 4
 peer_checkin_interval_minutes: 10.0
