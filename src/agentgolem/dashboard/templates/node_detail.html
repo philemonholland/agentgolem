@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+
+{% block title %}Node {{ node.id[:8] if node else "Not Found" }} — AgentGolem{% endblock %}
+
+{% block content %}
+{% if node %}
+<h1>Node: {{ node.id[:8] }}…</h1>
+
+<article {% if node.canonical %}class="canonical"{% endif %}>
+    <header>
+        {{ node.text }}
+        {% if node.canonical %}<span class="badge badge-success">canonical</span>{% endif %}
+        {% if node.status and node.status.value == "ARCHIVED" %}<span class="badge badge-warning">archived</span>{% endif %}
+    </header>
+    <table>
+        <tr><td><strong>ID</strong></td><td class="mono">{{ node.id }}</td></tr>
+        <tr><td><strong>Type</strong></td><td>{{ node.type.value if node.type else "—" }}</td></tr>
+        <tr><td><strong>Status</strong></td><td>{{ node.status.value if node.status else "—" }}</td></tr>
+        <tr><td><strong>Trustworthiness</strong></td><td>{{ "%.3f" | format(node.trustworthiness) }}</td></tr>
+        <tr><td><strong>Base Usefulness</strong></td><td>{{ "%.3f" | format(node.base_usefulness) }}</td></tr>
+        <tr><td><strong>Trust × Useful</strong></td><td>{{ "%.3f" | format(node.trust_useful) }}</td></tr>
+        <tr><td><strong>Emotion</strong></td><td>{{ node.emotion_label }} ({{ "%.2f" | format(node.emotion_score) }})</td></tr>
+        <tr><td><strong>Centrality</strong></td><td>{{ "%.3f" | format(node.centrality) }}</td></tr>
+        <tr><td><strong>Access Count</strong></td><td>{{ node.access_count }}</td></tr>
+        <tr><td><strong>Created</strong></td><td class="mono">{{ node.created_at }}</td></tr>
+        <tr><td><strong>Last Accessed</strong></td><td class="mono">{{ node.last_accessed }}</td></tr>
+    </table>
+</article>
+
+<section>
+    <h2>Outgoing Edges</h2>
+    {% if edges_out %}
+    <table>
+        <thead><tr><th>Target</th><th>Type</th><th>Weight</th></tr></thead>
+        <tbody>
+        {% for edge in edges_out %}
+        <tr>
+            <td><a href="/dashboard/memory/nodes/{{ edge.target_id }}">{{ edge.target_id[:8] }}…</a></td>
+            <td>{{ edge.edge_type.value if edge.edge_type else "—" }}</td>
+            <td>{{ "%.2f" | format(edge.weight) }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p>No outgoing edges.</p>
+    {% endif %}
+</section>
+
+<section>
+    <h2>Incoming Edges</h2>
+    {% if edges_in %}
+    <table>
+        <thead><tr><th>Source</th><th>Type</th><th>Weight</th></tr></thead>
+        <tbody>
+        {% for edge in edges_in %}
+        <tr>
+            <td><a href="/dashboard/memory/nodes/{{ edge.source_id }}">{{ edge.source_id[:8] }}…</a></td>
+            <td>{{ edge.edge_type.value if edge.edge_type else "—" }}</td>
+            <td>{{ "%.2f" | format(edge.weight) }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p>No incoming edges.</p>
+    {% endif %}
+</section>
+
+<section>
+    <h2>Sources</h2>
+    {% if sources %}
+    <table>
+        <thead><tr><th>Kind</th><th>Origin</th><th>Reliability</th></tr></thead>
+        <tbody>
+        {% for src in sources %}
+        <tr>
+            <td>{{ src.kind.value if src.kind else "—" }}</td>
+            <td>{{ src.origin }}</td>
+            <td>{{ "%.2f" | format(src.reliability) }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p>No sources linked.</p>
+    {% endif %}
+</section>
+
+{% else %}
+<h1>Node Not Found</h1>
+<p>The requested node could not be found.</p>
+{% endif %}
+{% endblock %}

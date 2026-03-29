@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard — AgentGolem{% endblock %}
+
+{% block content %}
+<h1>Agent Status</h1>
+
+<section>
+    <div hx-get="/api/status" hx-trigger="every 5s" hx-target="#status-panel" hx-swap="innerHTML"></div>
+    <div id="status-panel">
+        <article>
+            <header>
+                <strong>Mode:</strong>
+                {% if status.mode == "awake" %}
+                    <span class="badge badge-success">AWAKE</span>
+                {% elif status.mode == "asleep" %}
+                    <span class="badge badge-info">ASLEEP</span>
+                {% elif status.mode == "paused" %}
+                    <span class="badge badge-warning">PAUSED</span>
+                {% else %}
+                    <span class="badge">{{ status.mode | default("unknown") | upper }}</span>
+                {% endif %}
+            </header>
+            <p><strong>Current Task:</strong> {{ status.current_task | default("None", true) }}</p>
+            <p><strong>Pending Tasks:</strong> {{ status.pending_tasks | default([], true) | length }}</p>
+            <p><strong>Started At:</strong> {{ status.started_at | default("—") }}</p>
+            <p><strong>Pending Approvals:</strong> {{ pending_approvals_count }}</p>
+        </article>
+    </div>
+</section>
+
+<section>
+    <h2>Controls</h2>
+    <div role="group">
+        <button hx-post="/api/agent/wake" hx-swap="none" class="outline">🔆 Wake</button>
+        <button hx-post="/api/agent/sleep" hx-swap="none" class="outline">😴 Sleep</button>
+        <button hx-post="/api/agent/pause" hx-swap="none" class="outline">⏸ Pause</button>
+        <button hx-post="/api/agent/resume" hx-swap="none" class="outline">▶ Resume</button>
+    </div>
+</section>
+
+<section>
+    <h2>Send Message</h2>
+    <form hx-post="/api/agent/message" hx-target="#message-result" hx-swap="innerHTML">
+        <input type="text" name="text" placeholder="Type a message…" required>
+        <button type="submit">Send</button>
+    </form>
+    <div id="message-result"></div>
+</section>
+{% endblock %}

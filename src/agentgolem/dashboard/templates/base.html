@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}AgentGolem{% endblock %}</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+    <style>
+        nav { margin-bottom: 1rem; }
+        .badge { display: inline-block; padding: 0.2em 0.6em; font-size: 0.75em; border-radius: 4px; }
+        .badge-warning { background: #f0ad4e; color: #fff; }
+        .badge-success { background: #5cb85c; color: #fff; }
+        .badge-danger { background: #d9534f; color: #fff; }
+        .badge-info { background: #5bc0de; color: #fff; }
+        .quarantined { border-left: 4px solid #f0ad4e; padding-left: 0.5rem; }
+        .canonical { border-left: 4px solid #5cb85c; padding-left: 0.5rem; }
+        .mono { font-family: monospace; font-size: 0.9em; }
+        pre { background: #f4f4f4; padding: 1rem; overflow-x: auto; }
+    </style>
+</head>
+<body>
+    <nav class="container">
+        <ul>
+            <li><strong>🧠 AgentGolem</strong></li>
+        </ul>
+        <ul>
+            <li><a href="/dashboard">Status</a></li>
+            <li><a href="/dashboard/soul">Soul</a></li>
+            <li><a href="/dashboard/heartbeat">Heartbeat</a></li>
+            <li><a href="/dashboard/memory">Memory</a></li>
+            <li><a href="/dashboard/logs">Logs</a></li>
+            <li><a href="/dashboard/approvals">Approvals</a></li>
+        </ul>
+    </nav>
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+    <footer class="container">
+        <small>AgentGolem Dashboard — <span hx-get="/api/status" hx-trigger="every 5s" hx-target="#live-mode" hx-swap="innerHTML">
+        </span> <span id="live-mode">...</span></small>
+    </footer>
+</body>
+</html>

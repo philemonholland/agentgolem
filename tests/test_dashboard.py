@@ -1,0 +1,221 @@
+"""Tests for the AgentGolem web dashboard frontend."""
+from __future__ import annotations
+
+import sys
+import types
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import httpx
+import pytest
+
+
+# ---------------------------------------------------------------------------
+# Ensure agentgolem.dashboard.api is importable.  Another agent builds the
+# real module in parallel; if it isn't ready yet we provide a minimal stub so
+# the dashboard page routes (which lazily import the shared *state* object)
+# can function under test.
+# ---------------------------------------------------------------------------
+
+def _ensure_api_module() -> types.ModuleType:
+    """Return the ``agentgolem.dashboard.api`` module, creating a stub if needed."""
+    try:
+        import agentgolem.dashboard.api as api_mod
+
+        if hasattr(api_mod, "DashboardState") and hasattr(api_mod, "state"):
+            return api_mod
+    except (ImportError, AttributeError):
+        pass
+
+    # Build a lightweight stand-in ------------------------------------------
+    @dataclass
+    class DashboardState:
+        runtime_state: Any = None
+        soul_manager: Any = None
+        heartbeat_manager: Any = None
+        audit_logger: Any = None
+        approval_gate: Any = None
+        interrupt_manager: Any = None
+
+    mod = types.ModuleType("agentgolem.dashboard.api")
+    mod.DashboardState = DashboardState  # type: ignore[attr-defined]
+    mod.state = DashboardState()  # type: ignore[attr-defined]
+    # Register in sys.modules so subsequent imports resolve
+    sys.modules["agentgolem.dashboard.api"] = mod
+    return mod
+
+
+_api_mod = _ensure_api_module()
+DashboardState = _api_mod.DashboardState
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def app_with_state(tmp_path: Path):
+    """Create a dashboard app backed by real subsystem objects."""
+    from agentgolem.identity.heartbeat import HeartbeatManager
+    from agentgolem.identity.soul import SoulManager
+    from agentgolem.logging.audit import AuditLogger
+    from agentgolem.runtime.interrupts import InterruptManager
+    from agentgolem.runtime.state import RuntimeState
+    from agentgolem.tools.base import ApprovalGate
+
+    runtime = RuntimeState(tmp_path)
+
+    soul_path = tmp_path / "soul.md"
+    soul_path.write_text("# Soul\nTest soul content")
+
+    hb_path = tmp_path / "heartbeat.md"
+    hb_path.write_text("# Heartbeat\nTest heartbeat content")
+
+    (tmp_path / "approvals").mkdir(exist_ok=True)
+    (tmp_path / "logs").mkdir(exist_ok=True)
+
+    ds = DashboardState(
+        runtime_state=runtime,
+        soul_manager=SoulManager(soul_path, tmp_path),
+        heartbeat_manager=HeartbeatManager(hb_path, tmp_path),
+        audit_logger=AuditLogger(tmp_path),
+        approval_gate=ApprovalGate(tmp_path / "approvals", ["email_send"]),
+        interrupt_manager=InterruptManager(),
+    )
+
+    api_mod = sys.modules["agentgolem.dashboard.api"]
+    old_state = getattr(api_mod, "state", None)
+    api_mod.state = ds  # type: ignore[attr-defined]
+
+    from agentgolem.dashboard.app import create_dashboard_app
+
+    app = create_dashboard_app()
+    yield app
+
+    api_mod.state = old_state  # type: ignore[attr-defined]
+
+
+@pytest.fixture()
+async def client(app_with_state):
+    transport = httpx.ASGITransport(app=app_with_state)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+async def test_root_redirects_to_dashboard(client: httpx.AsyncClient):
+    resp = await client.get("/", follow_redirects=False)
+    assert resp.status_code in (301, 302, 307, 308)
+    assert "/dashboard" in resp.headers["location"]
+
+
+async def test_dashboard_returns_html_with_status(client: httpx.AsyncClient):
+    resp = await client.get("/dashboard")
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]
+    # RuntimeState defaults to PAUSED
+    assert "PAUSED" in resp.text
+
+
+async def test_soul_returns_html_with_content(client: httpx.AsyncClient):
+    resp = await client.get("/dashboard/soul")
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]
+    assert "Test soul content" in resp.text
+
+
+async def test_heartbeat_returns_html_with_content(client: httpx.AsyncClient):
+    resp = await client.get("/dashboard/heartbeat")
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]
+    assert "Test heartbeat content" in resp.text
+
+
+async def test_logs_returns_html(client: httpx.AsyncClient):
+    resp = await client.get("/dashboard/logs")
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]
+    assert "Log Viewer" in resp.text
+
+
+async def test_memory_returns_html(client: httpx.AsyncClient):
+    resp = await client.get("/dashboard/memory")
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]
+    assert "Memory Explorer" in resp.text
+
+
+async def test_approvals_returns_html(client: httpx.AsyncClient):
+    resp = await client.get("/dashboard/approvals")
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]
+    assert "Approval Queue" in resp.text
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/dashboard",
+        "/dashboard/soul",
+        "/dashboard/heartbeat",
+        "/dashboard/logs",
+        "/dashboard/memory",
+        "/dashboard/approvals",
+    ],
+)
+async def test_pages_include_navigation_links(client: httpx.AsyncClient, path: str):
+    resp = await client.get(path)
+    html = resp.text
+    assert 'href="/dashboard"' in html
+    assert 'href="/dashboard/soul"' in html
+    assert 'href="/dashboard/heartbeat"' in html
+    assert 'href="/dashboard/memory"' in html
+    assert 'href="/dashboard/logs"' in html
+    assert 'href="/dashboard/approvals"' in html
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/dashboard",
+        "/dashboard/soul",
+        "/dashboard/heartbeat",
+        "/dashboard/logs",
+        "/dashboard/memory",
+        "/dashboard/approvals",
+    ],
+)
+async def test_pages_include_branding(client: httpx.AsyncClient, path: str):
+    resp = await client.get(path)
+    assert "AgentGolem" in resp.text
+
+
+async def test_status_page_includes_control_buttons(client: httpx.AsyncClient):
+    resp = await client.get("/dashboard")
+    html = resp.text
+    assert "Wake" in html
+    assert "Sleep" in html
+    assert "Pause" in html
+    assert "Resume" in html
+
+
+async def test_status_page_includes_message_input(client: httpx.AsyncClient):
+    resp = await client.get("/dashboard")
+    assert 'name="text"' in resp.text
+    assert "Send" in resp.text
+
+
+async def test_node_detail_not_found(client: httpx.AsyncClient):
+    resp = await client.get("/dashboard/memory/nodes/nonexistent-id")
+    assert resp.status_code == 200
+    assert "Not Found" in resp.text
+
+
+async def test_cluster_detail_not_found(client: httpx.AsyncClient):
+    resp = await client.get("/dashboard/memory/clusters/nonexistent-id")
+    assert resp.status_code == 200
+    assert "Not Found" in resp.text

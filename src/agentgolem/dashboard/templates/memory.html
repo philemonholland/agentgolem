@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+
+{% block title %}Memory — AgentGolem{% endblock %}
+
+{% block content %}
+<h1>Memory Explorer</h1>
+
+<section>
+    <h2>Stats</h2>
+    <div class="grid">
+        <article><header>Nodes</header>{{ stats.node_count }}</article>
+        <article><header>Edges</header>{{ stats.edge_count }}</article>
+        <article><header>Clusters</header>{{ stats.cluster_count }}</article>
+    </div>
+</section>
+
+<section>
+    <h2>Filters</h2>
+    <form method="get" action="/dashboard/memory">
+        <div class="grid">
+            <label>
+                Type
+                <select name="type">
+                    <option value="">All</option>
+                    <option value="FACT" {% if type_filter == "FACT" %}selected{% endif %}>Fact</option>
+                    <option value="PREFERENCE" {% if type_filter == "PREFERENCE" %}selected{% endif %}>Preference</option>
+                    <option value="EVENT" {% if type_filter == "EVENT" %}selected{% endif %}>Event</option>
+                    <option value="GOAL" {% if type_filter == "GOAL" %}selected{% endif %}>Goal</option>
+                    <option value="RISK" {% if type_filter == "RISK" %}selected{% endif %}>Risk</option>
+                    <option value="INTERPRETATION" {% if type_filter == "INTERPRETATION" %}selected{% endif %}>Interpretation</option>
+                    <option value="IDENTITY" {% if type_filter == "IDENTITY" %}selected{% endif %}>Identity</option>
+                    <option value="RULE" {% if type_filter == "RULE" %}selected{% endif %}>Rule</option>
+                    <option value="ASSOCIATION" {% if type_filter == "ASSOCIATION" %}selected{% endif %}>Association</option>
+                    <option value="PROCEDURE" {% if type_filter == "PROCEDURE" %}selected{% endif %}>Procedure</option>
+                </select>
+            </label>
+            <label>
+                Status
+                <select name="status">
+                    <option value="">All</option>
+                    <option value="ACTIVE" {% if status_filter == "ACTIVE" %}selected{% endif %}>Active</option>
+                    <option value="ARCHIVED" {% if status_filter == "ARCHIVED" %}selected{% endif %}>Archived</option>
+                    <option value="PURGED" {% if status_filter == "PURGED" %}selected{% endif %}>Purged</option>
+                </select>
+            </label>
+            <label>
+                Trust min
+                <input type="number" name="trust_min" value="{{ trust_min }}" min="0" max="1" step="0.1">
+            </label>
+            <label>
+                Trust max
+                <input type="number" name="trust_max" value="{{ trust_max }}" min="0" max="1" step="0.1">
+            </label>
+        </div>
+        <button type="submit">Filter</button>
+    </form>
+</section>
+
+<section>
+    <h2>Nodes</h2>
+    {% if nodes %}
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Text</th>
+                <th>Type</th>
+                <th>Trust</th>
+                <th>Useful</th>
+                <th>T×U</th>
+                <th>Status</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for node in nodes %}
+            <tr class="{% if node.canonical %}canonical{% endif %}">
+                <td><a href="/dashboard/memory/nodes/{{ node.id }}">{{ node.id[:8] }}…</a></td>
+                <td>{{ node.text }}</td>
+                <td>{{ node.type.value if node.type else "—" }}</td>
+                <td>{{ "%.2f" | format(node.trustworthiness) }}</td>
+                <td>{{ "%.2f" | format(node.base_usefulness) }}</td>
+                <td>{{ "%.2f" | format(node.trust_useful) }}</td>
+                <td>{{ node.status.value if node.status else "—" }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p>No nodes found.</p>
+    {% endif %}
+</section>
+
+<section>
+    <h2>Clusters</h2>
+    {% if clusters %}
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Label</th>
+                <th>Members</th>
+                <th>Status</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for cluster in clusters %}
+            <tr>
+                <td><a href="/dashboard/memory/clusters/{{ cluster.id }}">{{ cluster.id[:8] }}…</a></td>
+                <td>{{ cluster.label }}</td>
+                <td>{{ cluster.node_ids | length }}</td>
+                <td>{{ cluster.status.value if cluster.status else "—" }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p>No clusters found.</p>
+    {% endif %}
+</section>
+{% endblock %}

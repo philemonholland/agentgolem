@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+
+{% block title %}Cluster {{ cluster.id[:8] if cluster else "Not Found" }} — AgentGolem{% endblock %}
+
+{% block content %}
+{% if cluster %}
+<h1>Cluster: {{ cluster.label }}</h1>
+
+<article>
+    <header>
+        {{ cluster.label }}
+        {% if cluster.contradiction_status == "quarantined" %}
+            <span class="badge badge-warning">quarantined</span>
+        {% elif cluster.contradiction_status == "flagged" %}
+            <span class="badge badge-danger">flagged</span>
+        {% elif cluster.contradiction_status == "resolved" %}
+            <span class="badge badge-success">resolved</span>
+        {% endif %}
+    </header>
+    <table>
+        <tr><td><strong>ID</strong></td><td class="mono">{{ cluster.id }}</td></tr>
+        <tr><td><strong>Type</strong></td><td>{{ cluster.cluster_type }}</td></tr>
+        <tr><td><strong>Status</strong></td><td>{{ cluster.status.value if cluster.status else "—" }}</td></tr>
+        <tr><td><strong>Contradiction</strong></td><td>{{ cluster.contradiction_status }}</td></tr>
+        <tr><td><strong>Trustworthiness</strong></td><td>{{ "%.3f" | format(cluster.trustworthiness) }}</td></tr>
+        <tr><td><strong>Usefulness</strong></td><td>{{ "%.3f" | format(cluster.base_usefulness) }}</td></tr>
+        <tr><td><strong>Trust × Useful</strong></td><td>{{ "%.3f" | format(cluster.trust_useful) }}</td></tr>
+        <tr><td><strong>Emotion</strong></td><td>{{ cluster.emotion_label }} ({{ "%.2f" | format(cluster.emotion_score) }})</td></tr>
+        <tr><td><strong>Members</strong></td><td>{{ cluster.node_ids | length }}</td></tr>
+    </table>
+</article>
+
+<section>
+    <h2>Member Nodes</h2>
+    {% if members %}
+    <table>
+        <thead><tr><th>ID</th><th>Text</th><th>Type</th></tr></thead>
+        <tbody>
+        {% for node in members %}
+        <tr>
+            <td><a href="/dashboard/memory/nodes/{{ node.id }}">{{ node.id[:8] }}…</a></td>
+            <td>{{ node.text }}</td>
+            <td>{{ node.type.value if node.type else "—" }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p>No member nodes.</p>
+    {% endif %}
+</section>
+
+<section>
+    <h2>Sources</h2>
+    {% if sources %}
+    <table>
+        <thead><tr><th>Kind</th><th>Origin</th><th>Reliability</th></tr></thead>
+        <tbody>
+        {% for src in sources %}
+        <tr>
+            <td>{{ src.kind.value if src.kind else "—" }}</td>
+            <td>{{ src.origin }}</td>
+            <td>{{ "%.2f" | format(src.reliability) }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p>No sources linked.</p>
+    {% endif %}
+</section>
+
+{% else %}
+<h1>Cluster Not Found</h1>
+<p>The requested cluster could not be found.</p>
+{% endif %}
+{% endblock %}

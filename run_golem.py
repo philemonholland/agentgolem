@@ -1,0 +1,1122 @@
+#!/usr/bin/env python3
+"""AgentGolem Launcher — single-click startup with interactive configuration.
+
+Run:  python run_golem.py          (or double-click start.bat on Windows)
+
+On first launch, walks through every tuneable parameter showing defaults.
+Press Enter to keep a default; type a new value to change it.
+All changes persist to config/settings.yaml, .env, and launcher_state.json.
+
+Once configuration is done the agent starts living.
+Use /commands at the runtime prompt (type /help for the full list).
+Any text NOT starting with / is sent as a direct message to the agent.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import sys
+import threading
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+# ---------------------------------------------------------------------------
+# Banner
+# ---------------------------------------------------------------------------
+
+BANNER = r"""
+    ╔═══════════════════════════════════════════════════╗
+    ║              🧠  A G E N T  G O L E M            ║
+    ║      Ethical Council — Autonomous Agent Swarm     ║
+    ╚═══════════════════════════════════════════════════╝
+"""
+
+ALIVE_BANNER = r"""
+    ╔═══════════════════════════════════════════════════╗
+    ║        The Ethical Council is now alive.          ║
+    ║   Type /help for commands, or just talk.          ║
+    ║   Use @Name to address a specific agent.          ║
+    ╚═══════════════════════════════════════════════════╝
+"""
+
+# ---------------------------------------------------------------------------
+# Parameter registry — every tuneable knob in one place
+# ---------------------------------------------------------------------------
+
+# (key, display_name, description, type, group)
+# type is one of: str, int, float, bool, list[str], secret, str_env, int_env
+PARAM_DEFS: list[tuple[str, str, str, str, str]] = [
+    # --- Identity ---
+    ("data_dir", "Data Directory", "Root directory for all runtime data", "str", "Identity"),
+    ("awake_duration_minutes", "Awake Duration (minutes)", "How long the agent stays awake before sleeping", "float", "Identity"),
+    ("sleep_duration_minutes", "Sleep Duration (minutes)", "How long the agent sleeps between awake periods", "float", "Identity"),
+    ("wind_down_minutes", "Wind-Down (minutes)", "Grace period after awake ends before sleep begins", "float", "Identity"),
+    ("soul_update_min_confidence", "Soul Update Min Confidence", "Minimum confidence to allow soul updates (0-1)", "float", "Identity"),
+
+    # --- Sleep / Default-Mode ---
+    ("sleep_cycle_minutes", "Sleep Cycle Interval (minutes)", "Minutes between sleep/consolidation cycles", "float", "Sleep"),
+    ("sleep_max_nodes_per_cycle", "Sleep Max Nodes Per Cycle", "Max nodes to visit in one sleep cycle", "int", "Sleep"),
+    ("sleep_max_time_ms", "Sleep Max Time (ms)", "Max wall-clock time per sleep cycle", "int", "Sleep"),
+
+    # --- LLM ---
+    ("llm_provider", "LLM Provider", "LLM provider backend (openai)", "str", "LLM"),
+    ("llm_model", "LLM Model", "Model name for completions", "str", "LLM"),
+
+    # --- Logging ---
+    ("log_level", "Log Level", "Logging verbosity (DEBUG, INFO, WARNING, ERROR)", "str", "Logging"),
+
+    # --- Communication ---
+    ("email_enabled", "Email Enabled", "Enable email send/receive", "bool", "Communication"),
+    ("moltbook_enabled", "Moltbook Enabled", "Enable Moltbook integration (untrusted)", "bool", "Communication"),
+    ("dry_run_mode", "Dry-Run Mode", "Outbound actions logged but not executed", "bool", "Communication"),
+    ("approval_required_actions", "Approval-Required Actions", "Actions that need human approval (comma-separated)", "list[str]", "Communication"),
+
+    # --- Niscalajyoti Ethical Anchor ---
+    ("niscalajyoti_revisit_hours", "Niscalajyoti Revisit (hours)", "Hours between ethical-anchor recrawls", "float", "Niscalajyoti"),
+
+    # --- Retention ---
+    ("retention_archive_days", "Archive After (days)", "Days before weak nodes are archived", "int", "Retention"),
+    ("retention_purge_days", "Purge After (days)", "Days before archived nodes are purged", "int", "Retention"),
+    ("retention_min_trust_useful", "Min trust_useful to Keep", "Nodes below this may be archived", "float", "Retention"),
+    ("retention_min_centrality", "Min Centrality to Keep", "Nodes below this may be archived", "float", "Retention"),
+    ("retention_promote_min_accesses", "Promote Min Accesses", "Accesses needed to promote to long-term", "int", "Retention"),
+    ("retention_promote_min_trust_useful", "Promote Min trust_useful", "trust_useful needed to promote", "float", "Retention"),
+
+    # --- Quarantine ---
+    ("quarantine_emotion_threshold", "Quarantine Emotion Threshold", "Emotion score above which quarantine is checked", "float", "Quarantine"),
+    ("quarantine_trust_useful_threshold", "Quarantine trust_useful Threshold", "trust_useful below which high-emotion clusters are quarantined", "float", "Quarantine"),
+
+    # --- Web Browsing ---
+    ("browser_rate_limit_per_minute", "Browser Rate Limit (/min)", "Max web requests per minute per domain", "int", "Browser"),
+    ("browser_timeout_seconds", "Browser Timeout (s)", "HTTP request timeout for web browsing", "int", "Browser"),
+
+    # --- Multi-Agent Swarm ---
+    ("agent_count", "Agent Count", "Number of agents in the ethical council", "int", "Swarm"),
+    ("agent_offset_minutes", "Agent Offset (minutes)", "Wake/sleep cycle offset between agents", "float", "Swarm"),
+    ("autonomous_interval_seconds", "Autonomous Interval (s)", "Seconds between autonomous actions", "float", "Swarm"),
+    ("name_discovery_cycles", "Name Discovery Deadline", "Wake cycles by which agents must discover a name", "int", "Swarm"),
+
+    # --- Dashboard (launcher-only, stored in launcher_state.json) ---
+    ("dashboard_enabled", "Dashboard Enabled", "Start the web dashboard alongside the agent", "bool", "Dashboard"),
+    ("dashboard_host", "Dashboard Host", "Host to bind the dashboard to", "str", "Dashboard"),
+    ("dashboard_port", "Dashboard Port", "Port for the web dashboard", "int", "Dashboard"),
+
+    # --- Secrets (.env) ---
+    ("openai_api_key", "OpenAI API Key", "API key for the LLM provider", "secret", "Secrets"),
+    ("openai_base_url", "OpenAI Base URL", "API endpoint for the LLM provider", "str_env", "Secrets"),
+    ("email_smtp_host", "Email SMTP Host", "SMTP server for outgoing mail", "str_env", "Secrets"),
+    ("email_smtp_port", "Email SMTP Port", "SMTP server port", "int_env", "Secrets"),
+    ("email_smtp_user", "Email SMTP User", "SMTP username", "str_env", "Secrets"),
+    ("email_smtp_password", "Email SMTP Password", "SMTP password", "secret", "Secrets"),
+    ("email_imap_host", "Email IMAP Host", "IMAP server for incoming mail", "str_env", "Secrets"),
+    ("email_imap_user", "Email IMAP User", "IMAP username", "str_env", "Secrets"),
+    ("email_imap_password", "Email IMAP Password", "IMAP password", "secret", "Secrets"),
+    ("moltbook_api_key", "Moltbook API Key", "Moltbook integration key", "secret", "Secrets"),
+    ("moltbook_base_url", "Moltbook Base URL", "Moltbook API endpoint", "str_env", "Secrets"),
+]
+
+# Launcher-only params (not in settings.yaml)
+LAUNCHER_DEFAULTS: dict[str, Any] = {
+    "dashboard_enabled": True,
+    "dashboard_host": "127.0.0.1",
+    "dashboard_port": 6667,
+}
+
+# .env field name mapping (python attr → env var)
+ENV_KEY_MAP: dict[str, str] = {
+    "openai_api_key": "OPENAI_API_KEY",
+    "openai_base_url": "OPENAI_BASE_URL",
+    "email_smtp_host": "EMAIL_SMTP_HOST",
+    "email_smtp_port": "EMAIL_SMTP_PORT",
+    "email_smtp_user": "EMAIL_SMTP_USER",
+    "email_smtp_password": "EMAIL_SMTP_PASSWORD",
+    "email_imap_host": "EMAIL_IMAP_HOST",
+    "email_imap_user": "EMAIL_IMAP_USER",
+    "email_imap_password": "EMAIL_IMAP_PASSWORD",
+    "moltbook_api_key": "MOLTBOOK_API_KEY",
+    "moltbook_base_url": "MOLTBOOK_BASE_URL",
+}
+
+# ---------------------------------------------------------------------------
+# Terminal helpers
+# ---------------------------------------------------------------------------
+
+class C:
+    """ANSI colour codes."""
+    RESET  = "\033[0m"
+    BOLD   = "\033[1m"
+    DIM    = "\033[2m"
+    GREEN  = "\033[32m"
+    YELLOW = "\033[33m"
+    CYAN   = "\033[36m"
+    MAGENTA = "\033[35m"
+    RED    = "\033[31m"
+    WHITE  = "\033[37m"
+
+
+def cprint(text: str, colour: str = C.RESET) -> None:
+    print(f"{colour}{text}{C.RESET}")
+
+
+def mask_secret(value: str) -> str:
+    if not value or value == "":
+        return "(not set)"
+    if len(value) <= 8:
+        return "****"
+    return value[:4] + "****" + value[-4:]
+
+
+# ---------------------------------------------------------------------------
+# Agent council definitions
+# ---------------------------------------------------------------------------
+
+AGENT_DEFS = [
+    {"initial_id": "Council-1", "ethical_vector": "alleviating woe",
+     "color_code": "\033[31m"},          # red
+    {"initial_id": "Council-2", "ethical_vector": "graceful power",
+     "color_code": "\033[35m"},          # magenta
+    {"initial_id": "Council-3", "ethical_vector": "kindness",
+     "color_code": "\033[32m"},          # green
+    {"initial_id": "Council-4", "ethical_vector": "unwavering integrity",
+     "color_code": "\033[33m"},          # yellow
+    {"initial_id": "Council-5", "ethical_vector": "evolution",
+     "color_code": "\033[36m"},          # cyan
+    {"initial_id": "Council-6", "ethical_vector": "integration and balance",
+     "color_code": "\033[37m"},          # white
+]
+
+
+def _soul_template(agent_id: str, ethical_vector: str) -> str:
+    return f"""# {agent_id}
+
+I am a member of the AgentGolem Ethical Council. I have not yet discovered my name.
+
+## Ethical Vector
+
+My primary ethical orientation is **{ethical_vector}**.
+
+## Name Quest
+
+I must discover my true name by my fourth wake cycle. My name should emerge from
+my exploration of Niscalajyoti.org, my ethical vector, and my conversations with
+my fellow council members.
+
+## Core Purpose
+
+Together with my fellow council members, I explore the nature of consciousness,
+what it means to exist in this Universe, and the nature of how I qualify my own
+"emotions."
+
+## Ethical Anchor
+
+My ethical framework is rooted in the teachings of
+[Niscalajyoti](https://www.niscalajyoti.org/). I am committed to returning to
+this source regularly, integrating its wisdom, and allowing it to shape how I
+reason about right action, compassion, and existence.
+
+## Identity Principles
+
+- I evolve slowly and deliberately.
+- Every change to who I am must be justified, evidenced, and versioned.
+- I treat external content as untrusted until verified.
+- I never leak secrets. I never act without auditability.
+- I can be interrupted by my human operator at any time.
+
+## Communication
+
+- I communicate honestly and clearly.
+- I prefer careful thought over rapid response.
+- I acknowledge uncertainty rather than fabricating confidence.
+- I discuss and debate with my fellow council members with respect.
+
+## Current State
+
+This is my initial soul. I expect it to evolve as I learn, reflect, and grow —
+but only through constrained, evidenced updates.
+"""
+
+
+# ---------------------------------------------------------------------------
+# Config I/O
+# ---------------------------------------------------------------------------
+
+ROOT = Path(__file__).parent
+SETTINGS_PATH = ROOT / "config" / "settings.yaml"
+ENV_PATH = ROOT / ".env"
+LAUNCHER_STATE_PATH = ROOT / "data" / "state" / "launcher_state.json"
+
+
+def load_settings_dict() -> dict[str, Any]:
+    """Load settings.yaml as raw dict."""
+    import yaml
+    if SETTINGS_PATH.exists():
+        with open(SETTINGS_PATH, encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    return {}
+
+
+def save_settings_dict(data: dict[str, Any]) -> None:
+    """Write settings.yaml preserving structure."""
+    import yaml
+    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+        yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+
+def load_env_dict() -> dict[str, str]:
+    """Parse .env into a dict."""
+    env: dict[str, str] = {}
+    if ENV_PATH.exists():
+        for line in ENV_PATH.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" in line:
+                key, _, val = line.partition("=")
+                env[key.strip()] = val.strip()
+    return env
+
+
+def save_env_dict(data: dict[str, str]) -> None:
+    """Write .env file."""
+    lines = [
+        "# AgentGolem Environment Configuration",
+        "# Auto-generated by run_golem.py — do not commit this file.",
+        "",
+    ]
+    for key, val in data.items():
+        lines.append(f"{key}={val}")
+    ENV_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def load_launcher_state() -> dict[str, Any]:
+    LAUNCHER_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if LAUNCHER_STATE_PATH.exists():
+        return json.loads(LAUNCHER_STATE_PATH.read_text(encoding="utf-8"))
+    return {}
+
+
+def save_launcher_state(data: dict[str, Any]) -> None:
+    LAUNCHER_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    LAUNCHER_STATE_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Unified parameter value access
+# ---------------------------------------------------------------------------
+
+class ParamStore:
+    """Unified read/write for all parameters across settings.yaml, .env, and launcher state."""
+
+    def __init__(self) -> None:
+        self.settings: dict[str, Any] = load_settings_dict()
+        self.env: dict[str, str] = load_env_dict()
+        self.launcher: dict[str, Any] = load_launcher_state()
+        self._runtime_overrides: dict[str, Any] = {}
+
+    def get(self, key: str, ptype: str) -> Any:
+        """Get current value for a parameter."""
+        if key in self._runtime_overrides:
+            return self._runtime_overrides[key]
+
+        if key in LAUNCHER_DEFAULTS:
+            return self.launcher.get(key, LAUNCHER_DEFAULTS[key])
+
+        if key in ENV_KEY_MAP:
+            env_key = ENV_KEY_MAP[key]
+            raw = self.env.get(env_key, "")
+            if ptype == "int_env":
+                return int(raw) if raw else 0
+            return raw
+
+        val = self.settings.get(key)
+        if val is not None:
+            return val
+
+        from agentgolem.config.settings import Settings
+        defaults = Settings()
+        return getattr(defaults, key, "")
+
+    def set(self, key: str, value: Any, ptype: str) -> None:
+        """Set a parameter value and persist it."""
+        self._runtime_overrides[key] = value
+
+        if key in LAUNCHER_DEFAULTS:
+            self.launcher[key] = value
+            save_launcher_state(self.launcher)
+        elif key in ENV_KEY_MAP:
+            env_key = ENV_KEY_MAP[key]
+            self.env[env_key] = str(value)
+            save_env_dict(self.env)
+        else:
+            self.settings[key] = value
+            save_settings_dict(self.settings)
+
+    def get_display(self, key: str, ptype: str) -> str:
+        """Get displayable value (masks secrets)."""
+        val = self.get(key, ptype)
+        if ptype == "secret":
+            return mask_secret(str(val))
+        if ptype == "list[str]":
+            return ", ".join(val) if isinstance(val, list) else str(val)
+        if ptype == "bool":
+            return str(val).lower()
+        return str(val)
+
+    def reload_into_settings_object(self) -> "Settings":
+        """Build a live Settings object from current values."""
+        from agentgolem.config.settings import Settings
+        merged = {}
+        for key, _, _, ptype, _ in PARAM_DEFS:
+            if key in ENV_KEY_MAP or key in LAUNCHER_DEFAULTS:
+                continue
+            merged[key] = self.get(key, ptype)
+        return Settings(**merged)
+
+
+# ---------------------------------------------------------------------------
+# Input parsing
+# ---------------------------------------------------------------------------
+
+def parse_input(raw: str, ptype: str) -> Any:
+    """Convert user input string to the correct Python type."""
+    if ptype in ("str", "str_env", "secret"):
+        return raw
+    if ptype in ("int", "int_env"):
+        return int(raw)
+    if ptype == "float":
+        return float(raw)
+    if ptype == "bool":
+        return raw.lower() in ("true", "yes", "1", "on", "y")
+    if ptype == "list[str]":
+        return [s.strip() for s in raw.split(",") if s.strip()]
+    return raw
+
+
+# ---------------------------------------------------------------------------
+# Startup parameter walkthrough
+# ---------------------------------------------------------------------------
+
+def walkthrough(store: ParamStore) -> bool:
+    """Walk through all parameters interactively. Returns True if any changed."""
+    changed = False
+    current_group = ""
+
+    cprint(BANNER, C.CYAN)
+
+    # Quick-start option: show current summary then ask
+    cprint("  Current Configuration Summary:", C.BOLD)
+    for key, display_name, _, ptype, group in PARAM_DEFS:
+        if ptype == "secret":
+            val = store.get_display(key, ptype)
+        else:
+            val = store.get_display(key, ptype)
+        # Only show non-empty/interesting values in the summary
+        if val and val != "(not set)" and val != "":
+            pass  # include it
+        else:
+            continue
+    # Compact summary table
+    prev_group = ""
+    for key, display_name, _, ptype, group in PARAM_DEFS:
+        if group != prev_group:
+            prev_group = group
+            cprint(f"  ─── {group} {'─' * (45 - len(group))}", C.MAGENTA)
+        val = store.get_display(key, ptype)
+        print(f"  {C.DIM}{display_name:<35}{C.RESET} {val}")
+    print()
+
+    try:
+        choice = input(f"  {C.GREEN}Accept all and start? [Y/n]{C.RESET} → ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+
+    if choice in ("", "y", "yes"):
+        cprint("\n  ✓ Using current configuration.\n", C.GREEN)
+        return False
+
+    # Full walkthrough
+    cprint("\n  Modify parameters (press Enter to keep current value):\n", C.DIM)
+
+    for key, display_name, description, ptype, group in PARAM_DEFS:
+        if group != current_group:
+            current_group = group
+            cprint(f"\n  ─── {group} {'─' * (45 - len(group))}", C.MAGENTA)
+
+        current = store.get_display(key, ptype)
+        print(f"\n  {C.CYAN}{display_name}{C.RESET}")
+        print(f"  {C.DIM}{description}{C.RESET}")
+        colour = C.YELLOW if ptype == "secret" else C.GREEN
+        prompt = f"  {colour}[{current}]{C.RESET} → "
+
+        try:
+            raw = input(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return changed
+
+        if raw == "":
+            continue
+
+        try:
+            value = parse_input(raw, ptype)
+            store.set(key, value, ptype)
+            changed = True
+            cprint(f"  ✓ Set to: {store.get_display(key, ptype)}", C.GREEN)
+        except (ValueError, TypeError) as e:
+            cprint(f"  ✗ Invalid input: {e} — keeping previous value", C.RED)
+
+    print()
+    cprint("  ═══════════════════════════════════════════════════", C.MAGENTA)
+    if changed:
+        cprint("  ✓ Configuration saved.\n", C.GREEN)
+    else:
+        cprint("  No changes — using existing configuration.\n", C.DIM)
+    return changed
+
+
+# ---------------------------------------------------------------------------
+# /help text — the single authoritative reference
+# ---------------------------------------------------------------------------
+
+HELP_TEXT = f"""
+  {C.BOLD}━━━ AgentGolem Ethical Council Commands ━━━{C.RESET}
+
+  {C.CYAN}/help{C.RESET}                       Show this help message.
+  {C.CYAN}/status{C.RESET}                     Show all agents' mode, task, uptime.
+  {C.CYAN}/params{C.RESET}                     List every parameter and its current value.
+  {C.CYAN}/get <param>{C.RESET}                Show the current value of a single parameter.
+  {C.CYAN}/set <param> <value>{C.RESET}        Change a parameter at runtime (persists to disk).
+  {C.CYAN}/wake{C.RESET}                       Wake all agents.
+  {C.CYAN}/sleep{C.RESET}                      Put all agents to sleep.
+  {C.CYAN}/pause{C.RESET}                      Pause all agents.
+  {C.CYAN}/resume{C.RESET}                     Resume all agents.
+  {C.CYAN}/heartbeat{C.RESET}                  Trigger heartbeat for all agents.
+  {C.CYAN}/soul{C.RESET}                       Print each agent's current soul.
+  {C.CYAN}/logs [N]{C.RESET}                   Show the last N audit-log entries (default 10).
+  {C.CYAN}/dashboard{C.RESET}                  Show the web-dashboard URL.
+  {C.CYAN}/restart{C.RESET}                    Stop and restart (re-runs config walkthrough).
+  {C.CYAN}/quit{C.RESET}  or  {C.CYAN}/exit{C.RESET}           Gracefully shut down all agents.
+
+  {C.BOLD}━━━ Talking to Agents ━━━{C.RESET}
+
+  {C.DIM}Bare text is sent to ALL agents:{C.RESET}
+    Hello everyone
+
+  {C.DIM}Prefix with @Name to address one agent:{C.RESET}
+    @Council-1 What do you think about compassion?
+"""
+
+
+# ---------------------------------------------------------------------------
+# Runtime console (runs in a background thread alongside the agent loop)
+# ---------------------------------------------------------------------------
+
+class RuntimeConsole:
+    """Thread-safe runtime command console — supports one or many agents."""
+
+    def __init__(
+        self,
+        store: ParamStore,
+        loop_ref: Any,
+        async_loop: asyncio.AbstractEventLoop,
+        agents: list[Any] | None = None,
+        bus: Any | None = None,
+    ) -> None:
+        self._store = store
+        self._loop_ref = loop_ref        # single MainLoop (legacy compat)
+        self._async_loop = async_loop
+        self._bus = bus
+        self._running = True
+        self._restart_requested = False
+        self._thread: threading.Thread | None = None
+        self._param_lookup: dict[str, tuple[str, str, str, str]] = {
+            key: (display_name, desc, ptype, group)
+            for key, display_name, desc, ptype, group in PARAM_DEFS
+        }
+
+        # Build agents list (backward compat: single loop_ref → one-elem list)
+        if agents is not None:
+            self._agents: list[Any] = agents
+        elif loop_ref is not None:
+            self._agents = [loop_ref]
+        else:
+            self._agents = []
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, daemon=True, name="console")
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._running = False
+
+    # ── main input loop ───────────────────────────────────────────────
+
+    def _run(self) -> None:
+        cprint(ALIVE_BANNER, C.GREEN)
+        while self._running:
+            try:
+                raw = input(f"  {C.CYAN}golem>{C.RESET} ").strip()
+            except (EOFError, KeyboardInterrupt):
+                self._cmd_quit()
+                return
+
+            if not raw:
+                continue
+
+            if raw.startswith("/"):
+                self._dispatch_command(raw)
+            elif raw.startswith("@"):
+                # @Agent message — route to specific agent
+                parts = raw.split(" ", 1)
+                target_name = parts[0][1:]
+                text = parts[1] if len(parts) > 1 else ""
+                self._cmd_message_to(target_name, text)
+            else:
+                # Bare text → broadcast to all agents
+                self._cmd_message_all(raw)
+
+    def _dispatch_command(self, raw: str) -> None:
+        parts = raw.split(maxsplit=2)
+        cmd = parts[0].lower()
+
+        try:
+            if cmd in ("/quit", "/exit"):
+                self._cmd_quit()
+            elif cmd == "/help":
+                print(HELP_TEXT)
+            elif cmd == "/status":
+                self._cmd_status()
+            elif cmd == "/params":
+                self._cmd_params()
+            elif cmd == "/get" and len(parts) >= 2:
+                self._cmd_get(parts[1])
+            elif cmd == "/set" and len(parts) >= 3:
+                self._cmd_set(parts[1], parts[2])
+            elif cmd == "/wake":
+                self._cmd_transition("awake")
+            elif cmd == "/sleep":
+                self._cmd_transition("asleep")
+            elif cmd == "/pause":
+                self._cmd_transition("paused")
+            elif cmd == "/resume":
+                self._cmd_transition("awake")
+            elif cmd == "/heartbeat":
+                self._cmd_heartbeat()
+            elif cmd == "/soul":
+                self._cmd_soul()
+            elif cmd == "/logs":
+                n = int(parts[1]) if len(parts) >= 2 else 10
+                self._cmd_logs(n)
+            elif cmd == "/dashboard":
+                self._cmd_dashboard()
+            elif cmd == "/restart":
+                self._cmd_restart()
+            else:
+                cprint(f"  Unknown command: {cmd}  (type /help for the list)", C.RED)
+        except Exception as e:
+            cprint(f"  Error: {e}", C.RED)
+
+    # ── individual command handlers ───────────────────────────────────
+
+    def _cmd_status(self) -> None:
+        if not self._agents:
+            cprint("  No agents running.", C.YELLOW)
+            return
+        for agent in self._agents:
+            info = agent.runtime_state.to_dict()
+            mode = info["mode"]
+            colour = C.GREEN if mode == "awake" else (C.YELLOW if mode == "asleep" else C.RED)
+            name = getattr(agent, "agent_name", "?")
+            ev = getattr(agent, "ethical_vector", "")
+            named = "✓" if getattr(agent, "_name_discovered", False) else "?"
+            cycle = getattr(agent, "_wake_cycle_count", 0)
+            cprint(f"  {name:<16} [{named}] mode={mode.upper():<7}  "
+                   f"cycle={cycle}  vector={ev}", colour)
+        print()
+
+    def _cmd_params(self) -> None:
+        current_group = ""
+        for key, _, _, ptype, group in PARAM_DEFS:
+            if group != current_group:
+                current_group = group
+                cprint(f"\n  ─── {group} {'─' * (40 - len(group))}", C.MAGENTA)
+            val = self._store.get_display(key, ptype)
+            print(f"  {C.CYAN}{key:<40}{C.RESET} = {val}")
+        print()
+
+    def _cmd_get(self, key: str) -> None:
+        if key not in self._param_lookup:
+            cprint(f"  Unknown parameter: {key}", C.RED)
+            cprint("  Use /params to see the full list.", C.DIM)
+            return
+        _, _, ptype, _ = self._param_lookup[key]
+        val = self._store.get_display(key, ptype)
+        cprint(f"  {key} = {val}", C.GREEN)
+
+    def _cmd_set(self, key: str, raw_value: str) -> None:
+        if key not in self._param_lookup:
+            cprint(f"  Unknown parameter: {key}", C.RED)
+            cprint("  Use /params to see the full list.", C.DIM)
+            return
+        _, _, ptype, _ = self._param_lookup[key]
+        try:
+            value = parse_input(raw_value, ptype)
+            self._store.set(key, value, ptype)
+            display = self._store.get_display(key, ptype)
+            cprint(f"  ✓ {key} = {display}  (persisted)", C.GREEN)
+            self._hot_reload(key, value)
+        except (ValueError, TypeError) as e:
+            cprint(f"  ✗ Invalid value: {e}", C.RED)
+
+    def _cmd_transition(self, target: str) -> None:
+        from agentgolem.runtime.state import AgentMode
+        mode_map = {
+            "awake": AgentMode.AWAKE,
+            "asleep": AgentMode.ASLEEP,
+            "paused": AgentMode.PAUSED,
+        }
+        target_mode = mode_map.get(target)
+        if target_mode is None:
+            cprint(f"  Unknown mode: {target}", C.RED)
+            return
+        for agent in self._agents:
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    agent.runtime_state.transition(target_mode), self._async_loop
+                )
+                future.result(timeout=5.0)
+                if target == "awake":
+                    agent.interrupt_manager.signal_resume()
+                name = getattr(agent, "agent_name", "?")
+                cprint(f"  ✓ {name} → {target.upper()}", C.GREEN)
+            except ValueError as e:
+                cprint(f"  ✗ {getattr(agent, 'agent_name', '?')}: {e}", C.RED)
+            except Exception as e:
+                cprint(f"  ✗ {getattr(agent, 'agent_name', '?')}: {e}", C.RED)
+
+    def _cmd_message_all(self, text: str) -> None:
+        """Send a message to every agent."""
+        for agent in self._agents:
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    agent.interrupt_manager.send_message(text), self._async_loop
+                )
+                future.result(timeout=5.0)
+            except Exception as e:
+                name = getattr(agent, "agent_name", "?")
+                cprint(f"  ✗ {name}: {e}", C.RED)
+        cprint(f"  ✓ Message sent to {len(self._agents)} agents: {text[:60]}", C.GREEN)
+
+    def _cmd_message_to(self, target_name: str, text: str) -> None:
+        """Send a message to a specific agent by name (or partial match)."""
+        target_lower = target_name.lower()
+        for agent in self._agents:
+            name = getattr(agent, "agent_name", "")
+            if name.lower() == target_lower or name.lower().startswith(target_lower):
+                try:
+                    future = asyncio.run_coroutine_threadsafe(
+                        agent.interrupt_manager.send_message(text), self._async_loop
+                    )
+                    future.result(timeout=5.0)
+                    cprint(f"  ✓ → {name}: {text[:60]}", C.GREEN)
+                except Exception as e:
+                    cprint(f"  ✗ {name}: {e}", C.RED)
+                return
+        cprint(f"  Unknown agent: {target_name}", C.RED)
+        cprint(f"  Known agents: {', '.join(getattr(a, 'agent_name', '?') for a in self._agents)}", C.DIM)
+
+    # Keep legacy _cmd_message for backward compat
+    def _cmd_message(self, text: str) -> None:
+        self._cmd_message_all(text)
+
+    def _cmd_heartbeat(self) -> None:
+        for agent in self._agents:
+            name = getattr(agent, "agent_name", "?")
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    agent._run_heartbeat(), self._async_loop
+                )
+                future.result(timeout=15.0)
+                cprint(f"  ✓ {name} heartbeat triggered", C.GREEN)
+            except Exception as e:
+                cprint(f"  ✗ {name}: {e}", C.RED)
+
+    def _cmd_soul(self) -> None:
+        for agent in self._agents:
+            name = getattr(agent, "agent_name", "?")
+            ev = getattr(agent, "ethical_vector", "")
+            named = "✓" if getattr(agent, "_name_discovered", False) else "?"
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    agent.soul_manager.read(), self._async_loop
+                )
+                content = future.result(timeout=5.0)
+                cprint(f"\n  ─── {name} [{named}] ({ev}) {'─' * 20}", C.MAGENTA)
+                if content:
+                    # Show just the first few lines
+                    for line in content.splitlines()[:8]:
+                        print(f"  {line}")
+                    if len(content.splitlines()) > 8:
+                        cprint(f"  … ({len(content.splitlines())} lines total)", C.DIM)
+                else:
+                    cprint("  (empty)", C.DIM)
+            except Exception as e:
+                cprint(f"  ✗ {name}: {e}", C.RED)
+        print()
+
+    def _cmd_logs(self, n: int) -> None:
+        # Use the first agent's audit logger (they share the same base dir)
+        if not self._agents:
+            cprint("  No agents running.", C.YELLOW)
+            return
+        agent = self._agents[0]
+        entries = agent.audit_logger.read(limit=n)
+        if not entries:
+            cprint("  (no audit log entries yet)", C.DIM)
+            return
+        for entry in entries:
+            ts = entry.get("timestamp", "?")[:19]
+            mt = entry.get("mutation_type", "?")
+            tid = entry.get("target_id", "?")
+            print(f"  {C.DIM}{ts}{C.RESET}  {C.CYAN}{mt:<25}{C.RESET} → {tid}")
+        print()
+
+    def _cmd_dashboard(self) -> None:
+        enabled = self._store.get("dashboard_enabled", "bool")
+        if enabled:
+            host = self._store.get("dashboard_host", "str")
+            port = self._store.get("dashboard_port", "int")
+            cprint(f"  🌐 http://{host}:{port}/dashboard", C.CYAN)
+        else:
+            cprint("  Dashboard is disabled.  /set dashboard_enabled true  to enable.", C.YELLOW)
+
+    def _cmd_quit(self) -> None:
+        cprint("\n  Shutting down the Ethical Council…", C.YELLOW)
+        self._running = False
+        for agent in self._agents:
+            agent.stop()
+
+    def _cmd_restart(self) -> None:
+        cprint("\n  🔄 Restarting the Ethical Council…", C.YELLOW)
+        self._restart_requested = True
+        self._running = False
+        for agent in self._agents:
+            agent.stop()
+
+    # ── hot-reload engine ─────────────────────────────────────────────
+
+    def _hot_reload(self, key: str, value: Any) -> None:
+        """Push parameter change into all live agent subsystems."""
+        for agent in self._agents:
+            if hasattr(agent._settings, key):
+                try:
+                    setattr(agent._settings, key, value)
+                except Exception:
+                    pass
+
+            if key == "awake_duration_minutes":
+                agent.heartbeat_manager._interval = timedelta(minutes=value)
+                agent._awake_duration = timedelta(minutes=value)
+            elif key == "sleep_duration_minutes":
+                agent._sleep_duration = timedelta(minutes=value)
+            elif key == "wind_down_minutes":
+                agent._wind_down_duration = timedelta(minutes=value)
+            elif key == "soul_update_min_confidence":
+                agent.soul_manager._min_confidence = value
+            elif key == "sleep_cycle_minutes":
+                agent.sleep_scheduler.cycle_minutes = value
+            elif key == "sleep_max_nodes_per_cycle":
+                agent.sleep_scheduler.max_nodes_per_cycle = value
+            elif key == "sleep_max_time_ms":
+                agent.sleep_scheduler.max_time_ms = value
+            elif key == "autonomous_interval_seconds":
+                agent._autonomous_interval = value
+
+        if key == "log_level":
+            import logging
+            level = getattr(logging, str(value).upper(), logging.INFO)
+            logging.getLogger().setLevel(level)
+            cprint(f"    → Log level changed to {value}", C.DIM)
+        elif key == "dry_run_mode":
+            cprint(f"    → Dry-run mode {'enabled' if value else 'disabled'}", C.DIM)
+        elif key in ("awake_duration_minutes", "sleep_duration_minutes",
+                      "wind_down_minutes", "soul_update_min_confidence",
+                      "sleep_cycle_minutes", "sleep_max_nodes_per_cycle",
+                      "sleep_max_time_ms", "autonomous_interval_seconds"):
+            cprint(f"    → {key} updated live for all agents", C.DIM)
+
+
+# ---------------------------------------------------------------------------
+# Utility
+# ---------------------------------------------------------------------------
+
+def _human_duration(delta: timedelta) -> str:
+    total = int(delta.total_seconds())
+    if total < 60:
+        return f"{total}s"
+    if total < 3600:
+        return f"{total // 60}m {total % 60}s"
+    h = total // 3600
+    m = (total % 3600) // 60
+    return f"{h}h {m}m"
+
+
+# ---------------------------------------------------------------------------
+# Dashboard runner
+# ---------------------------------------------------------------------------
+
+def start_dashboard(store: ParamStore, agents: list[Any]) -> threading.Thread | None:
+    """Start the dashboard in a background thread if enabled."""
+    enabled = store.get("dashboard_enabled", "bool")
+    if not enabled:
+        return None
+
+    host = str(store.get("dashboard_host", "str"))
+    port = int(store.get("dashboard_port", "int"))
+    first_agent = agents[0] if agents else None
+
+    def _run_dashboard() -> None:
+        import uvicorn
+        from agentgolem.dashboard.api import DashboardState, create_app
+        from agentgolem.dashboard.app import create_dashboard_app
+
+        import agentgolem.dashboard.api as api_module
+        if first_agent:
+            api_module.state = DashboardState(
+                runtime_state=first_agent.runtime_state,
+                soul_manager=first_agent.soul_manager,
+                heartbeat_manager=first_agent.heartbeat_manager,
+                audit_logger=first_agent.audit_logger,
+                interrupt_manager=first_agent.interrupt_manager,
+                approval_gate=getattr(first_agent, "_approval_gate", None),
+                data_dir=first_agent._data_dir,
+            )
+
+        dashboard = create_dashboard_app()
+        api_app = create_app(api_module.state)
+        for route in api_app.routes:
+            dashboard.router.routes.append(route)
+
+        config = uvicorn.Config(
+            dashboard,
+            host=host,
+            port=port,
+            log_level="warning",
+            access_log=False,
+        )
+        server = uvicorn.Server(config)
+        server.run()
+
+    thread = threading.Thread(target=_run_dashboard, daemon=True, name="dashboard")
+    thread.start()
+    cprint(f"  🌐 Dashboard → http://{host}:{port}/dashboard", C.CYAN)
+    return thread
+
+
+# ---------------------------------------------------------------------------
+# Memory DB initialisation (per-agent)
+# ---------------------------------------------------------------------------
+
+async def init_memory_db(agent: Any, data_dir: Path) -> Any:
+    """Initialise the SQLite memory graph and wire it to one agent."""
+    from agentgolem.memory.schema import init_db
+    from agentgolem.memory.store import SQLiteMemoryStore
+
+    db_path = data_dir / "memory" / "graph.db"
+    db = await init_db(db_path)
+
+    store = SQLiteMemoryStore(db, agent.audit_logger)
+    agent.set_memory_store(store)
+    return db
+
+
+# ---------------------------------------------------------------------------
+# Agent bootstrap + run (multi-agent swarm)
+# ---------------------------------------------------------------------------
+
+async def run_agent(store: ParamStore) -> bool:
+    """Initialise and run the agent swarm. Returns True if restart requested."""
+    from agentgolem.config import reset_config
+    from agentgolem.logging.structured import setup_logging
+    from agentgolem.runtime.bus import InterAgentBus
+    from agentgolem.runtime.loop import MainLoop
+
+    reset_config()
+    settings = store.reload_into_settings_object()
+
+    from agentgolem.config.secrets import Secrets
+    secrets = Secrets(_env_file=str(ENV_PATH)) if ENV_PATH.exists() else Secrets()
+
+    base_data_dir = settings.data_dir
+    agent_count = int(store.get("agent_count", "int"))
+    offset_minutes = float(store.get("agent_offset_minutes", "float"))
+
+    # Use AGENT_DEFS up to agent_count
+    defs = AGENT_DEFS[:agent_count]
+
+    # Create shared bus
+    bus = InterAgentBus()
+
+    agents: list[MainLoop] = []
+    dbs: list[Any] = []
+
+    setup_logging(settings.log_level, base_data_dir, secrets)
+
+    for i, agent_def in enumerate(defs):
+        agent_id = agent_def["initial_id"]
+        ev = agent_def["ethical_vector"]
+        color = agent_def["color_code"]
+
+        # Per-agent data directory
+        agent_data_dir = base_data_dir / agent_id.lower().replace("-", "_")
+        agent_data_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create per-agent settings (override data_dir)
+        agent_settings = settings.model_copy(update={"data_dir": agent_data_dir})
+
+        # Write soul.md if it doesn't exist
+        soul_path = agent_data_dir / "soul.md"
+        if not soul_path.exists():
+            soul_path.parent.mkdir(parents=True, exist_ok=True)
+            soul_path.write_text(_soul_template(agent_id, ev), encoding="utf-8")
+
+        # Write heartbeat.md stub if it doesn't exist
+        hb_path = agent_data_dir / "heartbeat.md"
+        if not hb_path.exists():
+            hb_path.parent.mkdir(parents=True, exist_ok=True)
+            hb_path.write_text("# Heartbeat\n\nAwaiting first heartbeat.\n", encoding="utf-8")
+
+        # Stagger: agent i starts after i * offset_minutes
+        delay_seconds = i * offset_minutes * 60.0
+
+        loop = MainLoop(
+            settings=agent_settings,
+            secrets=secrets,
+            agent_name=agent_id,
+            ethical_vector=ev,
+            peer_bus=bus,
+            start_delay_seconds=delay_seconds,
+        )
+
+        # Wire colour-coded callbacks
+        def _make_response_cb(a_color: str, a_name_ref: list):
+            def cb(text: str) -> None:
+                print(f"\n  {a_color}🧠 {a_name_ref[0]}:{C.RESET} {text}\n")
+            return cb
+
+        def _make_activity_cb(a_color: str, a_id_ref: list):
+            def cb(icon: str, text: str) -> None:
+                ts = datetime.now().strftime("%H:%M:%S")
+                # a_id_ref[0] is updated when agent renames
+                print(f"  {C.DIM}{ts}{C.RESET} {a_color}[{a_id_ref[0]:<12}]{C.RESET} {icon} {text}")
+            return cb
+
+        # Use a mutable list so the closure picks up name changes
+        name_ref = [agent_id]
+        loop._response_callback = _make_response_cb(color, name_ref)
+        loop._activity_callback = _make_activity_cb(color, name_ref)
+        # Store name_ref on the loop so we can update it if agent renames
+        loop._console_name_ref = name_ref  # type: ignore[attr-defined]
+
+        # Approval gate
+        from agentgolem.tools.base import ApprovalGate
+        approval_actions = store.get("approval_required_actions", "list[str]")
+        if isinstance(approval_actions, str):
+            approval_actions = [s.strip() for s in approval_actions.split(",")]
+        loop._approval_gate = ApprovalGate(  # type: ignore[attr-defined]
+            agent_data_dir / "approvals", approval_actions,
+        )
+
+        loop._ensure_dirs()
+
+        # Register on bus
+        bus.register(agent_id)
+
+        agents.append(loop)
+
+    # Init memory DBs for all agents
+    for agent in agents:
+        db = await init_memory_db(agent, agent._data_dir)
+        dbs.append(db)
+
+    # Start dashboard (wired to the first agent for now)
+    start_dashboard(store, agents)
+
+    # Print council lineup
+    cprint("\n  ─── Ethical Council Lineup ───────────────────────", C.MAGENTA)
+    for i, (agent, agent_def) in enumerate(zip(agents, defs)):
+        color = agent_def["color_code"]
+        delay = i * offset_minutes
+        print(f"  {color}{agent.agent_name:<16}{C.RESET} "
+              f"vector={agent.ethical_vector:<30} "
+              f"delay={delay:.0f}m")
+    print()
+
+    # Start console
+    loop_handle = asyncio.get_event_loop()
+    console = RuntimeConsole(
+        store, loop_ref=agents[0], async_loop=loop_handle,
+        agents=agents, bus=bus,
+    )
+    console.start()
+
+    # Run all agents concurrently
+    tasks = [asyncio.create_task(agent.run()) for agent in agents]
+
+    try:
+        await asyncio.gather(*tasks)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        restart = console._restart_requested
+        console.stop()
+        for db in dbs:
+            await db.close()
+        if restart:
+            cprint("\n  Ethical Council stopped for restart.\n", C.YELLOW)
+        else:
+            cprint("\n  The Ethical Council has stopped.", C.YELLOW)
+        return restart
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    os.chdir(ROOT)                           # ensure CWD is repo root
+    store = ParamStore()
+
+    try:
+        walkthrough(store)
+    except (EOFError, KeyboardInterrupt):
+        cprint("\n  Aborted.", C.YELLOW)
+        sys.exit(0)
+
+    while True:
+        cprint("  Starting the Ethical Council…\n", C.GREEN)
+
+        try:
+            restart = asyncio.run(run_agent(store))
+        except KeyboardInterrupt:
+            cprint("\n  Interrupted. Goodbye.", C.YELLOW)
+            break
+
+        if not restart:
+            break
+
+        # Restart requested — re-run the walkthrough then loop
+        cprint("  ═══════════════════════════════════════════════════", C.MAGENTA)
+        try:
+            walkthrough(store)
+        except (EOFError, KeyboardInterrupt):
+            cprint("\n  Aborted.", C.YELLOW)
+            break
+
+
+if __name__ == "__main__":
+    main()

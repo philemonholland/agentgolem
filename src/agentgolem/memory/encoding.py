@@ -1,0 +1,215 @@
+"""Memory encoding — input → conceptual memories pipeline."""
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from pydantic import BaseModel
+
+from agentgolem.llm.base import LLMClient, Message
+from agentgolem.logging.audit import AuditLogger
+from agentgolem.memory.models import (
+    ConceptualNode,
+    EdgeType,
+    MemoryCluster,
+    MemoryEdge,
+    NodeFilter,
+    NodeType,
+    Source,
+    SourceKind,
+)
+from agentgolem.memory.store import SQLiteMemoryStore
+
+# Trust priors by node type
+TYPE_PRIORS: dict[NodeType, float] = {
+    NodeType.FACT: 0.5,
+    NodeType.PREFERENCE: 0.8,
+    NodeType.EVENT: 0.6,
+    NodeType.GOAL: 0.7,
+    NodeType.RISK: 0.4,
+    NodeType.INTERPRETATION: 0.35,
+    NodeType.IDENTITY: 0.9,
+    NodeType.RULE: 0.5,
+    NodeType.ASSOCIATION: 0.3,
+    NodeType.PROCEDURE: 0.6,
+}
+
+
+class DecomposedConcept(BaseModel):
+    text: str
+    type: str  # will be mapped to NodeType
+
+
+class DecompositionResult(BaseModel):
+    concepts: list[DecomposedConcept]
+
+
+class ComparisonDecision(BaseModel):
+    decision: str  # "new_node", "keep_exact", "keep_both", "merge_candidate", "supersedes", "contradicts"
+    existing_node_id: str = ""
+    reason: str = ""
+
+
+class MemoryEncoder:
+    def __init__(
+        self,
+        store: SQLiteMemoryStore,
+        llm: LLMClient,
+        audit_logger: AuditLogger | None = None,
+    ) -> None:
+        self._store = store
+        self._llm = llm
+        self._audit = audit_logger
+
+    async def encode(self, input_text: str, source: Source) -> list[ConceptualNode]:
+        """Full encoding pipeline: decompose → classify → compare → store."""
+        # Step 1-2: Decompose and classify
+        concepts = await self._decompose(input_text)
+
+        # Store source
+        await self._store.add_source(source)
+
+        created_nodes: list[ConceptualNode] = []
+
+        for concept in concepts:
+            # Step 3: Map type
+            node_type = self._map_type(concept.type)
+
+            # Step 4: Find related existing nodes
+            existing = await self._store.query_nodes(
+                NodeFilter(
+                    text_contains=concept.text.split()[0] if concept.text else None,
+                    limit=5,
+                )
+            )
+
+            # Step 5: Decide action
+            decision = await self._compare(concept.text, existing)
+
+            # Step 6: Create or update based on decision
+            node = await self._apply_decision(concept, node_type, decision, source)
+            if node:
+                created_nodes.append(node)
+
+        # Step 7: Build cluster if multiple nodes
+        if len(created_nodes) > 1:
+            cluster = MemoryCluster(
+                label=input_text[:60],
+                node_ids=[n.id for n in created_nodes],
+                source_ids=[source.id],
+            )
+            cluster_id = await self._store.add_cluster(cluster)
+            for n in created_nodes:
+                await self._store.add_cluster_member(cluster_id, n.id)
+            await self._store.link_cluster_source(cluster_id, source.id)
+
+        # Log
+        if self._audit:
+            self._audit.log(
+                mutation_type="memory_encode",
+                target_id=source.id,
+                evidence={
+                    "input_length": len(input_text),
+                    "concepts_found": len(concepts),
+                    "nodes_created": len(created_nodes),
+                    "source_kind": source.kind.value,
+                },
+            )
+
+        return created_nodes
+
+    async def _decompose(self, text: str) -> list[DecomposedConcept]:
+        """Use LLM to decompose text into atomic concepts."""
+        prompt = (
+            "Decompose the following text into atomic conceptual memories. "
+            "Each concept should be 3-15 words. Classify each as one of: "
+            "fact, preference, event, goal, risk, interpretation, identity, rule, association, procedure.\n\n"
+            f"Text: {text}\n\n"
+            'Respond with JSON: {{"concepts": [{{"text": "...", "type": "..."}}]}}'
+        )
+        result = await self._llm.complete_structured(
+            [Message(role="user", content=prompt)],
+            DecompositionResult,
+        )
+        return result.concepts
+
+    def _map_type(self, type_str: str) -> NodeType:
+        """Map a string type to NodeType enum."""
+        try:
+            return NodeType(type_str.lower())
+        except ValueError:
+            return NodeType.FACT  # default fallback
+
+    async def _compare(
+        self, concept_text: str, existing: list[ConceptualNode]
+    ) -> ComparisonDecision:
+        """Compare a candidate concept with existing nodes."""
+        if not existing:
+            return ComparisonDecision(decision="new_node")
+
+        existing_descriptions = "\n".join(
+            f"- [{n.id}] {n.text} (type={n.type.value}, trust={n.trustworthiness:.2f})"
+            for n in existing
+        )
+        prompt = (
+            f'New concept: "{concept_text}"\n\n'
+            f"Existing nodes:\n{existing_descriptions}\n\n"
+            "Decide: new_node, keep_exact (identical exists), keep_both (similar but different), "
+            "merge_candidate (should merge), supersedes (new replaces old), contradicts (conflicts).\n"
+            'Respond with JSON: {{"decision": "...", "existing_node_id": "...", "reason": "..."}}'
+        )
+        return await self._llm.complete_structured(
+            [Message(role="user", content=prompt)],
+            ComparisonDecision,
+        )
+
+    async def _apply_decision(
+        self,
+        concept: DecomposedConcept,
+        node_type: NodeType,
+        decision: ComparisonDecision,
+        source: Source,
+    ) -> ConceptualNode | None:
+        """Create/update nodes based on comparison decision."""
+        trust_prior = TYPE_PRIORS.get(node_type, 0.5)
+
+        if decision.decision == "keep_exact":
+            # Node already exists, just link source
+            if decision.existing_node_id:
+                await self._store.link_node_source(decision.existing_node_id, source.id)
+            return None
+
+        # Create new node for: new_node, keep_both, merge_candidate, supersedes, contradicts
+        node = ConceptualNode(
+            text=concept.text,
+            type=node_type,
+            base_usefulness=trust_prior,
+            trustworthiness=trust_prior,
+        )
+        await self._store.add_node(node)
+        await self._store.link_node_source(node.id, source.id)
+
+        # Add relationship edges for non-new decisions
+        if decision.decision == "supersedes" and decision.existing_node_id:
+            edge = MemoryEdge(
+                source_id=node.id,
+                target_id=decision.existing_node_id,
+                edge_type=EdgeType.SUPERSEDES,
+            )
+            await self._store.add_edge(edge)
+        elif decision.decision == "contradicts" and decision.existing_node_id:
+            edge = MemoryEdge(
+                source_id=node.id,
+                target_id=decision.existing_node_id,
+                edge_type=EdgeType.CONTRADICTS,
+            )
+            await self._store.add_edge(edge)
+        elif decision.decision == "merge_candidate" and decision.existing_node_id:
+            edge = MemoryEdge(
+                source_id=node.id,
+                target_id=decision.existing_node_id,
+                edge_type=EdgeType.MERGE_CANDIDATE,
+            )
+            await self._store.add_edge(edge)
+
+        return node

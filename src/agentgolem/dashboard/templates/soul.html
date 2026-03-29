@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+
+{% block title %}Soul — AgentGolem{% endblock %}
+
+{% block content %}
+<h1>Soul Viewer</h1>
+
+<section>
+    <h2>Current Soul</h2>
+    <pre>{{ content }}</pre>
+</section>
+
+<section>
+    <h2>Version History</h2>
+    {% if versions %}
+    <table>
+        <thead>
+            <tr>
+                <th>Timestamp</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for v in versions %}
+            <tr>
+                <td class="mono">{{ v.timestamp }}</td>
+                <td>
+                    <details>
+                        <summary>Show diff</summary>
+                        <div hx-get="/api/soul/versions/{{ v.timestamp }}/diff"
+                             hx-trigger="toggle"
+                             hx-swap="innerHTML">
+                            <em>Loading diff…</em>
+                        </div>
+                    </details>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p>No version history available.</p>
+    {% endif %}
+</section>
+{% endblock %}

@@ -88,7 +88,9 @@ Key settings (see the file for defaults):
 | Setting                        | Default              | Description                         |
 |--------------------------------|----------------------|-------------------------------------|
 | `data_dir`                     | `"data"`             | Runtime data directory              |
-| `heartbeat_interval_hours`     | `6.0`               | Hours between heartbeat cycles      |
+| `awake_duration_minutes`       | `15.0`              | Minutes the agent stays awake       |
+| `sleep_duration_minutes`       | `60.0`              | Minutes the agent sleeps            |
+| `wind_down_minutes`            | `1.0`               | Wind-down grace period before sleep |
 | `soul_update_min_confidence`   | `0.7`               | Min confidence to update soul       |
 | `sleep_cycle_minutes`          | `5.0`               | Minutes between sleep cycles        |
 | `sleep_max_nodes_per_cycle`    | `100`               | Max nodes visited per sleep cycle   |

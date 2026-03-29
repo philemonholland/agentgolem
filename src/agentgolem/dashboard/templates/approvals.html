@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+
+{% block title %}Approvals — AgentGolem{% endblock %}
+
+{% block content %}
+<h1>Approval Queue</h1>
+
+{% if approvals %}
+{% for item in approvals %}
+<article>
+    <header>
+        <strong>{{ item.action }}</strong>
+        <span class="badge badge-warning">pending</span>
+    </header>
+    <p class="mono">ID: {{ item.request_id }}</p>
+    <p><strong>Context:</strong> {{ item.context | string | truncate(200) }}</p>
+    <p><small>Requested: {{ item.timestamp | default("—") }}</small></p>
+    <div role="group">
+        <button hx-post="/api/approvals/{{ item.request_id }}/approve"
+                hx-target="#result-{{ item.request_id }}"
+                hx-swap="innerHTML"
+                class="outline">✅ Approve</button>
+        <button hx-post="/api/approvals/{{ item.request_id }}/deny"
+                hx-target="#result-{{ item.request_id }}"
+                hx-swap="innerHTML"
+                class="outline secondary">❌ Deny</button>
+    </div>
+    <div id="result-{{ item.request_id }}"></div>
+</article>
+{% endfor %}
+{% else %}
+<p>No pending approvals.</p>
+{% endif %}
+{% endblock %}

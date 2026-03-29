@@ -317,7 +317,10 @@ State is persisted in `data/state/sleep_state.json`.
 ## Heartbeat Cycle
 
 The heartbeat is a periodic self-assessment that runs every
-`heartbeat_interval_hours` (default: 6 hours). It produces a new `heartbeat.md`.
+`awake_duration_minutes` (default: 15 minutes). When the awake period elapses the
+agent enters a wind-down phase (default: 1 minute) during which it writes a new
+`heartbeat.md`, then transitions to sleep for `sleep_duration_minutes` (default:
+60 minutes). The full cycle is: **sleep → wake → heartbeat/wind-down → sleep**.
 
 ### 10-Step Process
 

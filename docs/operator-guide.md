@@ -88,7 +88,9 @@ defaults; override only what you need.
 data_dir: "data"
 
 # --- Identity ---
-heartbeat_interval_hours: 6.0         # Hours between heartbeat self-assessments
+awake_duration_minutes: 15.0          # Minutes the agent stays awake
+sleep_duration_minutes: 60.0          # Minutes the agent sleeps
+wind_down_minutes: 1.0                # Grace period before sleeping
 soul_update_min_confidence: 0.7       # Minimum confidence to accept a soul change
 
 # --- Sleep / Default-Mode ---

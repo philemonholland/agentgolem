@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentgolem"
+version = "0.1.0"
+description = "A persistent autonomous agent with evolving identity, graph-based memory, and full auditability"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+    "typer>=0.12,<1",
+    "pydantic>=2.7,<3",
+    "pydantic-settings>=2.3,<3",
+    "pyyaml>=6.0,<7",
+    "structlog>=24.1,<25",
+    "aiosqlite>=0.20,<1",
+    "httpx>=0.27,<1",
+    "beautifulsoup4>=4.12,<5",
+    "fastapi>=0.111,<1",
+    "uvicorn[standard]>=0.30,<1",
+    "jinja2>=3.1,<4",
+    "python-multipart>=0.0.9,<1",
+    "aiosmtplib>=3.0,<4",
+    "aioimaplib>=1.1,<2",
+    "rich>=13.7,<14",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2,<9",
+    "pytest-asyncio>=0.23,<1",
+    "pytest-cov>=5.0,<6",
+    "respx>=0.21,<1",
+    "ruff>=0.5,<1",
+]
+
+[project.scripts]
+agentgolem = "agentgolem.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "integration: marks tests as integration tests (deselect with '-m \"not integration\"')",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "TCH"]

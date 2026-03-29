@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+.venv/
+venv/
+ENV/
+
+# Secrets
+.env
+
+# Runtime data
+data/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# SQLite
+*.db
+*.db-journal
+*.db-wal
+
+# Coverage
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
