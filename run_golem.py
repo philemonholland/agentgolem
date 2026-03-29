@@ -18,9 +18,11 @@ import argparse
 import asyncio
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -46,8 +48,233 @@ ALIVE_BANNER = r"""
     ║        The Ethical Council is now alive.          ║
     ║   Type /help for commands, or just talk.          ║
     ║   Use @Name to address a specific agent.          ║
+    ║   /speak to pause, /continue to resume.           ║
     ╚═══════════════════════════════════════════════════╝
 """
+
+# Thread-safe output lock and pacing (seconds between consecutive outputs)
+_output_lock = threading.Lock()
+_OUTPUT_PACE_SECONDS = 0.15  # brief pause between output lines
+
+
+# ---------------------------------------------------------------------------
+# Terminal UI with fixed input area at the bottom
+# ---------------------------------------------------------------------------
+
+class _ScrollRegionWriter:
+    """Wraps sys.stdout so that all print() calls route through the scroll region."""
+
+    def __init__(self, real_stdout: Any, ui: "TerminalUI") -> None:
+        self._real = real_stdout
+        self._ui = ui
+        # Preserve encoding attributes for structlog / logging
+        self.encoding = getattr(real_stdout, "encoding", "utf-8")
+        self.errors = getattr(real_stdout, "errors", "replace")
+
+    def write(self, text: str) -> int:
+        if not text or text == "\n":
+            return len(text) if text else 0
+        # Strip trailing newlines; the scroll region handles line advancement
+        stripped = text.rstrip("\n")
+        if stripped:
+            self._ui.write_output(stripped)
+        return len(text)
+
+    def flush(self) -> None:
+        self._real.flush()
+
+    def fileno(self) -> int:
+        return self._real.fileno()
+
+    def isatty(self) -> bool:
+        return self._real.isatty()
+
+    # Allow reconfigure calls to pass through
+    def reconfigure(self, **kwargs: Any) -> None:
+        if hasattr(self._real, "reconfigure"):
+            self._real.reconfigure(**kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+class TerminalUI:
+    """ANSI scroll-region terminal: agent output scrolls above, input stays fixed."""
+
+    SEPARATOR = "─"
+    PROMPT = "  golem> "
+
+    def __init__(self) -> None:
+        self._lock = _output_lock
+        self._enabled = False
+        self._rows = 24
+        self._cols = 80
+        self._scroll_end = 20
+        self._input_buffer: list[str] = []
+        self._status_text = ""
+        self._real_stdout: Any = None
+
+    def setup(self) -> None:
+        """Activate scroll-region mode.  Safe no-op if terminal doesn't support it."""
+        try:
+            size = shutil.get_terminal_size()
+            self._cols = size.columns
+            self._rows = size.lines
+        except Exception:
+            return  # can't detect size, skip
+
+        if self._rows < 10:
+            return  # terminal too small
+
+        # Enable ANSI processing on Windows
+        if sys.platform == "win32":
+            os.system("")  # triggers VT processing
+
+        self._scroll_end = self._rows - 3  # 3 lines reserved: separator + status + input
+        self._enabled = True
+
+        # Set scroll region (lines 1 through scroll_end)
+        sys.stdout.write(f"\033[1;{self._scroll_end}r")
+        # Move cursor to bottom of scroll region
+        sys.stdout.write(f"\033[{self._scroll_end};1H")
+        sys.stdout.flush()
+        self._draw_chrome()
+
+        # Redirect stdout so all print() calls go through the scroll region
+        self._real_stdout = sys.stdout
+        sys.stdout = _ScrollRegionWriter(self._real_stdout, self)  # type: ignore[assignment]
+
+    def teardown(self) -> None:
+        """Reset terminal to normal."""
+        if not self._enabled:
+            return
+        # Restore real stdout first
+        if self._real_stdout is not None:
+            sys.stdout = self._real_stdout
+            self._real_stdout = None
+        # Reset scroll region to full terminal
+        sys.stdout.write("\033[r")
+        # Move cursor to bottom
+        sys.stdout.write(f"\033[{self._rows};1H\n")
+        sys.stdout.flush()
+        self._enabled = False
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    def set_status(self, text: str) -> None:
+        self._status_text = text
+        if self._enabled:
+            self._draw_chrome()
+
+    @property
+    def _out(self) -> Any:
+        """The real stdout handle, bypassing the scroll-region wrapper."""
+        return self._real_stdout if self._real_stdout is not None else sys.stdout
+
+    def write_output(self, text: str) -> None:
+        """Write one or more lines to the scrolling output area."""
+        if not self._enabled:
+            print(text)
+            return
+        out = self._out
+        with self._lock:
+            # Save cursor position
+            out.write("\033[s")
+            # Move to bottom of scroll region
+            out.write(f"\033[{self._scroll_end};1H")
+            for line in text.split("\n"):
+                out.write(f"\n{line}")
+            # Restore cursor
+            out.write("\033[u")
+            out.flush()
+
+    def _draw_chrome(self) -> None:
+        """Redraw the separator, status, and prompt lines."""
+        if not self._enabled:
+            return
+        out = self._out
+        sep_row = self._scroll_end + 1
+        status_row = self._scroll_end + 2
+        input_row = self._scroll_end + 3
+
+        buf = self._input_buffer_str()
+        status = self._status_text or ""
+
+        # Move out of scroll region to draw chrome
+        out.write(f"\033[{sep_row};1H\033[K")
+        out.write(f"  {C.DIM}{self.SEPARATOR * (self._cols - 4)}{C.RESET}")
+        out.write(f"\033[{status_row};1H\033[K")
+        out.write(f"  {C.DIM}{status}{C.RESET}")
+        out.write(f"\033[{input_row};1H\033[K")
+        out.write(f"  {C.CYAN}golem>{C.RESET} {buf}")
+        out.flush()
+
+    def _input_buffer_str(self) -> str:
+        return "".join(self._input_buffer)
+
+    def read_input(self) -> str | None:
+        """Read a line from the fixed input area using msvcrt (Windows).
+        Returns the typed string on Enter, or raises KeyboardInterrupt / EOFError.
+        """
+        if not self._enabled:
+            return None  # caller should fall back to input()
+
+        if sys.platform != "win32":
+            return None  # only msvcrt on Windows
+
+        import msvcrt
+
+        self._input_buffer.clear()
+        self._draw_chrome()
+
+        while True:
+            if not msvcrt.kbhit():
+                time.sleep(0.02)
+                continue
+
+            ch = msvcrt.getwch()
+
+            if ch == "\r":  # Enter
+                result = self._input_buffer_str()
+                self._input_buffer.clear()
+                # Echo the completed line to the output area
+                if result.strip():
+                    self.write_output(f"  {C.CYAN}golem>{C.RESET} {result}")
+                self._draw_chrome()
+                return result
+            elif ch == "\x08":  # Backspace
+                if self._input_buffer:
+                    self._input_buffer.pop()
+                    self._redraw_input_line()
+            elif ch == "\x03":  # Ctrl+C
+                raise KeyboardInterrupt
+            elif ch == "\x04" or ch == "\x1a":  # Ctrl+D / Ctrl+Z
+                raise EOFError
+            elif ch in ("\x00", "\xe0"):
+                # Special key prefix (arrows, function keys) — consume next byte
+                msvcrt.getwch()
+            elif ch == "\x1b":
+                # Escape — ignore (could be start of ANSI sequence)
+                pass
+            elif ord(ch) >= 32:
+                self._input_buffer.append(ch)
+                self._redraw_input_line()
+
+    def _redraw_input_line(self) -> None:
+        """Redraw just the input line with current buffer content."""
+        if not self._enabled:
+            return
+        out = self._out
+        input_row = self._scroll_end + 3
+        buf = self._input_buffer_str()
+        out.write(f"\033[{input_row};1H\033[K")
+        out.write(f"  {C.CYAN}golem>{C.RESET} {buf}")
+        out.flush()
+
+
+# Singleton terminal UI
+_terminal_ui = TerminalUI()
 
 # ---------------------------------------------------------------------------
 # Parameter registry — every tuneable knob in one place
@@ -540,6 +767,8 @@ HELP_TEXT = f"""
   {C.BOLD}━━━ AgentGolem Ethical Council Commands ━━━{C.RESET}
 
   {C.CYAN}/help{C.RESET}                       Show this help message.
+  {C.CYAN}/speak{C.RESET}                      Pause agents — human wants to talk.
+  {C.CYAN}/continue{C.RESET}                   Resume autonomous work after speaking.
   {C.CYAN}/status{C.RESET}                     Show all agents' mode, task, uptime.
   {C.CYAN}/params{C.RESET}                     List every parameter and its current value.
   {C.CYAN}/get <param>{C.RESET}                Show the current value of a single parameter.
@@ -558,7 +787,7 @@ HELP_TEXT = f"""
 
   {C.BOLD}━━━ Talking to Agents ━━━{C.RESET}
 
-  {C.DIM}Bare text is sent to ALL agents:{C.RESET}
+  {C.DIM}Bare text is sent to ALL agents (auto-pauses, use /continue to resume):{C.RESET}
     Hello everyone
 
   {C.DIM}Prefix with @Name to address one agent:{C.RESET}
@@ -580,6 +809,7 @@ class RuntimeConsole:
         async_loop: asyncio.AbstractEventLoop,
         agents: list[Any] | None = None,
         bus: Any | None = None,
+        human_speaking_event: threading.Event | None = None,
     ) -> None:
         self._store = store
         self._loop_ref = loop_ref        # single MainLoop (legacy compat)
@@ -587,6 +817,7 @@ class RuntimeConsole:
         self._bus = bus
         self._running = True
         self._restart_requested = False
+        self._human_speaking = human_speaking_event or threading.Event()
         self._thread: threading.Thread | None = None
         self._param_lookup: dict[str, tuple[str, str, str, str]] = {
             key: (display_name, desc, ptype, group)
@@ -607,14 +838,25 @@ class RuntimeConsole:
 
     def stop(self) -> None:
         self._running = False
+        _terminal_ui.teardown()
 
     # ── main input loop ───────────────────────────────────────────────
 
     def _run(self) -> None:
         cprint(ALIVE_BANNER, C.GREEN)
+
+        # Activate scroll-region terminal UI
+        _terminal_ui.setup()
+
         while self._running:
             try:
-                raw = input(f"  {C.CYAN}golem>{C.RESET} ").strip()
+                if _terminal_ui.enabled:
+                    raw = _terminal_ui.read_input()
+                    if raw is None:
+                        raw = input(f"  {C.CYAN}golem>{C.RESET} ")
+                else:
+                    raw = input(f"  {C.CYAN}golem>{C.RESET} ")
+                raw = raw.strip()
             except (EOFError, KeyboardInterrupt):
                 self._cmd_quit()
                 return
@@ -643,6 +885,10 @@ class RuntimeConsole:
                 self._cmd_quit()
             elif cmd == "/help":
                 print(HELP_TEXT)
+            elif cmd == "/speak":
+                self._cmd_speak()
+            elif cmd == "/continue":
+                self._cmd_continue()
             elif cmd == "/status":
                 self._cmd_status()
             elif cmd == "/params":
@@ -756,7 +1002,12 @@ class RuntimeConsole:
                 cprint(f"  ✗ {getattr(agent, 'agent_name', '?')}: {e}", C.RED)
 
     def _cmd_message_all(self, text: str) -> None:
-        """Send a message to every agent."""
+        """Send a message to every agent. Auto-pauses autonomous work."""
+        # Auto-pause when human speaks
+        if not self._human_speaking.is_set():
+            self._human_speaking.set()
+            cprint("  ⏸  Autonomous work paused while you speak. "
+                   "Type /continue to resume.", C.YELLOW)
         for agent in self._agents:
             try:
                 future = asyncio.run_coroutine_threadsafe(
@@ -770,6 +1021,11 @@ class RuntimeConsole:
 
     def _cmd_message_to(self, target_name: str, text: str) -> None:
         """Send a message to a specific agent by name (or partial match)."""
+        # Auto-pause when human speaks
+        if not self._human_speaking.is_set():
+            self._human_speaking.set()
+            cprint("  ⏸  Autonomous work paused while you speak. "
+                   "Type /continue to resume.", C.YELLOW)
         target_lower = target_name.lower()
         for agent in self._agents:
             name = getattr(agent, "agent_name", "")
@@ -789,6 +1045,24 @@ class RuntimeConsole:
     # Keep legacy _cmd_message for backward compat
     def _cmd_message(self, text: str) -> None:
         self._cmd_message_all(text)
+
+    def _cmd_speak(self) -> None:
+        """Pause all autonomous work — the human wants to talk."""
+        if self._human_speaking.is_set():
+            cprint("  Already paused — agents are listening.", C.DIM)
+            return
+        self._human_speaking.set()
+        cprint("  ⏸  Autonomous work paused. Agents will respond to your "
+               "messages but won't act on their own.", C.YELLOW)
+        cprint("  Type /continue when you're done speaking.", C.DIM)
+
+    def _cmd_continue(self) -> None:
+        """Resume autonomous work after speaking."""
+        if not self._human_speaking.is_set():
+            cprint("  Agents are already running autonomously.", C.DIM)
+            return
+        self._human_speaking.clear()
+        cprint("  ▶  Autonomous work resumed.", C.GREEN)
 
     def _cmd_heartbeat(self) -> None:
         for agent in self._agents:
@@ -1067,6 +1341,9 @@ async def run_agent(store: ParamStore) -> bool:
     # Shared event for evolution restart (any agent can trigger)
     evolution_event = asyncio.Event()
 
+    # Shared event for /speak — pauses autonomous ticks while human speaks
+    human_speaking_event = threading.Event()
+
     agents: list[MainLoop] = []
     dbs: list[Any] = []
 
@@ -1111,14 +1388,27 @@ async def run_agent(store: ParamStore) -> bool:
         # Wire colour-coded callbacks
         def _make_response_cb(a_color: str, a_name_ref: list):
             def cb(text: str) -> None:
-                print(f"\n  {a_color}🧠 {a_name_ref[0]}:{C.RESET} {text}\n")
+                line = f"\n  {a_color}🧠 {a_name_ref[0]}:{C.RESET} {text}\n"
+                if _terminal_ui.enabled:
+                    _terminal_ui.write_output(line)
+                    time.sleep(_OUTPUT_PACE_SECONDS)
+                else:
+                    with _output_lock:
+                        print(line)
+                        time.sleep(_OUTPUT_PACE_SECONDS)
             return cb
 
         def _make_activity_cb(a_color: str, a_id_ref: list):
             def cb(icon: str, text: str) -> None:
                 ts = datetime.now().strftime("%H:%M:%S")
-                # a_id_ref[0] is updated when agent renames
-                print(f"  {C.DIM}{ts}{C.RESET} {a_color}[{a_id_ref[0]:<12}]{C.RESET} {icon} {text}")
+                line = f"  {C.DIM}{ts}{C.RESET} {a_color}[{a_id_ref[0]:<12}]{C.RESET} {icon} {text}"
+                if _terminal_ui.enabled:
+                    _terminal_ui.write_output(line)
+                    time.sleep(_OUTPUT_PACE_SECONDS)
+                else:
+                    with _output_lock:
+                        print(line)
+                        time.sleep(_OUTPUT_PACE_SECONDS)
             return cb
 
         # Use a mutable list so the closure picks up name changes
@@ -1141,6 +1431,9 @@ async def run_agent(store: ParamStore) -> bool:
 
         # Wire shared evolution shutdown event
         loop._evolution_shutdown_event = evolution_event
+
+        # Wire human-speaking pause event
+        loop._human_speaking_event = human_speaking_event
 
         # Register on bus
         bus.register(agent_id)
@@ -1170,6 +1463,7 @@ async def run_agent(store: ParamStore) -> bool:
     console = RuntimeConsole(
         store, loop_ref=agents[0], async_loop=loop_handle,
         agents=agents, bus=bus,
+        human_speaking_event=human_speaking_event,
     )
     console.start()
 
@@ -1237,6 +1531,19 @@ def main() -> None:
             restart = asyncio.run(run_agent(store))
         except KeyboardInterrupt:
             cprint("\n  Interrupted. Goodbye.", C.YELLOW)
+            break
+        except Exception:
+            # Log the crash to file so we can diagnose after terminal closes
+            import traceback
+            crash_log = ROOT / "data" / "logs" / "crash.log"
+            crash_log.parent.mkdir(parents=True, exist_ok=True)
+            with open(crash_log, "a", encoding="utf-8") as f:
+                f.write(f"\n{'='*60}\n")
+                f.write(f"CRASH at {datetime.now().isoformat()}\n")
+                f.write(f"{'='*60}\n")
+                traceback.print_exc(file=f)
+            cprint(f"\n  💥 Fatal error — see {crash_log}", C.RED)
+            traceback.print_exc()
             break
 
         if restart == "evolution":

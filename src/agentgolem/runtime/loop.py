@@ -6,6 +6,7 @@ import json
 import os
 import re
 import subprocess
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -200,6 +201,9 @@ class MainLoop:
         self._evolution_shutdown_event: asyncio.Event | None = None
         self._proposals_dir = self._data_dir.parent / "evolution_proposals"
         self._proposals_dir.mkdir(parents=True, exist_ok=True)
+
+        # Human-speaking pause: when set, autonomous ticks are suspended
+        self._human_speaking_event: threading.Event | None = None
 
         # Load Niscalajyoti reading progress from disk
         self._nj_state_path = self._data_dir / "niscalajyoti_reading.json"
@@ -437,7 +441,14 @@ class MainLoop:
             await self._respond_to_peer(peer_msg)
             return
 
-        # 3. Autonomous work
+        # 3. If human is speaking, suspend autonomous work
+        if (
+            self._human_speaking_event is not None
+            and self._human_speaking_event.is_set()
+        ):
+            return
+
+        # 4. Autonomous work
         await self._tick_autonomous()
 
     # ------------------------------------------------------------------
