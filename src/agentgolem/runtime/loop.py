@@ -38,6 +38,7 @@ LOCKED_SETTINGS: frozenset[str] = frozenset({
     "agent_offset_minutes",
     "agent_count",
     "name_discovery_cycles",
+    "llm_request_delay_seconds",
 })
 
 # Settings agents may optimise at runtime
@@ -155,6 +156,7 @@ class MainLoop:
         ethical_vector: str = "",
         peer_bus: InterAgentBus | None = None,
         start_delay_seconds: float = 0.0,
+        llm_rate_limiter: Any = None,
     ) -> None:
         self._settings = settings
         self._secrets = secrets
@@ -250,14 +252,20 @@ class MainLoop:
         self._memory_encoder: Any = None
 
         # LLM client and conversation
-        self._llm: OpenAIClient | None = None
+        self._llm: Any = None
         api_key_val = secrets.openai_api_key.get_secret_value()
         if api_key_val:
-            self._llm = OpenAIClient(
+            raw_llm = OpenAIClient(
                 api_key=secrets.openai_api_key,
                 model=settings.llm_model,
                 base_url=secrets.openai_base_url,
             )
+            if llm_rate_limiter is not None:
+                from agentgolem.llm.rate_limiter import RateLimitedLLM
+
+                self._llm = RateLimitedLLM(raw_llm, llm_rate_limiter)
+            else:
+                self._llm = raw_llm
         self._conversation: list[Message] = []
         self._max_conversation_turns: int = 40
         self._response_callback: Any = None  # set by launcher for console output

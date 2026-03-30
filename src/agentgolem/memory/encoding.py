@@ -130,6 +130,7 @@ class MemoryEncoder:
         result = await self._llm.complete_structured(
             [Message(role="user", content=prompt)],
             DecompositionResult,
+            timeout=120.0,
         )
         return result.concepts
 
@@ -161,6 +162,7 @@ class MemoryEncoder:
         return await self._llm.complete_structured(
             [Message(role="user", content=prompt)],
             ComparisonDecision,
+            timeout=120.0,
         )
 
     async def _apply_decision(

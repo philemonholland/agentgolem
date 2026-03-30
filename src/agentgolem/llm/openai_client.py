@@ -43,12 +43,16 @@ class OpenAIClient:
     async def complete(self, messages: list[Message], **kwargs: Any) -> str:
         """Send chat completion request."""
         client = await self._get_client()
+        timeout = kwargs.pop("timeout", None)
         payload: dict[str, Any] = {
             "model": kwargs.pop("model", self._model),
             "messages": [{"role": m.role, "content": m.content} for m in messages],
             **kwargs,
         }
-        response = await client.post("/chat/completions", json=payload)
+        response = await client.post(
+            "/chat/completions", json=payload,
+            **({"timeout": timeout} if timeout else {}),
+        )
         response.raise_for_status()
         data = response.json()
         return data["choices"][0]["message"]["content"]

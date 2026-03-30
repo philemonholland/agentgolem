@@ -277,6 +277,9 @@ PARAM_DEFS: list[tuple[str, str, str, str, str]] = [
     ("browser_rate_limit_per_minute", "Browser Rate Limit (/min)", "Max web requests per minute per domain", "int", "Browser"),
     ("browser_timeout_seconds", "Browser Timeout (s)", "HTTP request timeout for web browsing", "int", "Browser"),
 
+    # --- LLM ---
+    ("llm_request_delay_seconds", "LLM Request Delay (s)", "Cooldown between LLM requests across all agents (protected)", "float", "LLM"),
+
     # --- Multi-Agent Swarm ---
     ("agent_count", "Agent Count", "Number of agents in the ethical council", "int", "Swarm"),
     ("agent_offset_minutes", "Agent Offset (minutes)", "Wake/sleep cycle offset between agents", "float", "Swarm"),
@@ -1288,6 +1291,11 @@ async def run_agent(store: ParamStore) -> bool:
     # Create shared bus
     bus = InterAgentBus()
 
+    # Shared LLM rate limiter — one request at a time, with cooldown
+    from agentgolem.llm.rate_limiter import LLMRateLimiter
+
+    llm_limiter = LLMRateLimiter(delay=settings.llm_request_delay_seconds)
+
     # Shared event for evolution restart (any agent can trigger)
     evolution_event = asyncio.Event()
 
@@ -1333,6 +1341,7 @@ async def run_agent(store: ParamStore) -> bool:
             ethical_vector=ev,
             peer_bus=bus,
             start_delay_seconds=delay_seconds,
+            llm_rate_limiter=llm_limiter,
         )
 
         # Wire colour-coded callbacks

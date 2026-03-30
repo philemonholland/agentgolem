@@ -36,6 +36,7 @@ class Settings(BaseModel):
     quarantine_trust_useful_threshold: float = 0.3
     browser_rate_limit_per_minute: int = 10
     browser_timeout_seconds: int = 30
+    llm_request_delay_seconds: float = 3.0
 
     # Multi-agent swarm
     agent_count: int = 6

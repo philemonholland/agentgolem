@@ -71,6 +71,7 @@ class TestLockedSettings:
             "agent_offset_minutes",
             "agent_count",
             "name_discovery_cycles",
+            "llm_request_delay_seconds",
         }
         assert LOCKED_SETTINGS == expected
 
