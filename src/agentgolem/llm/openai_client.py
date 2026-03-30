@@ -47,6 +47,7 @@ class OpenAIClient:
         payload: dict[str, Any] = {
             "model": kwargs.pop("model", self._model),
             "messages": [{"role": m.role, "content": m.content} for m in messages],
+            "max_completion_tokens": kwargs.pop("max_completion_tokens", 16384),
             **kwargs,
         }
         response = await client.post(

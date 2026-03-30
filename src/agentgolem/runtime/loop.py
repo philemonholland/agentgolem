@@ -186,6 +186,7 @@ class MainLoop:
         self._niscalajyoti_chapter_index = 0  # next chapter to read
         self._niscalajyoti_summaries: dict[int, str] = {}  # idx → summary
         self._niscalajyoti_discussed_through = -1  # last chapter discussed
+        self._niscalajyoti_chapter_retries = 0  # consecutive failures on current chapter
         self._last_niscalajyoti_revisit: datetime | None = None
         self._browse_queue: list[str] = []
         self._recent_thoughts: list[str] = []
@@ -794,6 +795,19 @@ class MainLoop:
         if idx >= len(NISCALAJYOTI_CHAPTERS):
             return
 
+        # Skip chapter after too many consecutive failures
+        if self._niscalajyoti_chapter_retries >= 3:
+            title = NISCALAJYOTI_CHAPTERS[idx]["title"]
+            self._emit(
+                "⏭️",
+                f"Skipping ch.{idx + 1} '{title}' after 3 failed attempts",
+            )
+            self._niscalajyoti_chapter_index = idx + 1
+            self._niscalajyoti_discussed_through = idx  # nothing to discuss
+            self._niscalajyoti_chapter_retries = 0
+            self._save_nj_reading_state()
+            return
+
         chapter = NISCALAJYOTI_CHAPTERS[idx]
         url = chapter["url"]
         title = chapter["title"]
@@ -827,6 +841,7 @@ class MainLoop:
                     error=repr(e),
                 )
                 self._emit("❌", f"Failed to fetch '{title}': {e}")
+                self._niscalajyoti_chapter_retries += 1
                 return
 
             if not text or len(text) < 20:
@@ -863,6 +878,7 @@ class MainLoop:
                     error=repr(e),
                 )
                 self._emit("❌", f"Failed to digest '{title}': {e}")
+                self._niscalajyoti_chapter_retries += 1
                 return
 
             # Cache for other agents
@@ -927,6 +943,7 @@ class MainLoop:
 
             self._niscalajyoti_summaries[idx] = summary
             self._niscalajyoti_chapter_index = idx + 1
+            self._niscalajyoti_chapter_retries = 0
             self._save_nj_reading_state()
 
             self._recent_thoughts.append(
@@ -963,6 +980,7 @@ class MainLoop:
                 error=repr(e),
             )
             self._emit("❌", f"Failed to read '{title}': {e}")
+            self._niscalajyoti_chapter_retries += 1
 
     async def _discuss_niscalajyoti_chapter(self) -> None:
         """Discuss the most recently read chapter with peer agents."""
@@ -990,7 +1008,8 @@ class MainLoop:
             f"about what you found in this chapter. What do you want to "
             f"discuss? What questions does it raise? How does it relate "
             f"to your ethical vector and the council's shared purpose?\n\n"
-            f"Write naturally as if speaking to colleagues."
+            f"Write naturally as if speaking to colleagues.\n\n"
+            f"IMPORTANT: Keep your message under {self._peer_msg_limit} characters."
         )
 
         try:
@@ -1120,7 +1139,6 @@ class MainLoop:
             message = await self._llm.complete(
                 [Message(role="system", content=prompt)]
             )
-            message = message[:self._peer_msg_limit]
             if self._peer_bus:
                 count = await self._peer_bus.broadcast(
                     self.agent_name, f"[Check-in] {message}"
@@ -1999,7 +2017,6 @@ class MainLoop:
             response = await self._llm.complete(
                 [Message(role="system", content=prompt)]
             )
-            response = response[:self._peer_msg_limit]
             self._recent_thoughts.append(
                 f"Discussed with {msg.from_agent}: {response[:200]}"
             )
