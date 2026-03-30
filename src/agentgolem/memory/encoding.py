@@ -67,6 +67,10 @@ class ComparisonDecision(BaseModel):
     reason: str = ""
 
 
+class BatchComparisonResult(BaseModel):
+    decisions: list[ComparisonDecision]
+
+
 class MemoryEncoder:
     def __init__(
         self,
@@ -86,22 +90,23 @@ class MemoryEncoder:
         # Store source
         await self._store.add_source(source)
 
-        created_nodes: list[ConceptualNode] = []
+        # Step 3: Map types
+        node_types = [self._map_type(c.type) for c in concepts]
 
+        # Step 4: Find related existing nodes for ALL concepts at once
+        all_keywords: set[str] = set()
         for concept in concepts:
-            # Step 3: Map type
-            node_type = self._map_type(concept.type)
+            all_keywords.update(_extract_keywords(concept.text))
+        existing = await self._store.search_nodes_by_keywords(
+            list(all_keywords), limit=20
+        ) if all_keywords else []
 
-            # Step 4: Find related existing nodes via multi-keyword search
-            keywords = _extract_keywords(concept.text)
-            existing = await self._store.search_nodes_by_keywords(
-                keywords, limit=10
-            )
+        # Step 5: Batch-decide actions for all concepts in one LLM call
+        decisions = await self._compare_batch(concepts, existing)
 
-            # Step 5: Decide action
-            decision = await self._compare(concept.text, existing)
-
-            # Step 6: Create or update based on decision
+        # Step 6: Create or update based on decisions
+        created_nodes: list[ConceptualNode] = []
+        for concept, node_type, decision in zip(concepts, node_types, decisions):
             node = await self._apply_decision(concept, node_type, decision, source)
             if node:
                 created_nodes.append(node)
@@ -159,29 +164,46 @@ class MemoryEncoder:
         except ValueError:
             return NodeType.FACT  # default fallback
 
-    async def _compare(
-        self, concept_text: str, existing: list[ConceptualNode]
-    ) -> ComparisonDecision:
-        """Compare a candidate concept with existing nodes."""
+    async def _compare_batch(
+        self,
+        concepts: list[DecomposedConcept],
+        existing: list[ConceptualNode],
+    ) -> list[ComparisonDecision]:
+        """Compare ALL candidate concepts against existing nodes in one LLM call."""
         if not existing:
-            return ComparisonDecision(decision="new_node")
+            return [ComparisonDecision(decision="new_node") for _ in concepts]
 
         existing_descriptions = "\n".join(
             f"- [{n.id}] {n.text} (type={n.type.value}, trust={n.trustworthiness:.2f})"
             for n in existing
         )
+        concept_list = "\n".join(
+            f"  {i + 1}. \"{c.text}\" (type={c.type})"
+            for i, c in enumerate(concepts)
+        )
         prompt = (
-            f'New concept: "{concept_text}"\n\n'
-            f"Existing nodes:\n{existing_descriptions}\n\n"
-            "Decide: new_node, keep_exact (identical exists), keep_both (similar but different), "
-            "merge_candidate (should merge), supersedes (new replaces old), contradicts (conflicts).\n"
-            'Respond with JSON: {{"decision": "...", "existing_node_id": "...", "reason": "..."}}'
+            f"New concepts to store:\n{concept_list}\n\n"
+            f"Existing nodes in memory:\n{existing_descriptions}\n\n"
+            f"For EACH new concept, decide: new_node, keep_exact (identical exists), "
+            f"keep_both (similar but different), merge_candidate (should merge), "
+            f"supersedes (new replaces old), contradicts (conflicts).\n"
+            f"Return one decision per concept in order.\n"
+            f'Respond with JSON: {{"decisions": [{{"decision": "...", "existing_node_id": "...", "reason": "..."}}]}}'
         )
-        return await self._llm.complete_structured(
-            [Message(role="user", content=prompt)],
-            ComparisonDecision,
-            timeout=120.0,
-        )
+        try:
+            result = await self._llm.complete_structured(
+                [Message(role="user", content=prompt)],
+                BatchComparisonResult,
+                timeout=120.0,
+            )
+            decisions = result.decisions
+            # Pad or trim to match concept count
+            while len(decisions) < len(concepts):
+                decisions.append(ComparisonDecision(decision="new_node"))
+            return decisions[: len(concepts)]
+        except Exception:
+            # Fallback: treat everything as new
+            return [ComparisonDecision(decision="new_node") for _ in concepts]
 
     async def _apply_decision(
         self,

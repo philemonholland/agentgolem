@@ -33,6 +33,6 @@ browser_timeout_seconds: 20
 llm_request_delay_seconds: 3.0   # cooldown between LLM requests (protected)
 agent_count: 6
 agent_offset_minutes: 0.0
-autonomous_interval_seconds: 15.0
+autonomous_interval_seconds: 60.0
 name_discovery_cycles: 4
-peer_checkin_interval_minutes: 10.0
+peer_checkin_interval_minutes: 30.0

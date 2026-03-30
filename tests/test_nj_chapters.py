@@ -178,12 +178,12 @@ class TestPeerCheckin:
 
     def test_default_value(self, tmp_path: Path) -> None:
         loop = _make_loop(tmp_path)
-        assert loop._peer_checkin_interval == 10.0
+        assert loop._peer_checkin_interval == 30.0
 
     def test_settings_has_field(self) -> None:
         s = Settings()
         assert hasattr(s, "peer_checkin_interval_minutes")
-        assert s.peer_checkin_interval_minutes == 10.0
+        assert s.peer_checkin_interval_minutes == 30.0
 
     def test_custom_value(self, tmp_path: Path) -> None:
         data_dir = tmp_path / "data"

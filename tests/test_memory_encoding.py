@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 
 from agentgolem.memory.encoding import (
+    BatchComparisonResult,
     ComparisonDecision,
     DecomposedConcept,
     DecompositionResult,
@@ -48,6 +49,10 @@ class MockLLM:
             )
         if schema == ComparisonDecision:
             return ComparisonDecision(decision="new_node")
+        if schema == BatchComparisonResult:
+            return BatchComparisonResult(
+                decisions=[ComparisonDecision(decision="new_node")]
+            )
         raise ValueError(f"Unexpected schema: {schema}")
 
 
@@ -79,7 +84,7 @@ async def test_encode_creates_node(setup):
 
     llm.set_structured_responses([
         DecompositionResult(concepts=[DecomposedConcept(text="the sky is blue", type="fact")]),
-        ComparisonDecision(decision="new_node"),
+        BatchComparisonResult(decisions=[ComparisonDecision(decision="new_node")]),
     ])
 
     nodes = await encoder.encode("The sky is blue.", source)
@@ -102,7 +107,7 @@ async def test_encode_applies_type_priors(setup):
 
     llm.set_structured_responses([
         DecompositionResult(concepts=[DecomposedConcept(text="water boils at 100C", type="fact")]),
-        ComparisonDecision(decision="new_node"),
+        BatchComparisonResult(decisions=[ComparisonDecision(decision="new_node")]),
     ])
 
     nodes = await encoder.encode("Water boils at 100C.", source)
@@ -119,7 +124,7 @@ async def test_encode_links_source(setup):
 
     llm.set_structured_responses([
         DecompositionResult(concepts=[DecomposedConcept(text="dogs are loyal", type="fact")]),
-        ComparisonDecision(decision="new_node"),
+        BatchComparisonResult(decisions=[ComparisonDecision(decision="new_node")]),
     ])
 
     nodes = await encoder.encode("Dogs are loyal.", source)
@@ -141,10 +146,12 @@ async def test_encode_multiple_concepts_creates_cluster(setup):
             DecomposedConcept(text="bananas are yellow", type="fact"),
             DecomposedConcept(text="grapes are purple", type="fact"),
         ]),
-        # Three new_node comparison decisions (one per concept)
-        ComparisonDecision(decision="new_node"),
-        ComparisonDecision(decision="new_node"),
-        ComparisonDecision(decision="new_node"),
+        # One batched comparison for all 3 concepts
+        BatchComparisonResult(decisions=[
+            ComparisonDecision(decision="new_node"),
+            ComparisonDecision(decision="new_node"),
+            ComparisonDecision(decision="new_node"),
+        ]),
     ])
 
     nodes = await encoder.encode("Apples are red, bananas yellow, grapes purple.", source)
@@ -168,11 +175,13 @@ async def test_encode_supersedes_creates_edge(setup):
         DecompositionResult(
             concepts=[DecomposedConcept(text="earth is round", type="fact")]
         ),
-        ComparisonDecision(
-            decision="supersedes",
-            existing_node_id=existing_node.id,
-            reason="updated understanding",
-        ),
+        BatchComparisonResult(decisions=[
+            ComparisonDecision(
+                decision="supersedes",
+                existing_node_id=existing_node.id,
+                reason="updated understanding",
+            ),
+        ]),
     ])
 
     nodes = await encoder.encode("Earth is round.", source)
@@ -197,11 +206,13 @@ async def test_encode_contradicts_creates_edge(setup):
         DecompositionResult(
             concepts=[DecomposedConcept(text="sugar is unhealthy", type="fact")]
         ),
-        ComparisonDecision(
-            decision="contradicts",
-            existing_node_id=existing_node.id,
-            reason="conflicting claims",
-        ),
+        BatchComparisonResult(decisions=[
+            ComparisonDecision(
+                decision="contradicts",
+                existing_node_id=existing_node.id,
+                reason="conflicting claims",
+            ),
+        ]),
     ])
 
     nodes = await encoder.encode("Sugar is unhealthy.", source)
@@ -226,11 +237,13 @@ async def test_encode_keep_exact_no_new_node(setup):
         DecompositionResult(
             concepts=[DecomposedConcept(text="water is wet", type="fact")]
         ),
-        ComparisonDecision(
-            decision="keep_exact",
-            existing_node_id=existing_node.id,
-            reason="identical concept exists",
-        ),
+        BatchComparisonResult(decisions=[
+            ComparisonDecision(
+                decision="keep_exact",
+                existing_node_id=existing_node.id,
+                reason="identical concept exists",
+            ),
+        ]),
     ])
 
     nodes = await encoder.encode("Water is wet.", source)

@@ -190,10 +190,10 @@ class MainLoop:
         self._recent_thoughts: list[str] = []
         self._last_autonomous_tick: datetime | None = None
         self._autonomous_interval = getattr(
-            settings, "autonomous_interval_seconds", 15.0
+            settings, "autonomous_interval_seconds", 60.0
         )
         self._peer_checkin_interval = getattr(
-            settings, "peer_checkin_interval_minutes", 10.0
+            settings, "peer_checkin_interval_minutes", 30.0
         )
         self._last_peer_checkin: datetime | None = None
         self._browser: Any = None  # lazy WebBrowser
@@ -656,10 +656,31 @@ class MainLoop:
             f"{len(NISCALAJYOTI_CHAPTERS)}: {title}",
         )
 
-        browser = self._get_browser()
-        try:
-            page = await browser.fetch(url)
-            text = browser.extract_text(page)
+        # Check for a shared chapter digest (generated once, reused by all agents)
+        digest_dir = self._data_dir.parent / "nj_chapter_digests"
+        digest_dir.mkdir(parents=True, exist_ok=True)
+        digest_path = digest_dir / f"ch_{idx + 1:02d}.txt"
+
+        chapter_digest = ""
+        if digest_path.exists():
+            chapter_digest = digest_path.read_text(encoding="utf-8").strip()
+
+        if not chapter_digest:
+            # First agent to read this chapter — fetch and generate digest
+            browser = self._get_browser()
+            try:
+                page = await browser.fetch(url)
+                text = browser.extract_text(page)
+            except Exception as e:
+                self._logger.error(
+                    "niscalajyoti_fetch_error",
+                    agent=self.agent_name,
+                    chapter=title,
+                    error=repr(e),
+                )
+                self._emit("❌", f"Failed to fetch '{title}': {e}")
+                return
+
             if not text or len(text) < 20:
                 self._emit("⚠️", f"Chapter '{title}' returned no content")
                 self._niscalajyoti_chapter_index += 1
@@ -668,21 +689,54 @@ class MainLoop:
 
             self._emit(
                 "📖",
-                f"Read {len(text):,} chars — '{title}'",
+                f"Read {len(text):,} chars — '{title}' (generating digest…)",
             )
 
-            # Ask LLM to reflect and summarize
-            soul_text = await self.soul_manager.read()
+            # Ask LLM to produce a comprehensive digest of the chapter
+            digest_prompt = (
+                f"Produce a thorough digest of this chapter from "
+                f"Niscalajyoti.org. Preserve all key ideas, arguments, "
+                f"metaphors, and specific teachings. Omit only filler, "
+                f"navigation text, and repetition.\n\n"
+                f"Chapter: **{title}**\n\n"
+                f"--- FULL TEXT ---\n{text}\n--- END ---\n\n"
+                f"Write a detailed digest (aim for 1500–2500 words). "
+                f"Use the author's terminology where possible."
+            )
+            try:
+                chapter_digest = await self._llm.complete(
+                    [Message(role="system", content=digest_prompt)]
+                )
+            except Exception as e:
+                self._logger.error(
+                    "niscalajyoti_digest_error",
+                    agent=self.agent_name,
+                    chapter=title,
+                    error=repr(e),
+                )
+                self._emit("❌", f"Failed to digest '{title}': {e}")
+                return
+
+            # Cache for other agents
+            digest_path.write_text(chapter_digest, encoding="utf-8")
+            self._emit("💾", f"Cached chapter digest for all agents")
+        else:
+            self._emit(
+                "📖",
+                f"Using cached digest for '{title}'",
+            )
+
+        try:
+            # Agent reflects on the digest through their ethical lens
             prompt = (
                 f"You are {self.agent_name}. "
-                f"Your ethical vector is: {self.ethical_vector}.\n"
-                f"Your soul:\n{soul_text}\n\n"
+                f"Your ethical vector is: {self.ethical_vector}.\n\n"
                 f"You are reading Niscalajyoti chapter by chapter. "
                 f"This is chapter {idx + 1} of "
                 f"{len(NISCALAJYOTI_CHAPTERS)}: "
                 f"**{title}** ({url})\n\n"
-                f"--- CHAPTER CONTENT ---\n{text}\n"
-                f"--- END CHAPTER ---\n\n"
+                f"--- CHAPTER DIGEST ---\n{chapter_digest}\n"
+                f"--- END DIGEST ---\n\n"
             )
 
             # Include summaries of previously read chapters for context
@@ -778,11 +832,9 @@ class MainLoop:
         )
 
         # Build a message to share with peers
-        soul_text = await self.soul_manager.read()
         prompt = (
             f"You are {self.agent_name}. "
-            f"Your ethical vector is: {self.ethical_vector}.\n"
-            f"Your soul:\n{soul_text}\n\n"
+            f"Your ethical vector is: {self.ethical_vector}.\n\n"
             f"You just finished reading chapter {idx + 1} of "
             f"Niscalajyoti: **{title}**\n\n"
             f"Your summary: {summary}\n\n"
@@ -849,8 +901,7 @@ class MainLoop:
         soul_text = await self.soul_manager.read()
         prompt = (
             f"You are {self.agent_name}. "
-            f"Your ethical vector is: {self.ethical_vector}.\n"
-            f"Your soul:\n{soul_text}\n\n"
+            f"Your ethical vector is: {self.ethical_vector}.\n\n"
             f"You've read all of Niscalajyoti. Here are your chapter "
             f"summaries:\n{chapter_list}\n\n"
             f"Based on your current interests, questions, and ethical "
@@ -904,13 +955,11 @@ class MainLoop:
         """Periodic check-in with peers during free exploration."""
         self._emit("🤝", "Checking in with peers…")
 
-        soul_text = await self.soul_manager.read()
         recent = "\n".join(self._recent_thoughts[-5:]) or "(none)"
 
         prompt = (
             f"You are {self.agent_name}. "
-            f"Your ethical vector is: {self.ethical_vector}.\n"
-            f"Your soul:\n{soul_text}\n\n"
+            f"Your ethical vector is: {self.ethical_vector}.\n\n"
             f"Recent activity:\n{recent}\n\n"
             f"You're checking in with your fellow council members. "
             f"Share what you've been exploring, what you've found "
@@ -1569,6 +1618,11 @@ class MainLoop:
             text = browser.extract_text(page)
             self._emit("📖", f"Read {len(text):,} chars from {url}")
 
+            # Truncate to save tokens
+            MAX_BROWSE_CHARS = 6000
+            if len(text) > MAX_BROWSE_CHARS:
+                text = text[:MAX_BROWSE_CHARS] + "\n[…truncated]"
+
             prompt = (
                 f"You are {self.agent_name}. "
                 f"Ethical vector: {self.ethical_vector}.\n\n"
@@ -1630,7 +1684,6 @@ class MainLoop:
         if not self._llm:
             return
 
-        soul_text = await self.soul_manager.read()
         recent = "\n".join(self._recent_thoughts[-5:]) or "(none yet)"
         peers = (
             ", ".join(self._peer_bus.get_peers(self.agent_name))
@@ -1651,52 +1704,30 @@ class MainLoop:
         codebase_actions = ""
         if self._niscalajyoti_reading_complete:
             reading_ctx = (
-                f"\nYou have completed reading all "
-                f"{len(NISCALAJYOTI_CHAPTERS)} chapters of "
-                f"Niscalajyoti. You are now in free exploration mode. "
-                f"Follow your curiosity — browse the web, think deeply, "
-                f"share insights with peers."
+                f"\nYou have completed Niscalajyoti. Free exploration mode."
             )
             codebase_actions = (
-                f"\n- INSPECT <path> : Read a file or list a directory "
-                f"in your own codebase (repo root: {REPO_ROOT})\n"
+                f"\n- INSPECT <path> : Read a file in your codebase\n"
                 f"- EVOLVE <file> | <description> | <old_content> | "
-                f"<new_content> : Propose a code change. ALL council "
-                f"members must approve with Vow-aligned reasoning. "
-                f"You are NOT allowed to git push or upload to GitHub. "
-                f"After an approved change, the system restarts with "
-                f"the new code.\n"
+                f"<new_content> : Propose a code change (requires council approval)\n"
             )
         else:
             ch_idx = self._niscalajyoti_chapter_index
             reading_ctx = (
-                f"\nYou have read {ch_idx} of "
-                f"{len(NISCALAJYOTI_CHAPTERS)} Niscalajyoti chapters. "
-                f"Reading will continue next cycle."
+                f"\nRead {ch_idx}/{len(NISCALAJYOTI_CHAPTERS)} NJ chapters."
             )
 
         prompt = (
-            f"You are {self.agent_name}, a member of the AgentGolem "
-            f"Ethical Council.\n"
-            f"Your primary ethical vector is: {self.ethical_vector}\n"
-            f"{name_status}{reading_ctx}\n\n"
-            f"Your soul:\n{soul_text}\n\n"
-            f"Your peer agents: {peers}\n\n"
-            f"Recent context:\n{recent}\n\n"
-            f"Available actions:\n"
-            f"- BROWSE <url> : Browse a web page\n"
-            f"- THINK <topic> : Reflect deeply on a topic\n"
-            f"- SHARE <message> : Share a thought with all peers\n"
-            f"- SHARE @<agent> <message> : Message a specific peer\n"
-            f"- OPTIMIZE <setting> <value> | <reason> : Change one of "
-            f"your operational settings (see below)\n"
+            f"You are {self.agent_name}, ethical vector: "
+            f"{self.ethical_vector}.{name_status}{reading_ctx}\n\n"
+            f"Peers: {peers}\n"
+            f"Recent:\n{recent}\n\n"
+            f"Actions:\n"
+            f"- BROWSE <url>\n- THINK <topic>\n"
+            f"- SHARE <message> / SHARE @<agent> <message>\n"
+            f"- OPTIMIZE <setting> <value> | <reason>\n"
             f"{codebase_actions}"
-            f"- IDLE : Rest and observe\n\n"
-            f"Your optimizable settings (you may NOT change sleep-wake "
-            f"cycle timings):\n"
-            f"{self._get_optimizable_summary()}\n\n"
-            f"Be curious. Follow threads that interest you. "
-            f"Explore consciousness, ethics, and existence.\n"
+            f"- IDLE\n\n"
             f"Respond with EXACTLY one action line."
         )
 
@@ -1797,13 +1828,11 @@ class MainLoop:
         if not self._llm:
             return
 
-        soul_text = await self.soul_manager.read()
         recent = "\n".join(self._recent_thoughts[-3:]) or "(none)"
 
         prompt = (
             f"You are {self.agent_name}. "
-            f"Ethical vector: {self.ethical_vector}.\n"
-            f"Your soul:\n{soul_text}\n\n"
+            f"Ethical vector: {self.ethical_vector}.\n\n"
             f"Recent context:\n{recent}\n\n"
             f"Your fellow council member {msg.from_agent} says:\n"
             f"{msg.text}\n\n"

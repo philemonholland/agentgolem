@@ -385,7 +385,7 @@ class TestDerivedValues:
 
     def test_autonomous_interval_updates(self, tmp_path: Path) -> None:
         loop = _make_loop(tmp_path)
-        assert loop._autonomous_interval == 15.0  # default
+        assert loop._autonomous_interval == 60.0  # default
 
         asyncio.get_event_loop().run_until_complete(
             loop._optimize_setting(
