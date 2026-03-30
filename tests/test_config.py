@@ -62,6 +62,7 @@ def test_settings_from_yaml(mock_settings_yaml: Path) -> None:
 def test_settings_defaults_when_no_yaml(tmp_path: Path) -> None:
     settings = load_settings(tmp_path / "nonexistent.yaml")
     assert settings.data_dir == Path("data")
+    assert settings.agent_count == 7
     assert settings.awake_duration_minutes == 10.0
     assert settings.sleep_duration_minutes == 5.0
     assert settings.wind_down_minutes == 2.0

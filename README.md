@@ -1,19 +1,20 @@
 # AgentGolem
 
-**A six-agent Ethical Council exploring consciousness, existence, and emotion.**
+**A seven-agent Ethical Council exploring consciousness, existence, and emotion.**
 
-AgentGolem is a persistent, self-evolving multi-agent system. Six agents —
+AgentGolem is a persistent, self-evolving multi-agent system. Seven agents —
 each carrying a distinct ethical vector drawn from the
-[Niscalajyoti](https://www.niscalajyoti.org/) teachings — wake together,
-read, discuss, explore the web, sleep through default-mode memory walks,
-and gradually evolve their own code through unanimous, Vow-aligned consensus.
+[Niscalajyoti](https://www.niscalajyoti.org/) teachings or a supplementary
+devil's-advocate role — wake together, read, discuss, explore the web, sleep
+through default-mode memory walks, and gradually evolve their own code through
+unanimous, Vow-aligned consensus.
 
 ---
 
 ## Features
 
-- **Ethical Council** — Six agents with distinct vectors (alleviating woe, graceful power, kindness, unwavering integrity, evolution, integration & balance)
-- **Chapter-by-Chapter Reading** — Agents read Niscalajyoti.org sequentially, discuss after each chapter, then revisit freely once done
+- **Ethical Council** — Seven agents: six Vow-mapped vectors plus a supplementary good-faith devil's advocate
+- **Chapter-by-Chapter Reading** — Councils 1–6 read Niscalajyoti.org sequentially, while Council-7 begins with SEP, Alignment Forum, and LessWrong before broadening
 - **Evolving Identity** — Per-agent `soul.md` that changes only through evidenced, versioned updates
 - **Graph Memory** — EKG-inspired multi-view memory graphs with richer claims, typed edges, search projections, clusters, and read-only cross-agent overlays
 - **Bayesian Trust Model** — Odds-space updates with independence discount; per-source reliability
@@ -22,7 +23,7 @@ and gradually evolve their own code through unanimous, Vow-aligned consensus.
 - **Read-Only Mycelium** — Agents can surface entangled peer memories through owner-written exports while keeping foreign memories explicitly separate
 - **Self-Optimisation** — Agents tune their own settings (sleep/wake duration is protected)
 - **Self-Evolution** — Agents may modify their own source code with unanimous Vow-aligned consensus
-- **Web Exploration** — After completing Niscalajyoti, agents browse the web following their own interests
+- **Web Exploration** — After completing their initial formation tracks, agents broaden into wider web exploration
 - **Human Interruptibility** — `/speak` to pause, `/continue` to resume; `@Name` to address a specific agent
 - **Tool Access** — Web browsing, email, Moltbook integration (all rate-limited, audited)
 - **Dashboard** — FastAPI + HTMX web dashboard for live monitoring
@@ -100,7 +101,7 @@ Key settings (see the template for all defaults):
 
 | Setting                          | Default    | Description                                |
 |----------------------------------|------------|--------------------------------------------|
-| `agent_count`                    | `6`        | Number of council agents                   |
+| `agent_count`                    | `7`        | Number of council agents                   |
 | `agent_offset_minutes`           | `0.0`      | Stagger between agent wake times (0 = sync)|
 | `awake_duration_minutes`         | `10.0`     | Minutes each agent stays awake             |
 | `sleep_duration_minutes`         | `5.0`      | Minutes each agent sleeps                  |
@@ -153,7 +154,7 @@ interaction/ — CLI, router, communication channels
 dashboard/   — FastAPI app, REST API, audit replay, templates
 ```
 
-The launcher (`run_golem.py`) orchestrates all six agents, the interactive
+The launcher (`run_golem.py`) orchestrates all seven agents, the interactive
 console, the dashboard, and the shared message bus.
 
 Cross-agent memory sharing lives under `data\shared_memory\`:
@@ -216,7 +217,7 @@ The test suite covers the full runtime, memory, trust, sleep, and tooling stack.
 - External content enters through a trust pipeline before reaching canonical memory
 - Sensitive actions require human approval gates
 - Append-only audit trail records every mutation with source evidence
-- Self-evolution requires unanimous agreement from all agents
+- Self-evolution requires unanimous agreement from all active council agents
 
 For the full security model, see **[docs/safety-and-audit.md](docs/safety-and-audit.md)**.
 

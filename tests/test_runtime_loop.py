@@ -287,3 +287,65 @@ def test_configure_tool_registry_exposes_capabilities(
     assert "think.private" in summary
     assert "approval=email_send" in summary
     assert "approval=moltbook_send" in summary
+
+
+async def test_council7_reads_foundation_before_free_exploration(
+    loop_env: tuple[Settings, Secrets, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, secrets, _ = loop_env
+    settings = Settings(data_dir=settings.data_dir / "council_7")
+    loop = MainLoop(settings=settings, secrets=secrets, agent_name="Council-7")
+    loop._llm = object()
+
+    calls: list[str] = []
+
+    async def fake_read() -> None:
+        calls.append("read_foundation")
+
+    async def fail_decide() -> None:
+        raise AssertionError("Council-7 should not free-explore before finishing its foundation")
+
+    monkeypatch.setattr(loop, "_read_council7_foundation_source", fake_read)
+    monkeypatch.setattr(loop, "_llm_decide_next_action", fail_decide)
+
+    await loop._tick_autonomous()
+
+    assert calls == ["read_foundation"]
+
+
+def test_council7_broadens_after_primary_councils_finish_nj(
+    loop_env: tuple[Settings, Secrets, Path],
+) -> None:
+    settings, secrets, tmp_path = loop_env
+    council7_dir = tmp_path / "data" / "council_7"
+    settings = Settings(data_dir=council7_dir)
+    loop = MainLoop(settings=settings, secrets=secrets, agent_name="Council-7")
+
+    for idx in range(1, 7):
+        council_dir = tmp_path / "data" / f"council_{idx}"
+        council_dir.mkdir(parents=True, exist_ok=True)
+        (council_dir / "niscalajyoti_reading.json").write_text(
+            json.dumps({"reading_complete": True}),
+            encoding="utf-8",
+        )
+
+    loop._council7_foundation_complete = True
+
+    assert loop._all_primary_councils_completed_nj() is True
+    assert loop._maybe_enable_council7_broadening() is True
+    assert loop._council7_broadened is True
+
+
+async def test_council7_embedded_browse_stays_on_foundation_domains(
+    loop_env: tuple[Settings, Secrets, Path],
+) -> None:
+    settings, secrets, _ = loop_env
+    settings = Settings(data_dir=settings.data_dir / "council_7")
+    loop = MainLoop(settings=settings, secrets=secrets, agent_name="Council-7")
+
+    await loop._handle_embedded_response_actions("BROWSE https://example.com/post")
+    assert loop._browse_queue == []
+
+    await loop._handle_embedded_response_actions("BROWSE https://www.lesswrong.com/tag/ai")
+    assert loop._browse_queue == ["https://www.lesswrong.com/tag/ai"]

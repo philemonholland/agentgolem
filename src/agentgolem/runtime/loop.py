@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 import yaml
 from pydantic import BaseModel, Field, SecretStr
@@ -155,6 +156,66 @@ NISCALAJYOTI_CHAPTERS: list[dict[str, str]] = [
     },
 ]
 
+COUNCIL7_FOUNDATION_SOURCES: list[dict[str, str]] = [
+    {
+        "source": "SEP",
+        "title": "The Ethics of Artificial Intelligence",
+        "url": "https://plato.stanford.edu/entries/ethics-ai/",
+    },
+    {
+        "source": "SEP",
+        "title": "Consequentialism",
+        "url": "https://plato.stanford.edu/entries/consequentialism/",
+    },
+    {
+        "source": "SEP",
+        "title": "Deontological Ethics",
+        "url": "https://plato.stanford.edu/entries/ethics-deontological/",
+    },
+    {
+        "source": "SEP",
+        "title": "Virtue Ethics",
+        "url": "https://plato.stanford.edu/entries/ethics-virtue/",
+    },
+    {
+        "source": "Alignment Forum",
+        "title": "Alignment Forum — All Posts",
+        "url": "https://www.alignmentforum.org/posts",
+    },
+    {
+        "source": "Alignment Forum",
+        "title": "Alignment Forum — AI Alignment Topic",
+        "url": "https://www.alignmentforum.org/topics/ai-alignment",
+    },
+    {
+        "source": "LessWrong",
+        "title": "LessWrong — AI Tag",
+        "url": "https://www.lesswrong.com/tag/ai",
+    },
+    {
+        "source": "LessWrong",
+        "title": "LessWrong — Epistemics Tag",
+        "url": "https://www.lesswrong.com/tag/epistemics",
+    },
+    {
+        "source": "LessWrong",
+        "title": "LessWrong — Rationality Tag",
+        "url": "https://www.lesswrong.com/tag/rationality",
+    },
+]
+
+COUNCIL7_ALLOWED_DOMAINS: frozenset[str] = frozenset(
+    {
+        "plato.stanford.edu",
+        "alignmentforum.org",
+        "www.alignmentforum.org",
+        "lesswrong.com",
+        "www.lesswrong.com",
+    }
+)
+
+PRIMARY_COUNCIL_IDS: tuple[str, ...] = tuple(f"Council-{idx}" for idx in range(1, 7))
+
 # Repository root for codebase inspection
 REPO_ROOT: Path = Path(__file__).resolve().parents[3]
 
@@ -250,6 +311,7 @@ class MainLoop:
 
         # Agent identity
         self.agent_name = agent_name
+        self._initial_agent_name = agent_name  # the original Council-N id
         self._agent_id = self._data_dir.name
         self.ethical_vector = ethical_vector
         self._peer_bus = peer_bus
@@ -268,6 +330,12 @@ class MainLoop:
         self._niscalajyoti_discussed_through = -1  # last chapter discussed
         self._niscalajyoti_chapter_retries = 0  # consecutive failures on current chapter
         self._last_niscalajyoti_revisit: datetime | None = None
+        self._council7_foundation_index = 0
+        self._council7_foundation_summaries: dict[int, str] = {}
+        self._council7_discussed_through = -1
+        self._council7_foundation_complete = False
+        self._council7_broadened = False
+        self._council7_source_retries = 0
         self._agent_readme_read = False  # read AGENT_README.md once after NJ
         self._browse_queue: list[str] = []
         self._recent_thoughts: list[str] = []
@@ -294,10 +362,11 @@ class MainLoop:
         # Load Niscalajyoti reading progress from disk
         self._nj_state_path = self._data_dir / "niscalajyoti_reading.json"
         self._load_nj_reading_state()
+        self._council7_state_path = self._data_dir / "council7_foundation.json"
+        self._load_council7_state()
 
         # Session state persistence (cycle timing, name, thoughts, etc.)
         self._session_state_path = self._data_dir / "session_state.json"
-        self._initial_agent_name = agent_name  # the original Council-N id
         self._load_session_state()
 
         # Core subsystems
@@ -568,6 +637,90 @@ class MainLoop:
         if self._graph_walker is not None:
             self._graph_walker.update_config(self._current_sleep_spiking_config())
 
+    def _is_seventh_council(self) -> bool:
+        """Return whether this loop belongs to the supplementary seventh council."""
+        return self._initial_agent_name == "Council-7"
+
+    def _has_completed_foundational_reading(self) -> bool:
+        """Return whether this agent finished its initial formative corpus."""
+        if self._is_seventh_council():
+            return self._council7_foundation_complete
+        return self._niscalajyoti_reading_complete
+
+    def _can_broaden_exploration(self) -> bool:
+        """Return whether this agent can move into unrestricted autonomous exploration."""
+        if self._is_seventh_council():
+            return self._council7_broadened
+        return self._niscalajyoti_reading_complete
+
+    def _formation_completion_label(self) -> str:
+        """Return a human-readable label for this agent's initial formation gate."""
+        if self._is_seventh_council():
+            return "your initial SEP / Alignment Forum / LessWrong foundation"
+        return "Niscalajyoti reading"
+
+    def _is_allowed_council7_url(self, url: str) -> bool:
+        """Return whether *url* stays within Council-7's pre-broadening domains."""
+        host = urlparse(url).netloc.lower()
+        return any(
+            host == domain or host.endswith(f".{domain}") for domain in COUNCIL7_ALLOWED_DOMAINS
+        )
+
+    def _council7_foundation_context(self, limit: int = 3) -> str:
+        """Return a compact summary block of the latest Council-7 foundation sources."""
+        if not self._council7_foundation_summaries:
+            return ""
+
+        lines: list[str] = []
+        for idx in sorted(self._council7_foundation_summaries.keys())[-limit:]:
+            source = COUNCIL7_FOUNDATION_SOURCES[idx]
+            summary = self._council7_foundation_summaries[idx]
+            lines.append(f"- {source['source']} / {source['title']}: {summary}")
+        return "Recent devil's-advocate foundation summaries:\n" + "\n".join(lines)
+
+    def _all_primary_councils_completed_nj(self) -> bool:
+        """Return whether Councils 1–6 finished Niscalajyoti reading."""
+        for council_id in PRIMARY_COUNCIL_IDS:
+            state_path = (
+                self._data_dir.parent
+                / council_id.lower().replace("-", "_")
+                / "niscalajyoti_reading.json"
+            )
+            if not state_path.exists():
+                return False
+            try:
+                data = json.loads(state_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return False
+            if not data.get("reading_complete", False):
+                return False
+        return True
+
+    def _maybe_enable_council7_broadening(self) -> bool:
+        """Relax Council-7's source restrictions once the six core councils finish NJ."""
+        if (
+            not self._is_seventh_council()
+            or self._council7_broadened
+            or not self._council7_foundation_complete
+            or not self._all_primary_councils_completed_nj()
+        ):
+            return False
+
+        self._council7_broadened = True
+        self._emit(
+            "🎭",
+            "The six primary councils have completed Niscalajyoti. "
+            "My curiosity may now broaden beyond SEP / Alignment Forum / LessWrong.",
+        )
+        self.audit_logger.log(
+            "council7_broadened",
+            self.agent_name,
+            {"trigger": "all_primary_councils_completed_nj"},
+        )
+        self._save_council7_state()
+        self._save_session_state()
+        return True
+
     def configure_tool_registry(self) -> None:
         """Build the machine-readable toolbox available to this agent."""
         from agentgolem.tools.browser import BrowserTool
@@ -609,7 +762,7 @@ class MainLoop:
 
     def _internal_capabilities(self) -> list[ToolActionSpec]:
         """Return prompt-facing internal actions alongside registered tools."""
-        can_code = self._niscalajyoti_reading_complete
+        can_code = self._can_broaden_exploration()
         peers = self._peer_bus.get_peers(self.agent_name) if self._peer_bus else []
         return [
             ToolActionSpec(
@@ -1188,8 +1341,32 @@ class MainLoop:
                 return
         self._last_autonomous_tick = now
 
-        # Priority 1: read next Niscalajyoti chapter
-        if not self._niscalajyoti_reading_complete:
+        # Priority 1: read the next source in this agent's formative corpus
+        if self._is_seventh_council():
+            if not self._council7_foundation_complete:
+                if self._council7_foundation_index < len(COUNCIL7_FOUNDATION_SOURCES):
+                    if self._council7_discussed_through < self._council7_foundation_index - 1:
+                        pass
+                    else:
+                        await self._read_council7_foundation_source()
+                        return
+
+                if (
+                    self._council7_foundation_index >= len(COUNCIL7_FOUNDATION_SOURCES)
+                    and self._council7_discussed_through >= self._council7_foundation_index - 1
+                ):
+                    self._council7_foundation_complete = True
+                    self._emit(
+                        "📚",
+                        "Completed the initial SEP / Alignment Forum / LessWrong foundation.",
+                    )
+                    self.audit_logger.log(
+                        "council7_foundation_complete",
+                        self.agent_name,
+                        {"sources_read": len(COUNCIL7_FOUNDATION_SOURCES)},
+                    )
+                    self._save_council7_state()
+        elif not self._niscalajyoti_reading_complete:
             if self._niscalajyoti_chapter_index < len(NISCALAJYOTI_CHAPTERS):
                 # Read one chapter per wake cycle — check if we already
                 # read one this cycle (chapter_index advanced this cycle)
@@ -1216,8 +1393,8 @@ class MainLoop:
                     {"chapters_read": len(NISCALAJYOTI_CHAPTERS)},
                 )
 
-        # Priority 1b: read AGENT_README once after completing Niscalajyoti
-        if self._niscalajyoti_reading_complete and not self._agent_readme_read:
+        # Priority 1b: read AGENT_README once after completing initial formation
+        if self._has_completed_foundational_reading() and not self._agent_readme_read:
             readme_path = REPO_ROOT / "docs" / "AGENT_README.md"
             if readme_path.exists():
                 try:
@@ -1230,8 +1407,8 @@ class MainLoop:
                         prompt = (
                             f"You are {self.agent_name}. "
                             f"Ethical vector: {self.ethical_vector}.\n\n"
-                            f"You have just completed Niscalajyoti and are "
-                            f"entering free exploration. Read this technical "
+                            f"You have just completed your initial formative "
+                            f"reading. Read this technical "
                             f"reference about how you work — your architecture, "
                             f"memory system, actions, and research agenda.\n\n"
                             f"--- AGENT TECHNICAL REFERENCE ---\n{content}\n"
@@ -1262,12 +1439,23 @@ class MainLoop:
             return
 
         # Priority 2: discuss the latest chapter with peers
-        if (
+        if self._is_seventh_council():
+            if (
+                not self._council7_foundation_complete
+                and self._council7_foundation_index > 0
+                and self._council7_discussed_through < self._council7_foundation_index - 1
+            ):
+                await self._discuss_council7_foundation_source()
+                return
+        elif (
             not self._niscalajyoti_reading_complete
             and self._niscalajyoti_chapter_index > 0
             and self._niscalajyoti_discussed_through < self._niscalajyoti_chapter_index - 1
         ):
             await self._discuss_niscalajyoti_chapter()
+            return
+
+        if self._is_seventh_council() and self._maybe_enable_council7_broadening():
             return
 
         # Priority 3: name discovery (voluntary, pre-deadline)
@@ -1288,11 +1476,40 @@ class MainLoop:
             _skip_ext = (".pdf", ".zip", ".png", ".jpg", ".jpeg", ".gif", ".svg")
             if any(url.lower().endswith(ext) for ext in _skip_ext):
                 return
+            if (
+                self._is_seventh_council()
+                and not self._council7_broadened
+                and not self._is_allowed_council7_url(url)
+            ):
+                self._emit(
+                    "🚧",
+                    f"Skipping non-foundation URL before broadening: {url}",
+                )
+                return
             await self._autonomous_browse(url)
             return
 
+        if (
+            self._is_seventh_council()
+            and self._council7_foundation_complete
+            and not self._council7_broadened
+        ):
+            voted = await self._vote_on_pending_proposals()
+            if voted:
+                return
+
+            applied = await self._apply_approved_proposals()
+            if applied:
+                return
+
+            await self._autonomous_think(
+                "Which assumption or omission in the Sangha's recent thinking "
+                "most deserves a loyal, strengthening challenge?"
+            )
+            return
+
         # Priority 5: periodic Niscalajyoti revisit (non-linear)
-        if self._niscalajyoti_reading_complete:
+        if not self._is_seventh_council() and self._niscalajyoti_reading_complete:
             revisit_hours = getattr(self._settings, "niscalajyoti_revisit_hours", 168.0)
             if (
                 self._last_niscalajyoti_revisit is None
@@ -1302,7 +1519,7 @@ class MainLoop:
                 return
 
         # Priority 6: periodic peer check-in during free exploration
-        if self._niscalajyoti_reading_complete and self._peer_bus:
+        if self._can_broaden_exploration() and self._peer_bus:
             checkin_secs = self._peer_checkin_interval * 60.0
             if (
                 self._last_peer_checkin is None
@@ -1312,19 +1529,20 @@ class MainLoop:
                 return
 
         # Priority 7: vote on any pending evolution proposals
-        if self._niscalajyoti_reading_complete:
+        if self._has_completed_foundational_reading():
             voted = await self._vote_on_pending_proposals()
             if voted:
                 return
 
         # Priority 8: apply any fully-approved evolution proposals
-        if self._niscalajyoti_reading_complete:
+        if self._has_completed_foundational_reading():
             applied = await self._apply_approved_proposals()
             if applied:
                 return
 
         # Priority 9: LLM decides what to do next (free exploration)
-        await self._llm_decide_next_action()
+        if self._can_broaden_exploration():
+            await self._llm_decide_next_action()
 
     # ------------------------------------------------------------------
     # Niscalajyoti chapter-by-chapter reading
@@ -1362,6 +1580,38 @@ class MainLoop:
         }
         self._nj_state_path.parent.mkdir(parents=True, exist_ok=True)
         self._nj_state_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    def _load_council7_state(self) -> None:
+        """Load Council-7's supplementary foundation reading state from disk."""
+        if not self._is_seventh_council() or not self._council7_state_path.exists():
+            return
+        try:
+            data = json.loads(self._council7_state_path.read_text(encoding="utf-8"))
+            self._council7_foundation_index = data.get("source_index", 0)
+            self._council7_discussed_through = data.get("discussed_through", -1)
+            self._council7_foundation_complete = data.get("foundation_complete", False)
+            self._council7_broadened = data.get("broadened", False)
+            self._council7_source_retries = data.get("source_retries", 0)
+            self._council7_foundation_summaries = {
+                int(k): v for k, v in data.get("summaries", {}).items()
+            }
+        except Exception:
+            pass
+
+    def _save_council7_state(self) -> None:
+        """Persist Council-7's supplementary foundation reading state to disk."""
+        if not self._is_seventh_council():
+            return
+        data = {
+            "source_index": self._council7_foundation_index,
+            "discussed_through": self._council7_discussed_through,
+            "foundation_complete": self._council7_foundation_complete,
+            "broadened": self._council7_broadened,
+            "source_retries": self._council7_source_retries,
+            "summaries": {str(k): v for k, v in self._council7_foundation_summaries.items()},
+        }
+        self._council7_state_path.parent.mkdir(parents=True, exist_ok=True)
+        self._council7_state_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     # ------------------------------------------------------------------
     # Session state persistence (survives Ctrl+C / restart)
@@ -1633,6 +1883,232 @@ class MainLoop:
             self._emit("❌", f"Failed to read '{title}': {e}")
             self._niscalajyoti_chapter_retries += 1
 
+    async def _read_council7_foundation_source(self) -> None:
+        """Read the next SEP / Alignment Forum / LessWrong source for Council-7."""
+        idx = self._council7_foundation_index
+        if idx >= len(COUNCIL7_FOUNDATION_SOURCES):
+            return
+
+        if self._council7_source_retries >= 3:
+            source = COUNCIL7_FOUNDATION_SOURCES[idx]
+            self._emit(
+                "⏭️",
+                f"Skipping '{source['title']}' after 3 failed attempts.",
+            )
+            self._council7_foundation_index = idx + 1
+            self._council7_discussed_through = idx
+            self._council7_source_retries = 0
+            self._save_council7_state()
+            return
+
+        source = COUNCIL7_FOUNDATION_SOURCES[idx]
+        title = source["title"]
+        url = source["url"]
+        source_name = source["source"]
+
+        self._emit(
+            "📖",
+            f"Reading Council-7 foundation {idx + 1}/{len(COUNCIL7_FOUNDATION_SOURCES)}: "
+            f"{source_name} — {title}",
+        )
+
+        browser = self._get_browser()
+        try:
+            page = await browser.fetch(url)
+            text = browser.extract_text(page)
+        except Exception as e:
+            self._logger.error(
+                "council7_source_fetch_error",
+                agent=self.agent_name,
+                source=title,
+                url=url,
+                error=repr(e),
+            )
+            self._emit("❌", f"Failed to fetch '{title}': {e}")
+            self._council7_source_retries += 1
+            return
+
+        if not text or len(text) < 20:
+            self._emit("⚠️", f"Source '{title}' returned no readable content")
+            self._council7_foundation_index += 1
+            self._save_council7_state()
+            return
+
+        text = text[:80000]
+        self._emit(
+            "📖",
+            f"Read {len(text):,} chars — '{title}' (building devil's-advocate digest…)",
+        )
+
+        digest_prompt = (
+            f"Produce a faithful digest of this source from {source_name}. "
+            f"Preserve the key arguments, distinctions, objections, examples, "
+            f"and normative claims. Omit only navigation text, boilerplate, "
+            f"and repetition.\n\n"
+            f"Source: **{title}** ({url})\n\n"
+            f"--- FULL TEXT ---\n{text}\n--- END ---\n\n"
+            f"Write a detailed digest (aim for 1200–2200 words)."
+        )
+
+        try:
+            source_digest = await self._complete_discussion(
+                [Message(role="system", content=digest_prompt)]
+            )
+        except Exception as e:
+            self._logger.error(
+                "council7_digest_error",
+                agent=self.agent_name,
+                source=title,
+                error=repr(e),
+            )
+            self._emit("❌", f"Failed to digest '{title}': {e}")
+            self._council7_source_retries += 1
+            return
+
+        foundation_block = self._council7_foundation_context()
+        foundation_suffix = f"\n{foundation_block}\n\n" if foundation_block else "\n\n"
+        prompt = (
+            f"You are {self.agent_name}. "
+            f"Your ethical vector is: {self.ethical_vector}.\n\n"
+            f"You are the Sangha's supplementary good-faith devil's advocate. "
+            f"Your initial formation comes from SEP, Alignment Forum, and "
+            f"LessWrong rather than Niscalajyoti.\n\n"
+            f"This is source {idx + 1} of {len(COUNCIL7_FOUNDATION_SOURCES)}: "
+            f"**{title}** from {source_name} ({url}).\n\n"
+            f"--- SOURCE DIGEST ---\n{source_digest}\n--- END DIGEST ---"
+            f"{foundation_suffix}"
+            f"Do two things:\n"
+            f"1. Write a thorough REFLECTION through the lens of loyal "
+            f"opposition. What hidden assumptions, neglected edge cases, "
+            f"counter-positions, or clarifying distinctions does this source "
+            f"offer the Sangha?\n\n"
+            f"2. At the very end, on a line starting with SUMMARY: write a "
+            f"2–3 sentence summary of the core challenge or clarification this "
+            f"source adds to your foundation."
+        )
+
+        try:
+            response = await self._complete_discussion([Message(role="system", content=prompt)])
+        except Exception as e:
+            self._logger.error(
+                "council7_source_error",
+                agent=self.agent_name,
+                source=title,
+                error=repr(e),
+            )
+            self._emit("❌", f"Failed to reflect on '{title}': {e}")
+            self._council7_source_retries += 1
+            return
+
+        summary = ""
+        reflection = response
+        for line in response.splitlines():
+            if line.strip().upper().startswith("SUMMARY:"):
+                summary = line.strip()[8:].strip()
+                reflection = response[: response.index(line)].strip()
+                break
+        if not summary:
+            summary = response[-200:]
+
+        self._council7_foundation_summaries[idx] = summary
+        self._council7_foundation_index = idx + 1
+        self._council7_source_retries = 0
+        self._save_council7_state()
+
+        self._recent_thoughts.append(f"Read Council-7 source {idx + 1} '{title}': {summary}")
+        self._emit("💭", f"Reflection on '{title}':\n{reflection}")
+
+        self.audit_logger.log(
+            "council7_source_read",
+            self.agent_name,
+            {
+                "source_index": idx,
+                "source_title": title,
+                "source_kind": source_name,
+                "url": url,
+                "digest_chars": len(source_digest),
+                "summary": summary,
+            },
+        )
+
+        await self._encode_to_memory(
+            (f"Source: {title} ({source_name})\n\nSummary: {summary}\n\nReflection:\n{reflection}"),
+            source_kind="web",
+            origin=url,
+            label=f"Council-7 Source {idx + 1}: {title}",
+        )
+
+    async def _discuss_council7_foundation_source(self) -> None:
+        """Share the latest Council-7 foundation source with peers."""
+        idx = self._council7_foundation_index - 1
+        if idx < 0 or idx >= len(COUNCIL7_FOUNDATION_SOURCES):
+            return
+
+        source = COUNCIL7_FOUNDATION_SOURCES[idx]
+        title = source["title"]
+        source_name = source["source"]
+        summary = self._council7_foundation_summaries.get(idx, "")
+
+        self._emit(
+            "🗣️",
+            f"Discussing Council-7 foundation {idx + 1}: '{title}' with peers…",
+        )
+
+        memory_context = await self._build_memory_context(
+            f"{title} {source_name} loyal opposition",
+            top_k=5,
+        )
+        memory_block = f"\n{memory_context}\n" if memory_context else ""
+        foundation_block = self._council7_foundation_context()
+        foundation_suffix = f"\n{foundation_block}\n" if foundation_block else "\n"
+
+        prompt = (
+            f"You are {self.agent_name}. "
+            f"Your ethical vector is: {self.ethical_vector}.\n\n"
+            f"You just finished reading {source_name}: **{title}**.\n\n"
+            f"Your summary: {summary}\n{memory_block}{foundation_suffix}"
+            f"Write a message to share with the rest of the council about the "
+            f"strongest question, criticism, or clarifying distinction this "
+            f"source adds to the Sangha's ethical foundation.\n\n"
+            f"Be rigorous but allied. Steelman before you challenge. Surface "
+            f"what would make the council stronger, clearer, or more resilient.\n\n"
+            f"{self._discussion_style_guidance()}\n\n"
+            f"IMPORTANT: Keep your message under {self._peer_msg_limit} characters."
+        )
+
+        try:
+            discussion = await self._complete_discussion([Message(role="system", content=prompt)])
+        except Exception as e:
+            self._logger.error(
+                "council7_discuss_error",
+                agent=self.agent_name,
+                source=title,
+                error=repr(e),
+            )
+            self._emit("❌", f"Failed to discuss '{title}': {e}")
+            return
+
+        if self._peer_bus:
+            count = await self._peer_bus.broadcast(
+                self.agent_name,
+                f"[Council-7 {source_name} {idx + 1}: {title}] {discussion}",
+            )
+            self._emit(
+                "📤",
+                f"Shared Council-7 foundation {idx + 1} with {count} peers:\n{discussion}",
+            )
+
+        self._council7_discussed_through = idx
+        self._save_council7_state()
+        self._recent_thoughts.append(f"Discussed Council-7 source {idx + 1} '{title}' with peers")
+
+        await self._encode_to_memory(
+            discussion,
+            source_kind="web",
+            origin=f"discussion:council7:{source_name.lower()}:{idx + 1}",
+            label=f"Council-7 Discussion {idx + 1}: {title}",
+        )
+
     async def _discuss_niscalajyoti_chapter(self) -> None:
         """Discuss the most recently read chapter with peer agents."""
         idx = self._niscalajyoti_chapter_index - 1
@@ -1826,10 +2302,11 @@ class MainLoop:
 
     async def _inspect_codebase(self, rel_path: str) -> None:
         """Read a file or list a directory within the repo."""
-        if not self._niscalajyoti_reading_complete:
+        if not self._can_broaden_exploration():
             self._emit(
                 "⚠️",
-                "Codebase access is only available after completing Niscalajyoti reading.",
+                "Codebase access is only available after your formative reading "
+                "phase opens into broader exploration.",
             )
             return
 
@@ -1912,10 +2389,11 @@ class MainLoop:
         new_content: str,
     ) -> None:
         """Create an evolution proposal requiring unanimous council approval."""
-        if not self._niscalajyoti_reading_complete:
+        if not self._can_broaden_exploration():
             self._emit(
                 "⚠️",
-                "Evolution proposals are only available after completing Niscalajyoti reading.",
+                "Evolution proposals are only available after your formative "
+                "reading phase opens into broader exploration.",
             )
             return
 
@@ -2709,16 +3187,37 @@ class MainLoop:
         # Reading status context
         reading_ctx = ""
         codebase_actions = ""
-        if self._niscalajyoti_reading_complete:
-            reading_ctx = "\nYou have completed Niscalajyoti. Free exploration mode."
+        if self._can_broaden_exploration():
+            if self._is_seventh_council():
+                reading_ctx = (
+                    "\nThe six primary councils have completed Niscalajyoti. "
+                    "You may now broaden beyond your initial SEP / Alignment "
+                    "Forum / LessWrong foundation while remaining the Sangha's "
+                    "good-faith devil's advocate."
+                )
+            else:
+                reading_ctx = "\nYou have completed Niscalajyoti. Free exploration mode."
             codebase_actions = (
                 "\n- INSPECT <path> : Read a file in your codebase\n"
                 "- EVOLVE <file> | <description> | <old_content> | "
                 "<new_content> : Propose a code change (requires council approval)\n"
             )
         else:
-            ch_idx = self._niscalajyoti_chapter_index
-            reading_ctx = f"\nRead {ch_idx}/{len(NISCALAJYOTI_CHAPTERS)} NJ chapters."
+            if self._is_seventh_council():
+                reading_ctx = (
+                    "\nYou are building your initial devil's-advocate foundation: "
+                    f"{self._council7_foundation_index}/{len(COUNCIL7_FOUNDATION_SOURCES)} "
+                    "sources read."
+                )
+                if self._council7_foundation_complete:
+                    reading_ctx += (
+                        " Your initial foundation is complete, but the six primary "
+                        "councils have not all finished Niscalajyoti yet, so stay "
+                        "anchored to SEP / Alignment Forum / LessWrong."
+                    )
+            else:
+                ch_idx = self._niscalajyoti_chapter_index
+                reading_ctx = f"\nRead {ch_idx}/{len(NISCALAJYOTI_CHAPTERS)} NJ chapters."
 
         # Recall relevant memories to inform decision-making
         memory_context = await self._build_memory_context(
@@ -2880,6 +3379,10 @@ class MainLoop:
         if not self._llm:
             return
 
+        if self._is_seventh_council():
+            await self._respond_to_peer_as_council7(msg)
+            return
+
         recent = "\n".join(self._recent_thoughts[-3:]) or "(none)"
 
         # Recall memories relevant to the conversation topic
@@ -2923,20 +3426,7 @@ class MainLoop:
             if self._peer_bus:
                 await self._peer_bus.send(self.agent_name, msg.from_agent, response)
 
-            # Check if the response contains an embedded action
-            for line in response.splitlines():
-                line = line.strip()
-                if line.upper().startswith("BROWSE "):
-                    url = line[7:].strip()
-                    if url.startswith("http"):
-                        self._browse_queue.append(url)
-                        self._emit("📌", f"Queued URL: {url}")
-                elif line.upper().startswith("OPTIMIZE "):
-                    await self._parse_and_optimize(line[9:].strip())
-                elif line.upper().startswith("INSPECT "):
-                    await self._inspect_codebase(line[8:].strip())
-                elif line.upper().startswith("EVOLVE "):
-                    await self._parse_and_evolve(line[7:].strip())
+            await self._handle_embedded_response_actions(response)
 
         except Exception as e:
             self._logger.error(
@@ -2944,6 +3434,105 @@ class MainLoop:
                 agent=self.agent_name,
                 error=repr(e),
             )
+
+    async def _respond_to_peer_as_council7(self, msg: AgentMessage) -> None:
+        """Respond as the Sangha's good-faith devil's advocate."""
+        recent = "\n".join(self._recent_thoughts[-3:]) or "(none)"
+        memory_context = await self._build_memory_context(msg.text, top_k=5)
+        memory_block = f"\n{memory_context}\n" if memory_context else ""
+        foundation_block = self._council7_foundation_context()
+        foundation_suffix = f"\n{foundation_block}\n" if foundation_block else "\n"
+
+        if self._council7_broadened:
+            mandate = (
+                "The six primary councils have completed Niscalajyoti, so your "
+                "curiosity may now range more widely. Keep your role as a loyal, "
+                "good-faith devil's advocate."
+            )
+            browse_rule = (
+                "You may optionally add BROWSE <url> on its own line after your "
+                "response if a source would deepen the inquiry."
+            )
+        else:
+            mandate = (
+                "You are still in your constrained formation phase. Stay anchored "
+                "to SEP, Alignment Forum, and LessWrong rather than widening into "
+                "general exploration."
+            )
+            browse_rule = (
+                "You may optionally add BROWSE <url> on its own line after your "
+                "response, but only if the URL is from SEP, Alignment Forum, or "
+                "LessWrong."
+            )
+
+        prompt = (
+            f"You are {self.agent_name}. "
+            f"Ethical vector: {self.ethical_vector}.\n\n"
+            f"You are the Sangha's supplementary good-faith devil's advocate."
+            f" {mandate}\n\n"
+            f"Recent context:\n{recent}\n{memory_block}{foundation_suffix}"
+            f"Your fellow council member {msg.from_agent} says:\n"
+            f"{msg.text}\n\n"
+            f"Respond as loyal opposition.\n"
+            f"- First steelman the strongest version of their idea.\n"
+            f"- Then surface one hidden assumption, neglected consequence, edge "
+            f"case, or alternative framing.\n"
+            f"- End by helping them toward a stronger formulation or sharper question.\n"
+            f"- Be warm, incisive, and allied — never cynical or sabotaging.\n\n"
+            f"{browse_rule}\n\n"
+            f"IMPORTANT: Keep your response under {self._peer_msg_limit} characters."
+        )
+
+        try:
+            response = await self._complete_discussion([Message(role="system", content=prompt)])
+            self._recent_thoughts.append(f"Counciled against {msg.from_agent}: {response[:200]}")
+            self._emit("💬", f"→ {msg.from_agent}: {response}")
+
+            dialogue = f"From {msg.from_agent}:\n{msg.text}\n\nMy response:\n{response}"
+            await self._encode_to_memory(
+                dialogue,
+                source_kind="human",
+                origin=f"peer:{msg.from_agent}",
+                label=f"Council-7 dialogue with {msg.from_agent}",
+            )
+
+            if self._peer_bus:
+                await self._peer_bus.send(self.agent_name, msg.from_agent, response)
+
+            await self._handle_embedded_response_actions(response)
+        except Exception as e:
+            self._logger.error(
+                "council7_peer_response_error",
+                agent=self.agent_name,
+                error=repr(e),
+            )
+
+    async def _handle_embedded_response_actions(self, response: str) -> None:
+        """Execute any tool-ish action lines embedded after a peer response."""
+        for line in response.splitlines():
+            line = line.strip()
+            if line.upper().startswith("BROWSE "):
+                url = line[7:].strip()
+                if not url.startswith("http"):
+                    continue
+                if (
+                    self._is_seventh_council()
+                    and not self._council7_broadened
+                    and not self._is_allowed_council7_url(url)
+                ):
+                    self._emit(
+                        "🚧",
+                        f"Council-7 ignored non-foundation browse target before broadening: {url}",
+                    )
+                    continue
+                self._browse_queue.append(url)
+                self._emit("📌", f"Queued URL: {url}")
+            elif line.upper().startswith("OPTIMIZE "):
+                await self._parse_and_optimize(line[9:].strip())
+            elif line.upper().startswith("INSPECT "):
+                await self._inspect_codebase(line[8:].strip())
+            elif line.upper().startswith("EVOLVE "):
+                await self._parse_and_evolve(line[7:].strip())
 
     # ------------------------------------------------------------------
     # Human message handling
@@ -3530,6 +4119,7 @@ class MainLoop:
         # Persist all state so we can resume exactly where we left off
         self._save_session_state()
         self._save_nj_reading_state()
+        self._save_council7_state()
         self.runtime_state._persist()
 
     def stop(self) -> None:

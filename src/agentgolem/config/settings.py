@@ -1,4 +1,5 @@
 """Non-secret configuration from settings.yaml."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -50,7 +51,7 @@ class Settings(BaseModel):
     llm_request_delay_seconds: float = 3.0
 
     # Multi-agent swarm
-    agent_count: int = 6
+    agent_count: int = 7
     agent_offset_minutes: float = 0.0
     autonomous_interval_seconds: float = 60.0
     name_discovery_cycles: int = 4

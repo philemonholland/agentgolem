@@ -1,6 +1,6 @@
 # Architecture
 
-Technical architecture of AgentGolem — a six-agent Ethical Council.
+Technical architecture of AgentGolem — a seven-agent Ethical Council.
 
 ---
 
@@ -22,8 +22,10 @@ Technical architecture of AgentGolem — a six-agent Ethical Council.
 
 ## System Overview
 
-AgentGolem runs as a **six-agent Ethical Council**. Each agent embodies a
-distinct ethical vector derived from [Niscalajyoti](https://www.niscalajyoti.org/):
+AgentGolem runs as a **seven-agent Ethical Council**. Six agents embody
+distinct ethical vectors derived from
+[Niscalajyoti](https://www.niscalajyoti.org/), while the seventh serves as a
+supplementary good-faith devil's advocate:
 
 | Agent      | Ethical Vector              |
 |------------|-----------------------------|
@@ -33,6 +35,7 @@ distinct ethical vector derived from [Niscalajyoti](https://www.niscalajyoti.org
 | Council-4  | Unwavering integrity        |
 | Council-5  | Evolution                   |
 | Council-6  | Integration and balance     |
+| Council-7  | Good-faith adversarialism   |
 
 All agents share the same wake/sleep schedule (`agent_offset_minutes: 0`),
 each has its own graph memory (SQLite), soul, and heartbeat. They communicate
@@ -52,10 +55,11 @@ The launcher (`run_golem.py`) orchestrates:
 
 ### Agent Lifecycle
 
-1. **Niscalajyoti reading** — Agents read NJ chapters sequentially, one per
-   wake cycle, discussing after each chapter
-2. **Web exploration** — After finishing all chapters, agents browse the web
-   following their own interests
+1. **Foundational reading** — Councils 1–6 read NJ chapters sequentially, one
+   per wake cycle, discussing after each chapter, while Council-7 builds an
+   initial foundation from SEP, Alignment Forum, and LessWrong
+2. **Web exploration** — After finishing their initial formation tracks, agents
+   browse the web following their own interests
 3. **Periodic revisit** — Agents revisit NJ sections non-linearly
 4. **Capability-aware curiosity** — Agents choose from a prompt-visible toolbox
    of internal capabilities and registered tools

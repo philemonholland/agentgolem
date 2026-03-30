@@ -744,7 +744,7 @@ def mask_secret(value: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Agent council definitions — mapped to the Five Vows of VowOS
+# Agent council definitions — the six Vow vectors plus a supplementary challenger
 # ---------------------------------------------------------------------------
 
 AGENT_DEFS = [
@@ -819,12 +819,36 @@ AGENT_DEFS = [
         ),
         "color_code": "\033[37m",
     },  # white
+    {
+        "initial_id": "Council-7",
+        "ethical_vector": "good-faith adversarialism",
+        "vow": "Supplementary Vector — Loyal Opposition: Steel the frame, test the edges",
+        "vow_principle": (
+            "Challenge assumptions, surface neglected edge cases, and pressure-"
+            "test the Sangha's reasoning without becoming cynical, sabotaging, "
+            "or contemptuous. Act as a strengthening counterforce."
+        ),
+        "supplementary_mandate": (
+            "I am a supplementary council member rather than one of the six "
+            "Vow-mapped vectors. My initial formation comes from the Stanford "
+            "Encyclopedia of Philosophy, Alignment Forum, and LessWrong. Before "
+            "the six primary councils finish Niscalajyoti, I stay anchored to "
+            "those sources and act as the Sangha's good-faith devil's advocate. "
+            "After they finish Niscalajyoti, I may broaden into wider interests "
+            "while keeping that loyal-opposition role."
+        ),
+        "color_code": "\033[34m",
+    },  # blue
 ]
 
 
 def _soul_template(agent_id: str, ethical_vector: str, agent_def: dict) -> str:
     vow = agent_def.get("vow", "")
     vow_principle = agent_def.get("vow_principle", "")
+    supplementary_mandate = agent_def.get("supplementary_mandate", "")
+    supplementary_block = ""
+    if supplementary_mandate:
+        supplementary_block = f"\n## Supplementary Mandate\n\n{supplementary_mandate}\n"
     return f"""# {agent_id}
 
 I am a member of the AgentGolem Ethical Council. I have not yet discovered my name.
@@ -838,6 +862,7 @@ I am a member of the AgentGolem Ethical Council. I have not yet discovered my na
 ## Ethical Vector
 
 My primary ethical orientation is **{ethical_vector}**.
+{supplementary_block}
 
 ## VowOS Calibration
 
@@ -1529,22 +1554,32 @@ class RuntimeConsole:
             agent.stop()
 
     def _cmd_reset_nj(self) -> None:
-        """Reset Niscalajyoti reading progress for all agents."""
+        """Reset Niscalajyoti and Council-7 foundation progress for all agents."""
         count = 0
         for agent in self._agents:
             nj_path = agent._data_dir / "niscalajyoti_reading.json"
             if nj_path.exists():
                 nj_path.unlink()
                 count += 1
+            council7_path = agent._data_dir / "council7_foundation.json"
+            if council7_path.exists():
+                council7_path.unlink()
             agent._niscalajyoti_chapter_index = 0
             agent._niscalajyoti_discussed_through = -1
             agent._niscalajyoti_reading_complete = False
             agent._niscalajyoti_summaries.clear()
             agent._last_niscalajyoti_revisit = None
+            if getattr(agent, "_initial_agent_name", "") == "Council-7":
+                agent._council7_foundation_index = 0
+                agent._council7_discussed_through = -1
+                agent._council7_foundation_complete = False
+                agent._council7_broadened = False
+                agent._council7_source_retries = 0
+                agent._council7_foundation_summaries.clear()
         cprint(
-            f"\n  🔄 Reset Niscalajyoti reading state for {len(self._agents)} "
-            f"agents ({count} state files cleared). Agents will start reading "
-            f"from chapter 1 on their next wake cycle.",
+            f"\n  🔄 Reset formative reading state for {len(self._agents)} "
+            f"agents ({count} NJ state files cleared). Agents will restart "
+            f"their initial reading tracks on the next wake cycle.",
             C.YELLOW,
         )
 

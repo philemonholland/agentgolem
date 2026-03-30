@@ -43,6 +43,10 @@ def tmp_env(tmp_path, monkeypatch):
 
 
 class TestParamStore:
+    def test_agent_count_default_tracks_seven_councils(self, tmp_env):
+        store = run_golem.ParamStore()
+        assert store.get("agent_count", "int") == 7
+
     def test_get_launcher_defaults(self, tmp_env):
         store = run_golem.ParamStore()
         assert store.get("dashboard_enabled", "bool") is True
@@ -262,6 +266,12 @@ class TestWalkthrough:
         with patch("builtins.input", side_effect=inputs):
             run_golem.walkthrough(store)
         assert store.get("dashboard_port", "int") == 6667  # default kept
+
+
+def test_agent_defs_include_supplementary_council7() -> None:
+    council7 = run_golem.AGENT_DEFS[-1]
+    assert council7["initial_id"] == "Council-7"
+    assert council7["ethical_vector"] == "good-faith adversarialism"
 
 
 # ---------------------------------------------------------------------------

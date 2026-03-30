@@ -94,7 +94,7 @@ This file is **gitignored** because agents may self-optimise it at runtime
 data_dir: E:\AgentGolem\Data          # Runtime data location
 
 # --- Council ---
-agent_count: 6                         # Number of council agents
+agent_count: 7                         # Number of council agents
 agent_offset_minutes: 0.0              # Stagger between agent wake times (0 = sync)
 autonomous_interval_seconds: 15.0      # Seconds between autonomous tick actions
 name_discovery_cycles: 4               # Wake cycles before agents discover names
@@ -168,9 +168,10 @@ python run_golem.py                    # Same, from shell
 python run_golem.py --auto             # Non-interactive (auto-accept defaults)
 ```
 
-The launcher starts all six Ethical Council agents, the interactive console,
-and the web dashboard. Each agent enters **AWAKE** mode and begins reading
-Niscalajyoti chapter-by-chapter, discussing with peers, and exploring.
+The launcher starts all seven Ethical Council agents, the interactive console,
+and the web dashboard. Councils 1–6 begin reading Niscalajyoti
+chapter-by-chapter, while Council-7 starts from SEP, Alignment Forum, and
+LessWrong as a good-faith devil's advocate.
 
 ---
 

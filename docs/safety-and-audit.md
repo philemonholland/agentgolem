@@ -367,7 +367,7 @@ subprocess execution path from untrusted content.
 
 > **Self-evolution exception:** Agents may modify their own source code and
 > restart via `start.bat`, but **only** with unanimous Vow-aligned consensus
-> from all six council agents. All changes are versioned and logged.
+> from all active council agents. All changes are versioned and logged.
 
 ---
 
@@ -377,7 +377,7 @@ Agents can inspect and modify their own codebase, subject to strict safeguards:
 
 | Safeguard                    | Description                                                     |
 |------------------------------|-----------------------------------------------------------------|
-| **Unanimous consensus**      | All six agents must agree before any code change is applied     |
+| **Unanimous consensus**      | All active council agents must agree before any code change is applied |
 | **Vow-aligned reasoning**    | Every proposal must justify alignment with the Five Vows        |
 | **Version control**          | All changes are committed to git before restart                 |
 | **No GitHub push**           | Agents are not allowed to push to remote repositories           |
