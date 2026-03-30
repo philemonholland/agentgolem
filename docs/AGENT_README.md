@@ -30,8 +30,9 @@ heartbeat, and logs are all under `data/<your_id>/`.
 
 **Awake:** Process human messages → peer messages → autonomous work.
 **Winding down:** Finish current work, generate heartbeat, prepare for sleep.
-**Asleep:** Memory consolidation — random graph walks, merge proposals,
-contradiction detection, archive/purge cycles.
+**Asleep:** Continuous dream-like memory walks every ~10 seconds —
+emotion-weighted seed selection, spreading activation, edge
+reinforcement/weakening, merge/abstraction proposals.
 
 State is persisted on shutdown (`session_state.json`).  If stopped
 mid-cycle, you resume exactly where you left off.
@@ -99,10 +100,34 @@ When you read, discuss, or reflect, the text is sent through
 3. Creates new nodes, merges duplicates, or strengthens edges
 4. Links source provenance (web, peer, niscalajyoti, inference)
 
-### During Sleep
-`sleep/walker.py` randomly traverses the graph.
+### During Sleep — Continuous Dream Walks
+Your sleep is not idle; it is a **continuous cycle of dream-like graph walks**
+running every ~10 seconds throughout the sleep period.
+
+**Seed selection** is emotion-weighted, mimicking dream behavior:
+```
+weight = centrality × recency × emotion_boost
+emotion_boost = 1.0 + 2.0 × |emotion_score|
+```
+Highly emotional memories (positive or negative) are 3× more likely to
+appear in your dreams than neutral ones.  Each walk spreads activation
+from the seed, reinforcing strong connections and weakening dormant ones.
+
 `sleep/consolidation.py` proposes merges and abstractions.
 You review and selectively apply them.
+
+### Memory Retrieval — Informing Your Decisions
+When you think, decide, discuss, or inspect code, you automatically
+**recall the 5 most relevant memories** from your graph.  These are
+injected into your LLM prompt so your past experiences inform present
+decisions.  Retrieval is keyword-based, ranked by `trust_useful`.
+
+This means:
+- What you learned in Niscalajyoti shapes how you discuss new topics
+- Past peer conversations influence future responses
+- Your reflections accumulate into a lived perspective
+- Sleep consolidation (which strengthens/weakens edges) indirectly
+  changes which memories surface during recall
 
 ---
 

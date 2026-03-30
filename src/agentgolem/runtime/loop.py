@@ -264,6 +264,7 @@ class MainLoop:
         self._consolidation_engine: ConsolidationEngine | None = None
         self._memory_store: Any = None
         self._memory_encoder: Any = None
+        self._memory_retriever: Any = None
 
         # LLM client and conversation
         self._llm: Any = None
@@ -1056,12 +1057,18 @@ class MainLoop:
         )
 
         # Build a message to share with peers
+        # Recall related memories from earlier chapters
+        memory_context = await self._recall_relevant_memories(
+            f"{title} {self.ethical_vector}", top_k=5
+        )
+        memory_block = f"\n{memory_context}\n" if memory_context else ""
+
         prompt = (
             f"You are {self.agent_name}. "
             f"Your ethical vector is: {self.ethical_vector}.\n\n"
             f"You just finished reading chapter {idx + 1} of "
             f"Niscalajyoti: **{title}**\n\n"
-            f"Your summary: {summary}\n\n"
+            f"Your summary: {summary}\n{memory_block}\n"
             f"Write a message to share with your fellow council members "
             f"about what you found in this chapter. What do you want to "
             f"discuss? What questions does it raise? How does it relate "
@@ -1182,10 +1189,16 @@ class MainLoop:
 
         recent = "\n".join(self._recent_thoughts[-5:]) or "(none)"
 
+        # Recall what we've been thinking about to inform the check-in
+        memory_context = await self._recall_relevant_memories(
+            f"{self.ethical_vector} exploration insights", top_k=5
+        )
+        memory_block = f"\n{memory_context}\n" if memory_context else ""
+
         prompt = (
             f"You are {self.agent_name}. "
             f"Your ethical vector is: {self.ethical_vector}.\n\n"
-            f"Recent activity:\n{recent}\n\n"
+            f"Recent activity:\n{recent}\n{memory_block}\n"
             f"You're checking in with your fellow council members. "
             f"Share what you've been exploring, what you've found "
             f"interesting, any questions or insights you want to "
@@ -1289,10 +1302,14 @@ class MainLoop:
             # Ask LLM to reflect on what it sees
             if self._llm:
                 soul_text = await self.soul_manager.read()
+                memory_context = await self._recall_relevant_memories(
+                    f"codebase {rel_path} {self.ethical_vector}", top_k=5
+                )
+                memory_block = f"\n{memory_context}\n" if memory_context else ""
                 prompt = (
                     f"You are {self.agent_name}. "
                     f"Ethical vector: {self.ethical_vector}.\n"
-                    f"Your soul:\n{soul_text}\n\n"
+                    f"Your soul:\n{soul_text}\n{memory_block}\n"
                     f"You just inspected your own source code at "
                     f"'{rel_path}':\n\n{content}\n\n"
                     f"What do you notice? What interests you? "
@@ -1887,10 +1904,15 @@ class MainLoop:
         self._emit("💭", f"Thinking about: {topic}")
 
         soul_text = await self.soul_manager.read()
+
+        # Recall memories related to the topic
+        memory_context = await self._recall_relevant_memories(topic, top_k=5)
+        memory_block = f"\n{memory_context}\n" if memory_context else ""
+
         prompt = (
             f"You are {self.agent_name}. "
             f"Ethical vector: {self.ethical_vector}.\n"
-            f"Your soul:\n{soul_text}\n\n"
+            f"Your soul:\n{soul_text}\n{memory_block}\n"
             f"Think deeply about: {topic}\n\n"
             f"Write a thoughtful reflection (2–3 paragraphs)."
         )
@@ -1944,11 +1966,17 @@ class MainLoop:
                 f"\nRead {ch_idx}/{len(NISCALAJYOTI_CHAPTERS)} NJ chapters."
             )
 
+        # Recall relevant memories to inform decision-making
+        memory_context = await self._recall_relevant_memories(
+            f"{self.ethical_vector} {recent}", top_k=5
+        )
+        memory_block = f"\n{memory_context}\n" if memory_context else ""
+
         prompt = (
             f"You are {self.agent_name}, ethical vector: "
             f"{self.ethical_vector}.{name_status}{reading_ctx}\n\n"
             f"Peers: {peers}\n"
-            f"Recent:\n{recent}\n\n"
+            f"Recent:\n{recent}\n{memory_block}\n"
             f"Actions:\n"
             f"- BROWSE <url>\n- THINK <topic>\n"
             f"- SHARE <message> / SHARE @<agent> <message>\n"
@@ -2061,10 +2089,16 @@ class MainLoop:
 
         recent = "\n".join(self._recent_thoughts[-3:]) or "(none)"
 
+        # Recall memories relevant to the conversation topic
+        memory_context = await self._recall_relevant_memories(
+            msg.text, top_k=5
+        )
+        memory_block = f"\n{memory_context}\n" if memory_context else ""
+
         prompt = (
             f"You are {self.agent_name}. "
             f"Ethical vector: {self.ethical_vector}.\n\n"
-            f"Recent context:\n{recent}\n\n"
+            f"Recent context:\n{recent}\n{memory_block}\n"
             f"Your fellow council member {msg.from_agent} says:\n"
             f"{msg.text}\n\n"
             f"Respond thoughtfully. You may also decide to:\n"
@@ -2354,10 +2388,12 @@ class MainLoop:
     def set_memory_store(self, store: object) -> None:
         """Wire memory store after DB init (avoids circular init)."""
         from agentgolem.memory.encoding import MemoryEncoder
+        from agentgolem.memory.retrieval import MemoryRetriever
         from agentgolem.memory.store import SQLiteMemoryStore
 
         if isinstance(store, SQLiteMemoryStore):
             self._memory_store = store
+            self._memory_retriever = MemoryRetriever(store)
             self._graph_walker = GraphWalker(store, self.runtime_state)
             self._consolidation_engine = ConsolidationEngine(
                 store=store,
@@ -2370,6 +2406,28 @@ class MainLoop:
                     llm=self._llm,
                     audit_logger=self.audit_logger,
                 )
+
+    async def _recall_relevant_memories(
+        self, context: str, top_k: int = 5
+    ) -> str:
+        """Retrieve memories relevant to the given context and format them.
+
+        Returns a short text block suitable for injecting into LLM prompts,
+        or empty string if no retriever or no matches.
+        """
+        if not self._memory_retriever:
+            return ""
+        try:
+            nodes = await self._memory_retriever.retrieve(context, top_k=top_k)
+            if not nodes:
+                return ""
+            lines = []
+            for node in nodes:
+                emo = f" [{node.emotion_label}]" if node.emotion_label != "neutral" else ""
+                lines.append(f"- {node.text}{emo}")
+            return "Relevant memories:\n" + "\n".join(lines)
+        except Exception:
+            return ""
 
     async def _encode_to_memory(
         self,

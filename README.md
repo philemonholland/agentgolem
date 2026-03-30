@@ -17,7 +17,8 @@ and gradually evolve their own code through unanimous, Vow-aligned consensus.
 - **Evolving Identity** — Per-agent `soul.md` that changes only through evidenced, versioned updates
 - **Graph Memory** — Conceptual nodes, typed edges, memory clusters in SQLite per agent
 - **Bayesian Trust Model** — Odds-space updates with independence discount; per-source reliability
-- **Sleep / Default-Mode** — Bounded graph walks, merge proposals, contradiction surfacing during sleep cycles
+- **Sleep / Default-Mode** — Continuous dream-like graph walks with emotion-weighted seed selection during sleep cycles
+- **Memory-Informed Decisions** — Agents recall relevant past memories when thinking, deciding, and discussing
 - **Self-Optimisation** — Agents tune their own settings (sleep/wake duration is protected)
 - **Self-Evolution** — Agents may modify their own source code with unanimous Vow-aligned consensus
 - **Web Exploration** — After completing Niscalajyoti, agents browse the web following their own interests
@@ -26,6 +27,9 @@ and gradually evolve their own code through unanimous, Vow-aligned consensus.
 - **Dashboard** — FastAPI + HTMX web dashboard for live monitoring
 - **Full Auditability** — Append-only `audit.jsonl`; every mutation traced to source evidence
 - **Crash Resilience** — Tick-level error isolation, crash logs to `data/logs/crash.log`
+- **State Persistence** — Ctrl+C saves session state; agents resume exactly where they left off (chapter, sleep progress, name)
+- **Configurable Peer Limits** — Inter-agent message length is tunable (`peer_message_max_chars`)
+- **Dedicated Code Model** — Agents use a stronger LLM (`llm_code_model`) for codebase operations
 
 ---
 
@@ -100,6 +104,8 @@ Key settings (see the template for all defaults):
 | `peer_checkin_interval_minutes`  | `10.0`     | How often agents check in with peers       |
 | `name_discovery_cycles`          | `4`        | Wake cycles before agents discover names   |
 | `llm_model`                      | `gpt-5`    | LLM model for agent reasoning              |
+| `llm_code_model`                 | `gpt-5`    | Stronger model for codebase ops            |
+| `peer_message_max_chars`         | `3000`     | Max chars for inter-agent messages         |
 | `niscalajyoti_revisit_hours`     | `6.0`      | Hours between NJ revisit cycles            |
 | `browser_rate_limit_per_minute`  | `10`       | Max web requests per minute                |
 
@@ -170,7 +176,7 @@ pytest --cov=agentgolem          # With coverage
 pytest -m "not integration"      # Skip integration tests
 ```
 
-The test suite contains 528 tests across 32+ test files.
+The test suite contains 531 tests across 32+ test files.
 
 ---
 
@@ -194,6 +200,7 @@ For the full security model, see **[docs/safety-and-audit.md](docs/safety-and-au
 | [docs/operator-guide.md](docs/operator-guide.md)      | Installation, configuration, usage    |
 | [docs/architecture.md](docs/architecture.md)          | Technical architecture & data flow    |
 | [docs/safety-and-audit.md](docs/safety-and-audit.md)  | Security, trust, audit, sandboxing    |
+| [docs/AGENT_README.md](docs/AGENT_README.md)          | Agent-facing technical reference      |
 
 ---
 
