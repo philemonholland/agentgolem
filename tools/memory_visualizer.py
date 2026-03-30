@@ -200,8 +200,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
   /* Main layout */
   #main { display: flex; height: calc(100vh - 46px); }
-  #graph-container { flex: 1; position: relative; overflow: hidden; }
-  svg { width: 100%; height: 100%; }
+  #graph-container { flex: 1; position: relative; overflow: hidden; min-height: 400px; }
+  svg { display: block; width: 100%; height: 100%; background: #0d1117; }
 
   /* Sidebar */
   #sidebar { width: 380px; background: #161b22; border-left: 1px solid #30363d;
@@ -376,13 +376,20 @@ HTML_PAGE = r"""<!DOCTYPE html>
 </div>
 <script src="https://d3js.org/d3.v7.min.js"></script>
 <script>
+if (typeof d3 === 'undefined') {
+  document.getElementById('stats').textContent = 'ERROR: D3.js failed to load — check internet connection.';
+  document.getElementById('stats').style.display = 'block';
+  document.getElementById('stats').style.color = '#f85149';
+}
+</script>
+<script>
 const NODE_TYPES = ['fact','preference','event','goal','risk','interpretation','identity','rule','association','procedure'];
 
 let agents = {};
 let currentAgent = null;
 let simulation = null;
 let currentZoom = null;       // d3 zoom behaviour reference
-let currentTransform = d3.zoomIdentity;
+let currentTransform = null;  // lazy — set after d3 loads
 let graphG = null;            // <g> element holding the graph
 let allNodeData = [];         // current graph nodes
 let allNodeCircles = null;    // d3 selection of circles
@@ -425,19 +432,24 @@ function selectAgent(name) {
 // ── Graph loading ──
 async function loadGraph() {
   if (!currentAgent) return;
-  const params = new URLSearchParams({
-    agent: currentAgent,
-    type: document.getElementById('filter-type').value,
-    status: document.getElementById('filter-status').value,
-    search: document.getElementById('filter-search').value,
-    limit: document.getElementById('filter-limit').value,
-  });
-  const r = await fetch('/api/graph?' + params);
-  const data = await r.json();
-  lastGraphHash = `${data.stats._total_nodes}:${data.stats._total_edges}`;
-  renderGraph(data);
-  renderStats(data.stats);
-  clearSearch();
+  try {
+    const params = new URLSearchParams({
+      agent: currentAgent,
+      type: document.getElementById('filter-type').value,
+      status: document.getElementById('filter-status').value,
+      search: document.getElementById('filter-search').value,
+      limit: document.getElementById('filter-limit').value,
+    });
+    const r = await fetch('/api/graph?' + params);
+    const data = await r.json();
+    lastGraphHash = `${data.stats._total_nodes}:${data.stats._total_edges}`;
+    renderGraph(data);
+    renderStats(data.stats);
+    clearSearch();
+  } catch (e) {
+    document.getElementById('stats').textContent = 'Error loading graph: ' + e.message;
+    console.error('loadGraph error:', e);
+  }
 }
 
 function renderStats(stats) {
@@ -454,8 +466,18 @@ function renderGraph(data) {
   const svg = d3.select('#graph-svg');
   svg.selectAll('*').remove();
 
-  const width = document.getElementById('graph-container').clientWidth;
-  const height = document.getElementById('graph-container').clientHeight;
+  const container = document.getElementById('graph-container');
+  const width = container.clientWidth || container.offsetWidth || window.innerWidth;
+  const height = container.clientHeight || container.offsetHeight || (window.innerHeight - 50);
+
+  svg.attr('width', width).attr('height', height);
+
+  if (!data.nodes || data.nodes.length === 0) {
+    svg.append('text').attr('x', width/2).attr('y', height/2)
+      .attr('text-anchor', 'middle').attr('fill', '#8b949e').attr('font-size', '16px')
+      .text('No nodes found for this agent / filter.');
+    return;
+  }
 
   graphG = svg.append('g');
   allNodeData = data.nodes;
@@ -467,7 +489,9 @@ function renderGraph(data) {
   svg.call(currentZoom);
 
   const nodeMap = new Map(data.nodes.map(n => [n.id, n]));
-  const edges = data.edges.filter(e => nodeMap.has(e.source_id) && nodeMap.has(e.target_id));
+  const edges = data.edges
+    .filter(e => nodeMap.has(e.source_id) && nodeMap.has(e.target_id))
+    .map(e => ({ ...e, source: e.source_id, target: e.target_id }));
 
   // Links
   const link = graphG.append('g').selectAll('line')
@@ -519,10 +543,6 @@ function renderGraph(data) {
       allNodeCircles.attr('cx', d => d.x).attr('cy', d => d.y);
       labels.attr('x', d => d.x).attr('y', d => d.y);
     });
-
-  edges.forEach(e => { e.source = e.source_id; e.target = e.target_id; });
-  simulation.nodes(data.nodes);
-  simulation.force('link').links(edges);
 }
 
 // ── Zoom controls ──
