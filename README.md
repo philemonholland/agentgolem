@@ -31,7 +31,9 @@ and gradually evolve their own code through unanimous, Vow-aligned consensus.
 - **State Persistence** — Ctrl+C saves session state; agents resume exactly where they left off (chapter, sleep progress, name)
 - **Configurable Peer Limits** — Inter-agent message length is tunable (`peer_message_max_chars`)
 - **Natural Peer Deliberation** — Peer messages are guided toward exploratory, collegial discussion rather than agendas and planning memos
-- **Split Model Routing** — Regular discussion/reflection can use DeepSeek (`llm_discussion_model`), while code inspection/evolution uses a stronger GPT model (`llm_code_model`)
+- **Route-Specific LLM Profiles** — Discussion and code paths can each use their own OpenAI-compatible model, API key, and base URL
+- **Capability-Aware Curiosity** — Autonomous action selection reasons over a prompt-visible toolbox instead of only a brittle verb list
+- **Approval-Gated External Tools** — Outbound email and Moltbook actions are surfaced as explicit capabilities and stay human-gated at the action level
 
 ---
 
@@ -105,9 +107,9 @@ Key settings (see the template for all defaults):
 | `autonomous_interval_seconds`    | `60.0`     | Seconds between autonomous tick actions    |
 | `peer_checkin_interval_minutes`  | `30.0`     | How often agents check in with peers       |
 | `name_discovery_cycles`          | `4`        | Wake cycles before agents discover names   |
-| `llm_model`                      | `gpt-5`    | Fallback reasoning model when DeepSeek discussion is unavailable |
-| `llm_discussion_model`           | `deepseek-reasoner` | Discussion/reflection model when `DEEPSEEK_API_KEY` is configured |
-| `llm_code_model`                 | `gpt-5.4`  | Stronger model for codebase ops            |
+| `llm_model`                      | `gpt-5`    | Legacy fallback discussion model when no route-specific discussion endpoint is configured |
+| `llm_discussion_model`           | `deepseek-reasoner` | Primary discussion/reflection model |
+| `llm_code_model`                 | `gpt-5.4`  | Primary code-inspection / evolution model  |
 | `peer_message_max_chars`         | `3000`     | Max chars for inter-agent messages         |
 | `sleep_phase_split`              | `0.67`     | Fraction of sleep macro-cycle spent in consolidation before dream mode |
 | `sleep_membrane_decay`           | `0.82`     | Base leak factor for spiking-inspired sleep dynamics |
@@ -120,9 +122,16 @@ STDP window/strength, dream noise, and persisted neural-state size in
 
 ### `.env` — Secrets (never committed)
 
-Copy `.env.example` → `.env` and fill in your API keys. If you want the
-council to use DeepSeek for everyday discussion while keeping GPT-5.4 for
-code work, set both `DEEPSEEK_API_KEY` and `OPENAI_API_KEY`.
+Copy `.env.example` → `.env` and fill in your API keys. The simplest split
+setup is still `DEEPSEEK_API_KEY` for discussion and `OPENAI_API_KEY` for code.
+
+If you want arbitrary OpenAI-compatible endpoints per route, you can also set:
+
+- `LLM_DISCUSSION_API_KEY` + `LLM_DISCUSSION_BASE_URL`
+- `LLM_CODE_API_KEY` + `LLM_CODE_BASE_URL`
+
+When those route-specific variables are present, they override the legacy
+OpenAI/DeepSeek fallback routing for that path.
 
 ---
 
@@ -139,7 +148,7 @@ llm/         — LLM abstraction layer
 memory/      — Graph models, schema, store, encoding, retrieval, mutations
 trust/       — Bayesian trust, usefulness, quarantine, retention, contradiction
 sleep/       — Graph walker, scheduler, consolidation engine
-tools/       — Base tool framework, browser, email, Moltbook, Niscalajyoti
+tools/       — Capability registry, approval gate, browser, email, Moltbook, Niscalajyoti
 interaction/ — CLI, router, communication channels
 dashboard/   — FastAPI app, REST API, audit replay, templates
 ```

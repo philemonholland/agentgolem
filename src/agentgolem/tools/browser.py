@@ -1,16 +1,21 @@
 """Web browsing tool with rate limiting, text extraction, and audit logging."""
+
 from __future__ import annotations
 
 import re
 import time
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
 
-from agentgolem.logging.audit import AuditLogger
+from agentgolem.tools.base import Tool, ToolArgument, ToolResult
+
+if TYPE_CHECKING:
+    from agentgolem.logging.audit import AuditLogger
 
 
 @dataclass
@@ -71,7 +76,7 @@ class WebBrowser:
             status_code=response.status_code,
             content=response.text,
             headers=dict(response.headers),
-            fetched_at=datetime.now(timezone.utc),
+            fetched_at=datetime.now(UTC),
         )
 
         if self.audit_logger is not None:
@@ -118,3 +123,66 @@ class WebBrowser:
             absolute = urljoin(page.url, href)
             links.append(absolute)
         return links
+
+
+class BrowserTool(Tool):
+    """Tool wrapper around :class:`WebBrowser` for capability-driven exploration."""
+
+    name = "browser"
+    description = "Fetch readable web content from a URL"
+    domains = ("web", "research")
+    safety_class = "external_read"
+    side_effect_class = "network_read"
+    supports_dry_run = True
+    supported_actions = ("fetch_text",)
+    action_descriptions = {
+        "fetch_text": "Fetch a web page, extract readable text, and return links",
+    }
+    action_arguments = {
+        "fetch_text": (
+            ToolArgument("url", "Absolute URL to fetch"),
+            ToolArgument(
+                "max_chars",
+                "Optional maximum number of extracted text characters to keep",
+                kind="int",
+                required=False,
+            ),
+        ),
+    }
+    usage_hint = "browser.fetch_text(url=https://..., max_chars=4000)"
+
+    def __init__(self, browser: WebBrowser) -> None:
+        self._browser = browser
+
+    async def execute(self, action: str = "fetch_text", **kwargs: Any) -> ToolResult:
+        """Fetch a web page and return extracted text plus metadata."""
+        if action != "fetch_text":
+            return ToolResult(success=False, error=f"Unknown action: {action}")
+
+        url = str(kwargs.get("url", "")).strip()
+        if not url.startswith("http"):
+            return ToolResult(success=False, error="BrowserTool requires an absolute http(s) URL")
+
+        max_chars_raw = kwargs.get("max_chars", 4000)
+        max_chars = int(max_chars_raw) if max_chars_raw not in (None, "") else 4000
+
+        try:
+            page = await self._browser.fetch(url)
+            text = self._browser.extract_text(page)
+            links = self._browser.extract_links(page)
+        except Exception as exc:
+            return ToolResult(success=False, error=f"Browser fetch failed: {exc}")
+
+        if max_chars > 0 and len(text) > max_chars:
+            text = text[:max_chars] + "\n[…truncated]"
+
+        return ToolResult(
+            success=True,
+            data={
+                "url": page.url,
+                "status_code": page.status_code,
+                "text": text,
+                "links": links[:50],
+                "fetched_at": page.fetched_at.isoformat(),
+            },
+        )

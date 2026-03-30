@@ -1,23 +1,24 @@
 """Tests for run_golem.py — launcher parameter system and /command dispatch."""
+
 from __future__ import annotations
 
 import asyncio
-import json
+
+# Import from the launcher module at repo root
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 import yaml
 
-# Import from the launcher module at repo root
-import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import run_golem
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def tmp_env(tmp_path, monkeypatch):
@@ -40,12 +41,14 @@ def tmp_env(tmp_path, monkeypatch):
 # ParamStore
 # ---------------------------------------------------------------------------
 
+
 class TestParamStore:
     def test_get_launcher_defaults(self, tmp_env):
         store = run_golem.ParamStore()
         assert store.get("dashboard_enabled", "bool") is True
         assert store.get("dashboard_host", "str") == "127.0.0.1"
         assert store.get("dashboard_port", "int") == 6667
+
     def test_set_persists_launcher_param(self, tmp_env):
         store = run_golem.ParamStore()
         store.set("dashboard_port", 9000, "int")
@@ -122,6 +125,7 @@ class TestParamStore:
 # parse_input
 # ---------------------------------------------------------------------------
 
+
 class TestParseInput:
     def test_str(self):
         assert run_golem.parse_input("hello", "str") == "hello"
@@ -162,6 +166,7 @@ class TestParseInput:
 # mask_secret
 # ---------------------------------------------------------------------------
 
+
 class TestMaskSecret:
     def test_empty(self):
         assert run_golem.mask_secret("") == "(not set)"
@@ -180,6 +185,7 @@ class TestMaskSecret:
 # ---------------------------------------------------------------------------
 # Config I/O
 # ---------------------------------------------------------------------------
+
 
 class TestConfigIO:
     def test_load_save_settings(self, tmp_env):
@@ -209,6 +215,7 @@ class TestConfigIO:
 # ---------------------------------------------------------------------------
 # Walkthrough (mocked input)
 # ---------------------------------------------------------------------------
+
 
 class TestWalkthrough:
     def test_accept_all_skips_walkthrough(self, tmp_env):
@@ -246,7 +253,7 @@ class TestWalkthrough:
         """Invalid input for int should keep old value."""
         store = run_golem.ParamStore()
         param_inputs = []
-        for key, _, _, ptype, _ in run_golem.PARAM_DEFS:
+        for key, _, _, _ptype, _ in run_golem.PARAM_DEFS:
             if key == "dashboard_port":
                 param_inputs.append("not_a_number")
             else:
@@ -260,6 +267,7 @@ class TestWalkthrough:
 # ---------------------------------------------------------------------------
 # /command dispatch
 # ---------------------------------------------------------------------------
+
 
 class TestCommandDispatch:
     """Verify the RuntimeConsole._dispatch_command routing works."""
@@ -295,12 +303,29 @@ class TestCommandDispatch:
         assert "Unknown parameter" in captured
         loop.close()
 
+    def test_get_param_alias(self, tmp_env, capsys):
+        console, store, loop = self._make_console(tmp_env)
+        store.set("llm_discussion_model", "deepseek-reasoner", "str")
+        console._dispatch_command("/get discussion_model")
+        captured = capsys.readouterr().out
+        assert "llm_discussion_model" in captured
+        assert "deepseek-reasoner" in captured
+        loop.close()
+
     def test_set_known_param(self, tmp_env, capsys):
         console, store, loop = self._make_console(tmp_env)
         console._dispatch_command("/set log_level WARNING")
         assert store.get("log_level", "str") == "WARNING"
         captured = capsys.readouterr().out
         assert "WARNING" in captured
+        loop.close()
+
+    def test_set_param_alias(self, tmp_env, capsys):
+        console, store, loop = self._make_console(tmp_env)
+        console._dispatch_command("/set code_model gpt-4.1")
+        assert store.get("llm_code_model", "str") == "gpt-4.1"
+        captured = capsys.readouterr().out
+        assert "llm_code_model" in captured
         loop.close()
 
     def test_set_unknown_param(self, tmp_env, capsys):
@@ -346,12 +371,18 @@ class TestCommandDispatch:
 # PARAM_DEFS completeness
 # ---------------------------------------------------------------------------
 
+
 class TestParamDefs:
     def test_all_settings_yaml_keys_covered(self):
         """Every key in Settings model should have a PARAM_DEF entry."""
         from agentgolem.config.settings import Settings
+
         settings_fields = set(Settings.model_fields.keys())
-        param_keys = {key for key, _, _, ptype, _ in run_golem.PARAM_DEFS if ptype not in ("secret", "str_env", "int_env")}
+        param_keys = {
+            key
+            for key, _, _, ptype, _ in run_golem.PARAM_DEFS
+            if ptype not in ("secret", "str_env", "int_env")
+        }
         launcher_keys = set(run_golem.LAUNCHER_DEFAULTS.keys())
         covered = param_keys | launcher_keys
         missing = settings_fields - covered
@@ -360,6 +391,7 @@ class TestParamDefs:
     def test_all_env_keys_covered(self):
         """Every secret in Secrets model should have a PARAM_DEF entry."""
         from agentgolem.config.secrets import Secrets
+
         secret_fields = set(Secrets.model_fields.keys())
         env_param_keys = set(run_golem.ENV_KEY_MAP.keys())
         missing = secret_fields - env_param_keys
@@ -371,14 +403,41 @@ class TestParamDefs:
 
     def test_groups_are_defined(self):
         groups = {group for _, _, _, _, group in run_golem.PARAM_DEFS}
-        expected = {"Identity", "Sleep", "LLM", "Logging", "Communication",
-                    "Niscalajyoti", "Retention", "Quarantine", "Browser", "Dashboard", "Secrets", "Swarm"}
+        expected = {
+            "Identity",
+            "Sleep",
+            "LLM",
+            "Logging",
+            "Communication",
+            "Niscalajyoti",
+            "Retention",
+            "Quarantine",
+            "Browser",
+            "Dashboard",
+            "Secrets",
+            "Swarm",
+        }
         assert groups == expected
 
     def test_help_text_documents_all_slash_commands(self):
         """The HELP_TEXT constant must mention every /command."""
-        required = ["/help", "/status", "/params", "/get", "/set", "/wake",
-                    "/sleep", "/pause", "/resume", "/heartbeat", "/soul",
-                    "/logs", "/dashboard", "/restart", "/quit", "/exit"]
+        required = [
+            "/help",
+            "/status",
+            "/params",
+            "/get",
+            "/set",
+            "/wake",
+            "/sleep",
+            "/pause",
+            "/resume",
+            "/heartbeat",
+            "/soul",
+            "/logs",
+            "/dashboard",
+            "/restart",
+            "/quit",
+            "/exit",
+        ]
         for cmd in required:
             assert cmd in run_golem.HELP_TEXT, f"{cmd} missing from HELP_TEXT"

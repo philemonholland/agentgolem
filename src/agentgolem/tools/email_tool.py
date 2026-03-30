@@ -1,12 +1,12 @@
 """Email tool: send, draft, and read email with audit logging."""
+
 from __future__ import annotations
 
 import json
 import uuid
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 
 try:
     import aiosmtplib
@@ -15,8 +15,12 @@ except ImportError:  # pragma: no cover
 
 from email.mime.text import MIMEText
 
-from agentgolem.logging.audit import AuditLogger
-from agentgolem.tools.base import Tool, ToolResult
+from agentgolem.tools.base import Tool, ToolArgument, ToolResult
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from agentgolem.logging.audit import AuditLogger
 
 
 @dataclass
@@ -46,6 +50,36 @@ class EmailTool(Tool):
     description = "Send, draft, and read email"
     requires_approval = True
     supports_dry_run = True
+    domains = ("communication", "external")
+    safety_class = "external_communication"
+    side_effect_class = "external_write"
+    supported_actions = ("send", "draft", "read")
+    action_descriptions = {
+        "send": "Send an email via SMTP",
+        "draft": "Write an email draft to the local outbox",
+        "read": "Read messages from the local inbox stub",
+    }
+    action_arguments = {
+        "send": (
+            ToolArgument("to", "Recipient email address"),
+            ToolArgument("subject", "Email subject line"),
+            ToolArgument("body", "Email body text"),
+        ),
+        "draft": (
+            ToolArgument("to", "Draft recipient email address"),
+            ToolArgument("subject", "Draft subject line"),
+            ToolArgument("body", "Draft body text"),
+        ),
+        "read": (
+            ToolArgument(
+                "limit",
+                "Maximum number of inbox messages to read",
+                kind="int",
+                required=False,
+            ),
+        ),
+    }
+    usage_hint = "email.send(to=person@example.com, subject=Hello, body=...)"
 
     def __init__(
         self,
@@ -79,6 +113,18 @@ class EmailTool(Tool):
     def _is_configured(self) -> bool:
         """Return True if SMTP host and user are set."""
         return bool(self.smtp_host) and bool(self.smtp_user)
+
+    def is_available(self) -> bool:
+        """Return True if any email path is configured or locally stubbed."""
+        return self._is_configured() or self.outbox_dir is not None or self.inbox_dir is not None
+
+    def requires_approval_for(self, action: str) -> bool:
+        """Only outbound sending requires human approval."""
+        return action == "send"
+
+    def approval_action_name(self, action: str) -> str:
+        """Map email actions to approval-gate action names."""
+        return f"email_{action}"
 
     async def execute(self, action: str = "send", **kwargs: Any) -> ToolResult:
         """Dispatch based on action: send, draft, or read."""
@@ -153,7 +199,7 @@ class EmailTool(Tool):
             to=to,
             subject=subject,
             body=body,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
 
         if self.outbox_dir is not None:
@@ -192,6 +238,6 @@ class EmailTool(Tool):
                 evidence={
                     "to": to,
                     "subject": subject,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "timestamp": datetime.now(UTC).isoformat(),
                 },
             )

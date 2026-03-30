@@ -1,10 +1,11 @@
 """Tests for the main runtime loop."""
+
 from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone, timedelta
-from pathlib import Path
+from contextlib import suppress
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -12,6 +13,10 @@ from agentgolem.config.secrets import Secrets
 from agentgolem.config.settings import Settings
 from agentgolem.runtime.loop import MainLoop
 from agentgolem.runtime.state import AgentMode
+from agentgolem.tools.base import ApprovalGate
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.fixture
@@ -35,10 +40,8 @@ async def test_main_loop_starts_and_stops(loop_env: tuple[Settings, Secrets, Pat
     assert task.done() or task.cancelled()
     if not task.done():
         task.cancel()
-        try:
+        with suppress(asyncio.CancelledError):
             await task
-        except asyncio.CancelledError:
-            pass
 
 
 async def test_main_loop_transitions_to_awake(loop_env: tuple[Settings, Secrets, Path]) -> None:
@@ -54,10 +57,8 @@ async def test_main_loop_transitions_to_awake(loop_env: tuple[Settings, Secrets,
     await asyncio.sleep(0.3)
     if not task.done():
         task.cancel()
-        try:
+        with suppress(asyncio.CancelledError):
             await task
-        except asyncio.CancelledError:
-            pass
 
 
 async def test_inbox_message_processing(loop_env: tuple[Settings, Secrets, Path]) -> None:
@@ -79,10 +80,8 @@ async def test_inbox_message_processing(loop_env: tuple[Settings, Secrets, Path]
 
     if not task.done():
         task.cancel()
-        try:
+        with suppress(asyncio.CancelledError):
             await task
-        except asyncio.CancelledError:
-            pass
 
 
 async def test_interrupt_preempts(loop_env: tuple[Settings, Secrets, Path]) -> None:
@@ -129,10 +128,8 @@ async def test_heartbeat_runs_when_due(loop_env: tuple[Settings, Secrets, Path])
 
     if not task.done():
         task.cancel()
-        try:
+        with suppress(asyncio.CancelledError):
             await task
-        except asyncio.CancelledError:
-            pass
 
 
 async def test_auto_sleep_wake_cycle(loop_env: tuple[Settings, Secrets, Path]) -> None:
@@ -141,9 +138,9 @@ async def test_auto_sleep_wake_cycle(loop_env: tuple[Settings, Secrets, Path]) -
     # Tiny durations so the full cycle completes in < 1 second
     settings = Settings(
         data_dir=settings.data_dir,
-        awake_duration_minutes=0.001,   # ~0.06s
-        wind_down_minutes=0.001,        # ~0.06s
-        sleep_duration_minutes=0.001,   # ~0.06s
+        awake_duration_minutes=0.001,  # ~0.06s
+        wind_down_minutes=0.001,  # ~0.06s
+        sleep_duration_minutes=0.001,  # ~0.06s
     )
     loop = MainLoop(settings=settings, secrets=secrets)
     loop._ensure_dirs()
@@ -161,14 +158,12 @@ async def test_auto_sleep_wake_cycle(loop_env: tuple[Settings, Secrets, Path]) -
     await asyncio.sleep(0.3)
     if not task.done():
         task.cancel()
-        try:
+        with suppress(asyncio.CancelledError):
             await task
-        except asyncio.CancelledError:
-            pass
 
 
 def test_main_loop_prefers_deepseek_for_discussion_and_openai_for_code(
-    loop_env: tuple[Settings, Secrets, Path]
+    loop_env: tuple[Settings, Secrets, Path],
 ) -> None:
     settings, _, _ = loop_env
     routed_settings = Settings(
@@ -191,8 +186,38 @@ def test_main_loop_prefers_deepseek_for_discussion_and_openai_for_code(
     assert loop._resolve_model_name(loop._code_llm) == "gpt-5.4"
 
 
+def test_main_loop_supports_route_specific_llm_overrides(
+    loop_env: tuple[Settings, Secrets, Path],
+) -> None:
+    settings, _, _ = loop_env
+    routed_settings = Settings(
+        data_dir=settings.data_dir,
+        llm_model="gpt-4.1",
+        llm_discussion_model="custom-discussion-model",
+        llm_code_model="custom-code-model",
+    )
+    secrets = Secrets(
+        _env_file=None,
+        openai_api_key="sk-openai-test",
+        openai_base_url="https://api.openai.com/v1",
+        llm_discussion_api_key="sk-discussion-test",
+        llm_discussion_base_url="https://discussion.example/v1",
+        llm_code_api_key="sk-code-test",
+        llm_code_base_url="https://code.example/v1",
+    )
+
+    loop = MainLoop(settings=routed_settings, secrets=secrets)
+
+    discussion_client = getattr(loop._llm, "_inner", loop._llm)
+    code_client = getattr(loop._code_llm, "_inner", loop._code_llm)
+    assert discussion_client._base_url == "https://discussion.example/v1"
+    assert code_client._base_url == "https://code.example/v1"
+    assert loop._resolve_model_name(loop._llm) == "custom-discussion-model"
+    assert loop._resolve_model_name(loop._code_llm) == "custom-code-model"
+
+
 def test_discussion_style_guidance_discourages_planning(
-    loop_env: tuple[Settings, Secrets, Path]
+    loop_env: tuple[Settings, Secrets, Path],
 ) -> None:
     settings, secrets, _ = loop_env
     loop = MainLoop(settings=settings, secrets=secrets)
@@ -228,3 +253,37 @@ async def test_build_memory_context_keeps_peer_memories_separate(
         "Relevant memories:\n- Local identity reflection\n\n"
         "Entangled peer memories:\n- [Council-2] A remembered thread of grace"
     )
+
+
+def test_configure_tool_registry_exposes_capabilities(
+    loop_env: tuple[Settings, Secrets, Path],
+) -> None:
+    settings, _, _ = loop_env
+    settings = Settings(
+        data_dir=settings.data_dir,
+        email_enabled=True,
+        moltbook_enabled=True,
+    )
+    secrets = Secrets(
+        _env_file=None,
+        email_smtp_host="smtp.example.com",
+        email_smtp_user="agent@example.com",
+        email_smtp_password="secret-pass",
+        moltbook_api_key="mk-test",
+        moltbook_base_url="https://moltbook.example/api",
+    )
+    loop = MainLoop(settings=settings, secrets=secrets)
+    loop._ensure_dirs()
+    loop._approval_gate = ApprovalGate(
+        settings.data_dir / "approvals", ["email_send", "moltbook_send"]
+    )
+    loop.configure_tool_registry()
+
+    summary = loop._toolbox_summary()
+
+    assert "browser.fetch_text" in summary
+    assert "email.send" in summary
+    assert "moltbook.send" in summary
+    assert "think.private" in summary
+    assert "approval=email_send" in summary
+    assert "approval=moltbook_send" in summary

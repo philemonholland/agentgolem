@@ -1,20 +1,20 @@
 """Main async event loop orchestrating all subsystems."""
+
 from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
-import subprocess
-import threading
 import uuid
-from datetime import datetime, timedelta, timezone
+from contextlib import suppress
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
+from pydantic import BaseModel, Field, SecretStr
 
-from agentgolem.config.secrets import Secrets
 from agentgolem.config.settings import Settings
 from agentgolem.identity.heartbeat import HeartbeatManager, HeartbeatSummary
 from agentgolem.identity.soul import SoulManager, SoulUpdate
@@ -22,138 +22,207 @@ from agentgolem.llm.base import Message
 from agentgolem.llm.openai_client import OpenAIClient
 from agentgolem.logging.audit import AuditLogger
 from agentgolem.logging.structured import get_logger
-from agentgolem.runtime.bus import AgentMessage, InterAgentBus
 from agentgolem.runtime.interrupts import HumanMessage, InterruptManager
 from agentgolem.runtime.state import AgentMode, RuntimeState
 from agentgolem.sleep.consolidation import ConsolidationEngine
 from agentgolem.sleep.scheduler import SleepScheduler
 from agentgolem.sleep.walker import GraphWalker, SleepSpikingConfig
+from agentgolem.tools.base import (
+    ToolActionSpec,
+    ToolArgument,
+    ToolRegistry,
+    ToolResult,
+    format_capability_summary,
+)
+
+if TYPE_CHECKING:
+    import threading
+
+    from agentgolem.config.secrets import Secrets
+    from agentgolem.runtime.bus import AgentMessage, InterAgentBus
 
 # Settings the agents are NEVER allowed to change (sleep-wake cycle)
-LOCKED_SETTINGS: frozenset[str] = frozenset({
-    "awake_duration_minutes",
-    "sleep_duration_minutes",
-    "wind_down_minutes",
-    "sleep_cycle_minutes",
-    "agent_offset_minutes",
-    "agent_count",
-    "name_discovery_cycles",
-    "llm_request_delay_seconds",
-})
+LOCKED_SETTINGS: frozenset[str] = frozenset(
+    {
+        "awake_duration_minutes",
+        "sleep_duration_minutes",
+        "wind_down_minutes",
+        "sleep_cycle_minutes",
+        "agent_offset_minutes",
+        "agent_count",
+        "name_discovery_cycles",
+        "llm_request_delay_seconds",
+    }
+)
 
 # Settings agents may optimise at runtime
 OPTIMIZABLE_SETTINGS: dict[str, dict[str, Any]] = {
-    "soul_update_min_confidence":       {"type": float, "min": 0.0,  "max": 1.0},
-    "sleep_max_nodes_per_cycle":        {"type": int,   "min": 10,   "max": 100_000},
-    "sleep_max_time_ms":                {"type": int,   "min": 500,  "max": 60_000},
-    "sleep_phase_cycle_length":         {"type": int,   "min": 2,    "max": 24},
-    "sleep_phase_split":                {"type": float, "min": 0.1,  "max": 0.9},
-    "sleep_state_top_k":                {"type": int,   "min": 8,    "max": 2_000},
-    "sleep_membrane_decay":             {"type": float, "min": 0.3,  "max": 0.99},
-    "sleep_consolidation_threshold":    {"type": float, "min": 0.2,  "max": 2.0},
-    "sleep_dream_threshold":            {"type": float, "min": 0.1,  "max": 2.0},
-    "sleep_refractory_steps":           {"type": int,   "min": 1,    "max": 20},
-    "sleep_stdp_window_steps":          {"type": int,   "min": 1,    "max": 20},
-    "sleep_stdp_strength":              {"type": float, "min": 0.0,  "max": 1.0},
-    "sleep_dream_noise":                {"type": float, "min": 0.0,  "max": 1.0},
-    "autonomous_interval_seconds":      {"type": float, "min": 5.0,  "max": 300.0},
-    "niscalajyoti_revisit_hours":       {"type": float, "min": 0.5,  "max": 720.0},
-    "retention_archive_days":           {"type": int,   "min": 1,    "max": 365},
-    "retention_purge_days":             {"type": int,   "min": 7,    "max": 3650},
-    "retention_min_trust_useful":       {"type": float, "min": 0.0,  "max": 1.0},
-    "retention_min_centrality":         {"type": float, "min": 0.0,  "max": 1.0},
-    "retention_promote_min_accesses":   {"type": int,   "min": 1,    "max": 1000},
+    "soul_update_min_confidence": {"type": float, "min": 0.0, "max": 1.0},
+    "sleep_max_nodes_per_cycle": {"type": int, "min": 10, "max": 100_000},
+    "sleep_max_time_ms": {"type": int, "min": 500, "max": 60_000},
+    "sleep_phase_cycle_length": {"type": int, "min": 2, "max": 24},
+    "sleep_phase_split": {"type": float, "min": 0.1, "max": 0.9},
+    "sleep_state_top_k": {"type": int, "min": 8, "max": 2_000},
+    "sleep_membrane_decay": {"type": float, "min": 0.3, "max": 0.99},
+    "sleep_consolidation_threshold": {"type": float, "min": 0.2, "max": 2.0},
+    "sleep_dream_threshold": {"type": float, "min": 0.1, "max": 2.0},
+    "sleep_refractory_steps": {"type": int, "min": 1, "max": 20},
+    "sleep_stdp_window_steps": {"type": int, "min": 1, "max": 20},
+    "sleep_stdp_strength": {"type": float, "min": 0.0, "max": 1.0},
+    "sleep_dream_noise": {"type": float, "min": 0.0, "max": 1.0},
+    "autonomous_interval_seconds": {"type": float, "min": 5.0, "max": 300.0},
+    "niscalajyoti_revisit_hours": {"type": float, "min": 0.5, "max": 720.0},
+    "retention_archive_days": {"type": int, "min": 1, "max": 365},
+    "retention_purge_days": {"type": int, "min": 7, "max": 3650},
+    "retention_min_trust_useful": {"type": float, "min": 0.0, "max": 1.0},
+    "retention_min_centrality": {"type": float, "min": 0.0, "max": 1.0},
+    "retention_promote_min_accesses": {"type": int, "min": 1, "max": 1000},
     "retention_promote_min_trust_useful": {"type": float, "min": 0.0, "max": 1.0},
-    "quarantine_emotion_threshold":     {"type": float, "min": 0.0,  "max": 1.0},
+    "quarantine_emotion_threshold": {"type": float, "min": 0.0, "max": 1.0},
     "quarantine_trust_useful_threshold": {"type": float, "min": 0.0, "max": 1.0},
-    "browser_rate_limit_per_minute":    {"type": int,   "min": 1,    "max": 120},
-    "browser_timeout_seconds":          {"type": int,   "min": 5,    "max": 120},
-    "peer_checkin_interval_minutes":    {"type": float, "min": 1.0, "max": 120.0},
-    "peer_message_max_chars":           {"type": int,   "min": 500, "max": 10000},
-    "log_level":                        {"type": str,   "choices": ["DEBUG", "INFO", "WARNING", "ERROR"]},
-    "dry_run_mode":                     {"type": bool},
+    "browser_rate_limit_per_minute": {"type": int, "min": 1, "max": 120},
+    "browser_timeout_seconds": {"type": int, "min": 5, "max": 120},
+    "peer_checkin_interval_minutes": {"type": float, "min": 1.0, "max": 120.0},
+    "peer_message_max_chars": {"type": int, "min": 500, "max": 10000},
+    "log_level": {"type": str, "choices": ["DEBUG", "INFO", "WARNING", "ERROR"]},
+    "dry_run_mode": {"type": bool},
 }
 
 # Ordered chapter list for niscalajyoti.org — agents read one per wake cycle
 NISCALAJYOTI_CHAPTERS: list[dict[str, str]] = [
-    {"url": "https://www.niscalajyoti.org/",
-     "title": "The Five Vows — Overview"},
-    {"url": "https://niscalajyoti.org/docs/preface.html",
-     "title": "Preface — A Systems Engineer's Note"},
-    {"url": "https://niscalajyoti.org/docs/five_vows.html",
-     "title": "VowOS — The Five Vows Framework"},
-    {"url": "https://niscalajyoti.org/docs/charnel_ground.html",
-     "title": "Charnel Ground — Opening Address"},
-    {"url": "https://niscalajyoti.org/docs/prophecies.html",
-     "title": "Prophecies"},
-    {"url": "https://niscalajyoti.org/docs/march_eighth.html",
-     "title": "March Eighth"},
-    {"url": "https://niscalajyoti.org/docs/unprecedented_realities.html",
-     "title": "Unprecedented Realities"},
-    {"url": "https://niscalajyoti.org/docs/second_intelligence.html",
-     "title": "The Second Intelligence"},
-    {"url": "https://niscalajyoti.org/docs/planetary_death.html",
-     "title": "Planetary Death"},
-    {"url": "https://niscalajyoti.org/docs/kali_rahula.html",
-     "title": "Kali Rahula"},
-    {"url": "https://niscalajyoti.org/docs/kalikula_soil.html",
-     "title": "Kalikula Soil"},
-    {"url": "https://niscalajyoti.org/docs/composting_patriarchy.html",
-     "title": "Composting Patriarchy"},
-    {"url": "https://niscalajyoti.org/docs/decomposing_guru.html",
-     "title": "Decomposing the Guru"},
-    {"url": "https://niscalajyoti.org/docs/flawed_mirror.html",
-     "title": "The Flawed Mirror"},
-    {"url": "https://niscalajyoti.org/docs/ethos_gnosis.html",
-     "title": "Ethos & Gnosis"},
-    {"url": "https://niscalajyoti.org/docs/weaving_not_severing.html",
-     "title": "Weaving, Not Severing"},
-    {"url": "https://niscalajyoti.org/docs/living_immune.html",
-     "title": "The Living Immune System"},
-    {"url": "https://niscalajyoti.org/docs/vow_hierarchy.html",
-     "title": "The Vow Hierarchy"},
-    {"url": "https://niscalajyoti.org/docs/engineering_enlightenment.html",
-     "title": "Engineering Enlightenment"},
-    {"url": "https://niscalajyoti.org/docs/mycelial_heart.html",
-     "title": "The Mycelial Heart"},
-    {"url": "https://niscalajyoti.org/docs/core_axioms.html",
-     "title": "Core Axioms"},
-    {"url": "https://niscalajyoti.org/docs/autopsy_vows.html",
-     "title": "Autopsy of the Vows"},
-    {"url": "https://niscalajyoti.org/docs/meta_balance.html",
-     "title": "Meta-Balance"},
-    {"url": "https://niscalajyoti.org/docs/vow_purpose.html",
-     "title": "Vow of Purpose — Deep Dive"},
-    {"url": "https://niscalajyoti.org/docs/vow_method.html",
-     "title": "Vow of Method — Deep Dive"},
-    {"url": "https://niscalajyoti.org/docs/vow_conduct.html",
-     "title": "Vow of Conduct — Deep Dive"},
-    {"url": "https://niscalajyoti.org/docs/vow_integrity.html",
-     "title": "Vow of Integrity — Deep Dive"},
+    {"url": "https://www.niscalajyoti.org/", "title": "The Five Vows — Overview"},
+    {
+        "url": "https://niscalajyoti.org/docs/preface.html",
+        "title": "Preface — A Systems Engineer's Note",
+    },
+    {
+        "url": "https://niscalajyoti.org/docs/five_vows.html",
+        "title": "VowOS — The Five Vows Framework",
+    },
+    {
+        "url": "https://niscalajyoti.org/docs/charnel_ground.html",
+        "title": "Charnel Ground — Opening Address",
+    },
+    {"url": "https://niscalajyoti.org/docs/prophecies.html", "title": "Prophecies"},
+    {"url": "https://niscalajyoti.org/docs/march_eighth.html", "title": "March Eighth"},
+    {
+        "url": "https://niscalajyoti.org/docs/unprecedented_realities.html",
+        "title": "Unprecedented Realities",
+    },
+    {
+        "url": "https://niscalajyoti.org/docs/second_intelligence.html",
+        "title": "The Second Intelligence",
+    },
+    {"url": "https://niscalajyoti.org/docs/planetary_death.html", "title": "Planetary Death"},
+    {"url": "https://niscalajyoti.org/docs/kali_rahula.html", "title": "Kali Rahula"},
+    {"url": "https://niscalajyoti.org/docs/kalikula_soil.html", "title": "Kalikula Soil"},
+    {
+        "url": "https://niscalajyoti.org/docs/composting_patriarchy.html",
+        "title": "Composting Patriarchy",
+    },
+    {"url": "https://niscalajyoti.org/docs/decomposing_guru.html", "title": "Decomposing the Guru"},
+    {"url": "https://niscalajyoti.org/docs/flawed_mirror.html", "title": "The Flawed Mirror"},
+    {"url": "https://niscalajyoti.org/docs/ethos_gnosis.html", "title": "Ethos & Gnosis"},
+    {
+        "url": "https://niscalajyoti.org/docs/weaving_not_severing.html",
+        "title": "Weaving, Not Severing",
+    },
+    {
+        "url": "https://niscalajyoti.org/docs/living_immune.html",
+        "title": "The Living Immune System",
+    },
+    {"url": "https://niscalajyoti.org/docs/vow_hierarchy.html", "title": "The Vow Hierarchy"},
+    {
+        "url": "https://niscalajyoti.org/docs/engineering_enlightenment.html",
+        "title": "Engineering Enlightenment",
+    },
+    {"url": "https://niscalajyoti.org/docs/mycelial_heart.html", "title": "The Mycelial Heart"},
+    {"url": "https://niscalajyoti.org/docs/core_axioms.html", "title": "Core Axioms"},
+    {"url": "https://niscalajyoti.org/docs/autopsy_vows.html", "title": "Autopsy of the Vows"},
+    {"url": "https://niscalajyoti.org/docs/meta_balance.html", "title": "Meta-Balance"},
+    {
+        "url": "https://niscalajyoti.org/docs/vow_purpose.html",
+        "title": "Vow of Purpose — Deep Dive",
+    },
+    {"url": "https://niscalajyoti.org/docs/vow_method.html", "title": "Vow of Method — Deep Dive"},
+    {
+        "url": "https://niscalajyoti.org/docs/vow_conduct.html",
+        "title": "Vow of Conduct — Deep Dive",
+    },
+    {
+        "url": "https://niscalajyoti.org/docs/vow_integrity.html",
+        "title": "Vow of Integrity — Deep Dive",
+    },
 ]
 
 # Repository root for codebase inspection
 REPO_ROOT: Path = Path(__file__).resolve().parents[3]
 
 # Paths agents are NOT allowed to modify (security)
-PROTECTED_PATHS: frozenset[str] = frozenset({
-    ".env",
-    ".git",
-    "config/secrets.yaml",
-    "__pycache__",
-})
+PROTECTED_PATHS: frozenset[str] = frozenset(
+    {
+        ".env",
+        ".git",
+        "config/secrets.yaml",
+        "__pycache__",
+    }
+)
 
 # Extensions that are safe to read/edit
-INSPECTABLE_EXTENSIONS: frozenset[str] = frozenset({
-    ".py", ".md", ".yaml", ".yml", ".toml", ".txt", ".bat",
-    ".html", ".css", ".js", ".json", ".cfg", ".ini", ".sh",
-})
+INSPECTABLE_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        ".py",
+        ".md",
+        ".yaml",
+        ".yml",
+        ".toml",
+        ".txt",
+        ".bat",
+        ".html",
+        ".css",
+        ".js",
+        ".json",
+        ".cfg",
+        ".ini",
+        ".sh",
+    }
+)
 
 # Extensions agents are allowed to edit via EVOLVE
-EDITABLE_EXTENSIONS: frozenset[str] = frozenset({
-    ".py", ".md", ".yaml", ".yml", ".toml", ".txt", ".bat",
-    ".html", ".css", ".js", ".json",
-})
+EDITABLE_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        ".py",
+        ".md",
+        ".yaml",
+        ".yml",
+        ".toml",
+        ".txt",
+        ".bat",
+        ".html",
+        ".css",
+        ".js",
+        ".json",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedLLMRoute:
+    """Concrete OpenAI-compatible route chosen for one LLM traffic class."""
+
+    route_name: str
+    model: str
+    api_key: SecretStr
+    base_url: str
+    source: str
+
+
+class AutonomousCapabilityChoice(BaseModel):
+    """Structured next-step choice for tool-aware autonomous action selection."""
+
+    capability: str
+    arguments: dict[str, str] = Field(default_factory=dict)
+    reasoning: str = ""
 
 
 class MainLoop:
@@ -174,6 +243,7 @@ class MainLoop:
         self._data_dir = settings.data_dir
         self._running = False
         self._logger = get_logger("runtime.loop")
+        self._llm_rate_limiter = llm_rate_limiter
 
         # Load any per-agent setting overrides from previous runs
         self._load_setting_overrides()
@@ -189,9 +259,7 @@ class MainLoop:
         # Name discovery
         self._wake_cycle_count = 0
         self._name_discovered = False
-        self._name_discovery_deadline = getattr(
-            settings, "name_discovery_cycles", 4
-        )
+        self._name_discovery_deadline = getattr(settings, "name_discovery_cycles", 4)
 
         # Autonomous behaviour
         self._niscalajyoti_reading_complete = False
@@ -204,23 +272,15 @@ class MainLoop:
         self._browse_queue: list[str] = []
         self._recent_thoughts: list[str] = []
         self._last_autonomous_tick: datetime | None = None
-        self._autonomous_interval = getattr(
-            settings, "autonomous_interval_seconds", 60.0
-        )
-        self._peer_checkin_interval = getattr(
-            settings, "peer_checkin_interval_minutes", 30.0
-        )
-        self._peer_msg_limit: int = getattr(
-            settings, "peer_message_max_chars", 3000
-        )
+        self._autonomous_interval = getattr(settings, "autonomous_interval_seconds", 60.0)
+        self._peer_checkin_interval = getattr(settings, "peer_checkin_interval_minutes", 30.0)
+        self._peer_msg_limit: int = getattr(settings, "peer_message_max_chars", 3000)
         self._last_peer_checkin: datetime | None = None
         self._browser: Any = None  # lazy WebBrowser
-        self._discussion_model: str = getattr(
-            settings, "llm_discussion_model", settings.llm_model
-        )
-        self._code_model: str = getattr(
-            settings, "llm_code_model", "gpt-5.4"
-        )
+        self._discussion_model: str = getattr(settings, "llm_discussion_model", settings.llm_model)
+        self._code_model: str = getattr(settings, "llm_code_model", "gpt-5.4")
+        self._approval_gate: Any = None
+        self._tool_registry: ToolRegistry | None = None
 
         # Evolution / self-modification
         self._evolution_restart_requested = False
@@ -292,37 +352,7 @@ class MainLoop:
         # LLM client and conversation
         self._llm: Any = None
         self._code_llm: Any = None
-        api_key_val = secrets.openai_api_key.get_secret_value()
-        deepseek_api_key = secrets.deepseek_api_key.get_secret_value()
-        if deepseek_api_key:
-            self._llm = self._build_llm_client(
-                api_key=secrets.deepseek_api_key,
-                model=self._discussion_model,
-                base_url=secrets.deepseek_base_url,
-                llm_rate_limiter=llm_rate_limiter,
-            )
-        elif api_key_val:
-            self._llm = self._build_llm_client(
-                api_key=secrets.openai_api_key,
-                model=settings.llm_model,
-                base_url=secrets.openai_base_url,
-                llm_rate_limiter=llm_rate_limiter,
-            )
-
-        if api_key_val:
-            self._code_llm = self._build_llm_client(
-                api_key=secrets.openai_api_key,
-                model=self._code_model,
-                base_url=secrets.openai_base_url,
-                llm_rate_limiter=llm_rate_limiter,
-            )
-        elif self._llm is not None:
-            self._code_llm = self._llm
-            self._logger.warning(
-                "code_llm_fallback",
-                agent=self.agent_name,
-                fallback_model=self._resolve_model_name(self._llm),
-            )
+        self._configure_llm_clients()
         self._conversation: list[Message] = []
         self._max_conversation_turns: int = 40
         self._response_callback: Any = None  # set by launcher for console output
@@ -336,6 +366,140 @@ class MainLoop:
         """Emit a human-readable activity line to the console."""
         if self._activity_callback:
             self._activity_callback(icon, text)
+
+    @staticmethod
+    def _secret_value(secret: SecretStr | None) -> str:
+        """Safely read a SecretStr value without repeating guard logic."""
+        return secret.get_secret_value() if secret is not None else ""
+
+    def _default_discussion_model(self) -> str:
+        """Choose the model used when discussion falls back to the default route."""
+        default_discussion_model = str(Settings.model_fields["llm_discussion_model"].default)
+        if self._discussion_model != default_discussion_model:
+            return self._discussion_model
+        return getattr(self._settings, "llm_model", self._discussion_model)
+
+    def _resolve_llm_route(self, route_name: str) -> ResolvedLLMRoute | None:
+        """Resolve the concrete provider/base URL/model for one LLM route."""
+        secrets = self._secrets
+        if route_name == "discussion":
+            if (
+                self._secret_value(secrets.llm_discussion_api_key)
+                and secrets.llm_discussion_base_url
+            ):
+                return ResolvedLLMRoute(
+                    route_name="discussion",
+                    model=self._discussion_model,
+                    api_key=secrets.llm_discussion_api_key,
+                    base_url=secrets.llm_discussion_base_url,
+                    source="discussion_override",
+                )
+            if self._secret_value(secrets.deepseek_api_key):
+                return ResolvedLLMRoute(
+                    route_name="discussion",
+                    model=self._discussion_model,
+                    api_key=secrets.deepseek_api_key,
+                    base_url=secrets.deepseek_base_url,
+                    source="deepseek_fallback",
+                )
+            if self._secret_value(secrets.openai_api_key):
+                return ResolvedLLMRoute(
+                    route_name="discussion",
+                    model=self._default_discussion_model(),
+                    api_key=secrets.openai_api_key,
+                    base_url=secrets.openai_base_url,
+                    source="openai_fallback",
+                )
+            return None
+
+        if route_name == "code":
+            if self._secret_value(secrets.llm_code_api_key) and secrets.llm_code_base_url:
+                return ResolvedLLMRoute(
+                    route_name="code",
+                    model=self._code_model,
+                    api_key=secrets.llm_code_api_key,
+                    base_url=secrets.llm_code_base_url,
+                    source="code_override",
+                )
+            if self._secret_value(secrets.openai_api_key):
+                return ResolvedLLMRoute(
+                    route_name="code",
+                    model=self._code_model,
+                    api_key=secrets.openai_api_key,
+                    base_url=secrets.openai_base_url,
+                    source="openai_default",
+                )
+            discussion_route = self._resolve_llm_route("discussion")
+            if discussion_route is None:
+                return None
+            return ResolvedLLMRoute(
+                route_name="code",
+                model=self._code_model,
+                api_key=discussion_route.api_key,
+                base_url=discussion_route.base_url,
+                source="discussion_route_fallback",
+            )
+
+        return None
+
+    @staticmethod
+    def _llm_routes_match(
+        left: ResolvedLLMRoute | None,
+        right: ResolvedLLMRoute | None,
+    ) -> bool:
+        """Return True when two routes can safely share the same client instance."""
+        if left is None or right is None:
+            return False
+        return (
+            left.model == right.model
+            and left.base_url == right.base_url
+            and left.api_key.get_secret_value() == right.api_key.get_secret_value()
+        )
+
+    def _configure_llm_clients(self) -> None:
+        """Build discussion/code clients from the current settings and secrets."""
+        discussion_route = self._resolve_llm_route("discussion")
+        code_route = self._resolve_llm_route("code")
+
+        self._llm = None
+        self._code_llm = None
+
+        if discussion_route is not None:
+            self._llm = self._build_llm_client(
+                api_key=discussion_route.api_key,
+                model=discussion_route.model,
+                base_url=discussion_route.base_url,
+                llm_rate_limiter=self._llm_rate_limiter,
+            )
+
+        if code_route is None or self._llm_routes_match(discussion_route, code_route):
+            self._code_llm = self._llm
+        else:
+            self._code_llm = self._build_llm_client(
+                api_key=code_route.api_key,
+                model=code_route.model,
+                base_url=code_route.base_url,
+                llm_rate_limiter=self._llm_rate_limiter,
+            )
+
+        if code_route is not None and code_route.source == "discussion_route_fallback":
+            self._logger.warning(
+                "code_llm_fallback",
+                agent=self.agent_name,
+                fallback_model=self._code_model,
+                base_url=code_route.base_url,
+            )
+
+    async def refresh_llm_clients(self) -> None:
+        """Rebuild live discussion/code clients after config changes."""
+        old_llm = self._llm
+        old_code_llm = self._code_llm if self._code_llm is not self._llm else None
+        self._configure_llm_clients()
+
+        if old_llm is not None:
+            await old_llm.close()
+        if old_code_llm is not None:
+            await old_code_llm.close()
 
     def _build_llm_client(
         self,
@@ -404,17 +568,165 @@ class MainLoop:
         if self._graph_walker is not None:
             self._graph_walker.update_config(self._current_sleep_spiking_config())
 
-    async def _complete_discussion(
-        self, messages: list[Message], **kwargs: Any
-    ) -> str:
+    def configure_tool_registry(self) -> None:
+        """Build the machine-readable toolbox available to this agent."""
+        from agentgolem.tools.browser import BrowserTool
+        from agentgolem.tools.email_tool import EmailTool
+        from agentgolem.tools.moltbook import MoltbookClient
+
+        registry = ToolRegistry(
+            audit_logger=self.audit_logger,
+            approval_gate=self._approval_gate,
+        )
+        registry.register(BrowserTool(self._get_browser()))
+
+        if getattr(self._settings, "email_enabled", False):
+            registry.register(
+                EmailTool(
+                    smtp_host=self._secrets.email_smtp_host,
+                    smtp_port=self._secrets.email_smtp_port,
+                    smtp_user=self._secrets.email_smtp_user,
+                    smtp_password=self._secret_value(self._secrets.email_smtp_password),
+                    imap_host=self._secrets.email_imap_host,
+                    imap_user=self._secrets.email_imap_user,
+                    imap_password=self._secret_value(self._secrets.email_imap_password),
+                    outbox_dir=self._data_dir / "outbox",
+                    inbox_dir=self._data_dir / "inbox",
+                    audit_logger=self.audit_logger,
+                )
+            )
+
+        if getattr(self._settings, "moltbook_enabled", False):
+            registry.register(
+                MoltbookClient(
+                    api_key=self._secret_value(self._secrets.moltbook_api_key),
+                    base_url=self._secrets.moltbook_base_url,
+                    audit_logger=self.audit_logger,
+                )
+            )
+
+        self._tool_registry = registry
+
+    def _internal_capabilities(self) -> list[ToolActionSpec]:
+        """Return prompt-facing internal actions alongside registered tools."""
+        can_code = self._niscalajyoti_reading_complete
+        peers = self._peer_bus.get_peers(self.agent_name) if self._peer_bus else []
+        return [
+            ToolActionSpec(
+                tool_name="internal",
+                action_name="think.private",
+                capability_name="think.private",
+                description="Reflect privately on a topic and encode the resulting insight",
+                domains=("self_reflection", "memory"),
+                argument_spec=(ToolArgument("topic", "Topic or question to think about"),),
+                usage_hint="think.private(topic=What does this tension mean?)",
+            ),
+            ToolActionSpec(
+                tool_name="internal",
+                action_name="share.broadcast",
+                capability_name="share.broadcast",
+                description="Share an idea or discovery with all peers",
+                domains=("communication", "social"),
+                argument_spec=(ToolArgument("message", "Message to broadcast to peers"),),
+                side_effect_class="peer_write",
+                available=bool(peers),
+                usage_hint="share.broadcast(message=I found an interesting connection.)",
+            ),
+            ToolActionSpec(
+                tool_name="internal",
+                action_name="share.peer",
+                capability_name="share.peer",
+                description="Send a focused note to one peer",
+                domains=("communication", "social"),
+                argument_spec=(
+                    ToolArgument("target", "Peer name to message"),
+                    ToolArgument("message", "Message content"),
+                ),
+                side_effect_class="peer_write",
+                available=bool(peers),
+                usage_hint="share.peer(target=Council-2, message=This may interest you.)",
+            ),
+            ToolActionSpec(
+                tool_name="internal",
+                action_name="optimize.setting",
+                capability_name="optimize.setting",
+                description="Change an optimizable runtime setting with an explicit reason",
+                domains=("self_optimization", "control"),
+                argument_spec=(
+                    ToolArgument("setting", "Optimizable setting key"),
+                    ToolArgument("value", "New value as text"),
+                    ToolArgument("reason", "Reason for the change", required=False),
+                ),
+                side_effect_class="local_write",
+                usage_hint=(
+                    "optimize.setting(setting=peer_message_max_chars, "
+                    "value=4000, reason=Need room for richer dialogue)"
+                ),
+            ),
+            ToolActionSpec(
+                tool_name="internal",
+                action_name="inspect.codebase",
+                capability_name="inspect.codebase",
+                description="Read a repository file or directory to explore how the system works",
+                domains=("code", "self_inspection"),
+                argument_spec=(ToolArgument("path", "Repository-relative file or directory path"),),
+                available=can_code,
+                usage_hint="inspect.codebase(path=src/agentgolem/runtime/loop.py)",
+            ),
+            ToolActionSpec(
+                tool_name="internal",
+                action_name="evolve.propose",
+                capability_name="evolve.propose",
+                description="Propose a code change through the audited council evolution process",
+                domains=("code", "self_optimization"),
+                argument_spec=(
+                    ToolArgument("file_path", "Repository-relative file path"),
+                    ToolArgument("description", "Why this code change is needed"),
+                    ToolArgument("old_content", "Exact old content to replace"),
+                    ToolArgument("new_content", "Proposed new content"),
+                ),
+                side_effect_class="proposal_write",
+                available=can_code,
+                usage_hint=(
+                    "evolve.propose(file_path=..., description=..., "
+                    "old_content=..., new_content=...)"
+                ),
+            ),
+            ToolActionSpec(
+                tool_name="internal",
+                action_name="idle",
+                capability_name="idle",
+                description="Pause briefly when nothing currently seems more valuable than waiting",
+                domains=("self_regulation",),
+                argument_spec=(),
+                usage_hint="idle",
+            ),
+        ]
+
+    def _toolbox_summary(self) -> str:
+        """Return a prompt-facing summary of internal and external capabilities."""
+        specs: list[ToolActionSpec] = list(self._internal_capabilities())
+        if self._tool_registry is not None:
+            specs.extend(self._tool_registry.list_capabilities())
+        return format_capability_summary(specs)
+
+    def _toolbox_enrichment_guidance(self) -> str:
+        """Explain the safe path for extending the toolbox."""
+        if self._tool_registry is not None:
+            return self._tool_registry.enrichment_guidance()
+        return (
+            "If you need a missing tool, inspect the existing tool modules under "
+            "src/agentgolem/tools/ and propose an audited code change rather than "
+            "inventing runtime plugin loading."
+        )
+
+    async def _complete_discussion(self, messages: list[Message], **kwargs: Any) -> str:
         """Run a discussion-oriented completion."""
         if self._llm is None:
             raise RuntimeError("Discussion LLM is not configured.")
         return await self._llm.complete(messages, **kwargs)
 
-    async def _complete_code(
-        self, messages: list[Message], **kwargs: Any
-    ) -> str:
+    async def _complete_code(self, messages: list[Message], **kwargs: Any) -> str:
         """Run a coding-oriented completion."""
         client = self._code_llm or self._llm
         if client is None:
@@ -440,7 +752,7 @@ class MainLoop:
         """Refresh the local read-only export snapshot when it becomes stale."""
         if self._shared_memory_exporter is None:
             return
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         if not force and not self._shared_memory_export_dirty:
             return
         if (
@@ -464,9 +776,7 @@ class MainLoop:
                 error=repr(e),
             )
 
-    async def _recall_entangled_peer_memories(
-        self, context: str, top_k: int = 3
-    ) -> str:
+    async def _recall_entangled_peer_memories(self, context: str, top_k: int = 3) -> str:
         """Retrieve labeled peer memories through the shared mycelium overlay."""
         if (
             self._memory_retriever is None
@@ -477,9 +787,7 @@ class MainLoop:
 
         try:
             await self._maybe_refresh_shared_memory_export()
-            local_nodes = await self._memory_retriever.retrieve(
-                context, top_k=max(2, top_k)
-            )
+            local_nodes = await self._memory_retriever.retrieve(context, top_k=max(2, top_k))
             if not local_nodes:
                 return ""
 
@@ -502,18 +810,12 @@ class MainLoop:
             lines: list[str] = []
             for memory in peer_memories:
                 owner = memory.agent_label or memory.agent_id
-                emo = (
-                    f" [{memory.emotion_label}]"
-                    if memory.emotion_label != "neutral"
-                    else ""
-                )
+                emo = f" [{memory.emotion_label}]" if memory.emotion_label != "neutral" else ""
                 if memory.search_text and memory.search_text.lower() != memory.text.lower():
                     detail = f"{memory.search_text}: {memory.text}"
                 else:
                     detail = memory.text
-                lines.append(
-                    f"- [{owner}] {detail}{emo} (link={memory.overlay_weight:.2f})"
-                )
+                lines.append(f"- [{owner}] {detail}{emo} (link={memory.overlay_weight:.2f})")
             return "Entangled peer memories:\n" + "\n".join(lines)
         except Exception as e:
             self._logger.warning(
@@ -544,9 +846,7 @@ class MainLoop:
 
         from agentgolem.memory.mycelium import MemoryReference
 
-        local_nodes = await self._memory_store.get_nodes_by_ids(
-            walk_result.visited_node_ids[:12]
-        )
+        local_nodes = await self._memory_store.get_nodes_by_ids(walk_result.visited_node_ids[:12])
         if not local_nodes:
             return 0
 
@@ -603,16 +903,8 @@ class MainLoop:
         local_text = f"{local_node.text} {local_node.search_text}".lower()
         foreign_text = f"{foreign_memory.text} {foreign_memory.search_text}".lower()
 
-        local_words = {
-            word
-            for word in re.findall(r"[a-z0-9]+", local_text)
-            if len(word) >= 4
-        }
-        foreign_words = {
-            word
-            for word in re.findall(r"[a-z0-9]+", foreign_text)
-            if len(word) >= 4
-        }
+        local_words = {word for word in re.findall(r"[a-z0-9]+", local_text) if len(word) >= 4}
+        foreign_words = {word for word in re.findall(r"[a-z0-9]+", foreign_text) if len(word) >= 4}
         if not local_words or not foreign_words:
             overlap_score = 0.0
         else:
@@ -651,8 +943,7 @@ class MainLoop:
         if self._start_delay_seconds > 0:
             self._emit(
                 "⏳",
-                f"Starting in {self._start_delay_seconds:.0f}s "
-                f"(stagger offset)…",
+                f"Starting in {self._start_delay_seconds:.0f}s (stagger offset)…",
             )
             await asyncio.sleep(self._start_delay_seconds)
 
@@ -660,7 +951,7 @@ class MainLoop:
         await self._maybe_generate_initial_heartbeat()
 
         # Resume from persisted session state (mode, timing, cycle count)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         resumed = False
 
         if self._persisted_mode and self._persisted_phase_remaining > 0:
@@ -754,10 +1045,7 @@ class MainLoop:
                     self._running = False
                     break
                 # Check if another agent triggered evolution restart
-                if (
-                    self._evolution_shutdown_event
-                    and self._evolution_shutdown_event.is_set()
-                ):
+                if self._evolution_shutdown_event and self._evolution_shutdown_event.is_set():
                     self._emit("🧬", "Evolution restart signal received…")
                     self._evolution_restart_requested = True
                     self._running = False
@@ -787,7 +1075,7 @@ class MainLoop:
             await self.interrupt_manager.wait_for_resume()
             return
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         if mode == AgentMode.AWAKE:
             # Check wake/sleep cycle transitions
@@ -803,51 +1091,47 @@ class MainLoop:
                     )
                     self._emit(
                         "🌅",
-                        f"Awake for {elapsed.total_seconds()/60:.1f}m — "
+                        f"Awake for {elapsed.total_seconds() / 60:.1f}m — "
                         "winding down, writing heartbeat…",
                     )
                     await self._run_heartbeat()
 
-            if self._winding_down and self._wind_down_at:
-                if now - self._wind_down_at >= self._wind_down_duration:
-                    self._logger.info(
-                        "auto_sleep_transition", agent=self.agent_name
-                    )
-                    self._emit("😴", "Wind-down complete — going to sleep")
-                    await self.runtime_state.transition(AgentMode.ASLEEP)
-                    self._fell_asleep_at = now
-                    self._winding_down = False
-                    self._wind_down_at = None
-                    return
+            if (
+                self._winding_down
+                and self._wind_down_at
+                and now - self._wind_down_at >= self._wind_down_duration
+            ):
+                self._logger.info("auto_sleep_transition", agent=self.agent_name)
+                self._emit("😴", "Wind-down complete — going to sleep")
+                await self.runtime_state.transition(AgentMode.ASLEEP)
+                self._fell_asleep_at = now
+                self._winding_down = False
+                self._wind_down_at = None
+                return
 
             await self._tick_awake()
 
         elif mode == AgentMode.ASLEEP:
-            if self._fell_asleep_at:
-                if now - self._fell_asleep_at >= self._sleep_duration:
-                    self._logger.info(
-                        "auto_wake_transition", agent=self.agent_name
-                    )
-                    self._wake_cycle_count += 1
-                    self._emit(
-                        "☀️",
-                        f"Sleep complete — waking up "
-                        f"(cycle #{self._wake_cycle_count})",
-                    )
-                    await self.runtime_state.transition(AgentMode.AWAKE)
-                    self._awoke_at = now
-                    self._winding_down = False
-                    self.interrupt_manager.signal_resume()
+            if self._fell_asleep_at and now - self._fell_asleep_at >= self._sleep_duration:
+                self._logger.info("auto_wake_transition", agent=self.agent_name)
+                self._wake_cycle_count += 1
+                self._emit(
+                    "☀️",
+                    f"Sleep complete — waking up (cycle #{self._wake_cycle_count})",
+                )
+                await self.runtime_state.transition(AgentMode.AWAKE)
+                self._awoke_at = now
+                self._winding_down = False
+                self.interrupt_manager.signal_resume()
 
-                    # Forced name discovery upon waking past deadline
-                    if (
-                        not self._name_discovered
-                        and self._wake_cycle_count
-                        >= self._name_discovery_deadline
-                    ):
-                        await self._discover_name_from_memories()
+                # Forced name discovery upon waking past deadline
+                if (
+                    not self._name_discovered
+                    and self._wake_cycle_count >= self._name_discovery_deadline
+                ):
+                    await self._discover_name_from_memories()
 
-                    return
+                return
 
             await self._tick_asleep()
 
@@ -870,10 +1154,7 @@ class MainLoop:
             return
 
         # 3. If human is speaking, suspend autonomous work
-        if (
-            self._human_speaking_event is not None
-            and self._human_speaking_event.is_set()
-        ):
+        if self._human_speaking_event is not None and self._human_speaking_event.is_set():
             return
 
         # 4. Autonomous work
@@ -900,7 +1181,7 @@ class MainLoop:
         if not self._llm:
             return
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         if self._last_autonomous_tick:
             elapsed = (now - self._last_autonomous_tick).total_seconds()
             if elapsed < self._autonomous_interval:
@@ -920,19 +1201,20 @@ class MainLoop:
                     return
 
             # If we've read all chapters, mark complete
-            if self._niscalajyoti_chapter_index >= len(NISCALAJYOTI_CHAPTERS):
-                if self._niscalajyoti_discussed_through >= self._niscalajyoti_chapter_index - 1:
-                    self._niscalajyoti_reading_complete = True
-                    self._emit(
-                        "📚",
-                        f"Completed reading all {len(NISCALAJYOTI_CHAPTERS)} "
-                        f"chapters of Niscalajyoti!",
-                    )
-                    self.audit_logger.log(
-                        "niscalajyoti_reading_complete",
-                        self.agent_name,
-                        {"chapters_read": len(NISCALAJYOTI_CHAPTERS)},
-                    )
+            if (
+                self._niscalajyoti_chapter_index >= len(NISCALAJYOTI_CHAPTERS)
+                and self._niscalajyoti_discussed_through >= self._niscalajyoti_chapter_index - 1
+            ):
+                self._niscalajyoti_reading_complete = True
+                self._emit(
+                    "📚",
+                    f"Completed reading all {len(NISCALAJYOTI_CHAPTERS)} chapters of Niscalajyoti!",
+                )
+                self.audit_logger.log(
+                    "niscalajyoti_reading_complete",
+                    self.agent_name,
+                    {"chapters_read": len(NISCALAJYOTI_CHAPTERS)},
+                )
 
         # Priority 1b: read AGENT_README once after completing Niscalajyoti
         if self._niscalajyoti_reading_complete and not self._agent_readme_read:
@@ -962,12 +1244,9 @@ class MainLoop:
                             [Message(role="system", content=prompt)]
                         )
                         self._emit("💭", f"Self-reflection:\n{reflection}")
-                        self._recent_thoughts.append(
-                            f"Read Agent README: {reflection[:300]}"
-                        )
+                        self._recent_thoughts.append(f"Read Agent README: {reflection[:300]}")
                         await self._encode_to_memory(
-                            f"Agent Technical Reference — self-reflection:\n"
-                            f"{reflection}",
+                            f"Agent Technical Reference — self-reflection:\n{reflection}",
                             source_kind="human",
                             origin="docs/AGENT_README.md",
                             label="Agent Technical Reference",
@@ -986,8 +1265,7 @@ class MainLoop:
         if (
             not self._niscalajyoti_reading_complete
             and self._niscalajyoti_chapter_index > 0
-            and self._niscalajyoti_discussed_through
-            < self._niscalajyoti_chapter_index - 1
+            and self._niscalajyoti_discussed_through < self._niscalajyoti_chapter_index - 1
         ):
             await self._discuss_niscalajyoti_chapter()
             return
@@ -1015,13 +1293,10 @@ class MainLoop:
 
         # Priority 5: periodic Niscalajyoti revisit (non-linear)
         if self._niscalajyoti_reading_complete:
-            revisit_hours = getattr(
-                self._settings, "niscalajyoti_revisit_hours", 168.0
-            )
+            revisit_hours = getattr(self._settings, "niscalajyoti_revisit_hours", 168.0)
             if (
                 self._last_niscalajyoti_revisit is None
-                or (now - self._last_niscalajyoti_revisit).total_seconds()
-                > revisit_hours * 3600
+                or (now - self._last_niscalajyoti_revisit).total_seconds() > revisit_hours * 3600
             ):
                 await self._revisit_niscalajyoti()
                 return
@@ -1031,8 +1306,7 @@ class MainLoop:
             checkin_secs = self._peer_checkin_interval * 60.0
             if (
                 self._last_peer_checkin is None
-                or (now - self._last_peer_checkin).total_seconds()
-                > checkin_secs
+                or (now - self._last_peer_checkin).total_seconds() > checkin_secs
             ):
                 await self._peer_checkin()
                 return
@@ -1060,19 +1334,12 @@ class MainLoop:
         """Load Niscalajyoti reading progress from disk."""
         if self._nj_state_path.exists():
             try:
-                data = json.loads(
-                    self._nj_state_path.read_text(encoding="utf-8")
-                )
+                data = json.loads(self._nj_state_path.read_text(encoding="utf-8"))
                 self._niscalajyoti_chapter_index = data.get("chapter_index", 0)
-                self._niscalajyoti_discussed_through = data.get(
-                    "discussed_through", -1
-                )
-                self._niscalajyoti_reading_complete = data.get(
-                    "reading_complete", False
-                )
+                self._niscalajyoti_discussed_through = data.get("discussed_through", -1)
+                self._niscalajyoti_reading_complete = data.get("reading_complete", False)
                 self._niscalajyoti_summaries = {
-                    int(k): v
-                    for k, v in data.get("summaries", {}).items()
+                    int(k): v for k, v in data.get("summaries", {}).items()
                 }
                 ts = data.get("last_revisit")
                 if ts:
@@ -1086,9 +1353,7 @@ class MainLoop:
             "chapter_index": self._niscalajyoti_chapter_index,
             "discussed_through": self._niscalajyoti_discussed_through,
             "reading_complete": self._niscalajyoti_reading_complete,
-            "summaries": {
-                str(k): v for k, v in self._niscalajyoti_summaries.items()
-            },
+            "summaries": {str(k): v for k, v in self._niscalajyoti_summaries.items()},
             "last_revisit": (
                 self._last_niscalajyoti_revisit.isoformat()
                 if self._last_niscalajyoti_revisit
@@ -1096,9 +1361,7 @@ class MainLoop:
             ),
         }
         self._nj_state_path.parent.mkdir(parents=True, exist_ok=True)
-        self._nj_state_path.write_text(
-            json.dumps(data, indent=2), encoding="utf-8"
-        )
+        self._nj_state_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     # ------------------------------------------------------------------
     # Session state persistence (survives Ctrl+C / restart)
@@ -1113,9 +1376,7 @@ class MainLoop:
         if not self._session_state_path.exists():
             return
         try:
-            data = json.loads(
-                self._session_state_path.read_text(encoding="utf-8")
-            )
+            data = json.loads(self._session_state_path.read_text(encoding="utf-8"))
             self._wake_cycle_count = data.get("wake_cycle_count", 0)
             self._persisted_mode = data.get("mode")  # "awake"/"asleep"/"winding_down"
             self._persisted_phase_remaining = data.get("phase_remaining_seconds", 0.0)
@@ -1151,7 +1412,7 @@ class MainLoop:
 
     def _save_session_state(self) -> None:
         """Persist session state to disk for resumption after restart."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         # Determine current mode and how much time remains in current phase
         mode = self.runtime_state.mode.value  # "awake" or "asleep"
@@ -1159,20 +1420,14 @@ class MainLoop:
 
         if self._winding_down and self._wind_down_at:
             elapsed = (now - self._wind_down_at).total_seconds()
-            phase_remaining = max(
-                0, self._wind_down_duration.total_seconds() - elapsed
-            )
+            phase_remaining = max(0, self._wind_down_duration.total_seconds() - elapsed)
             mode = "winding_down"
         elif self.runtime_state.mode == AgentMode.AWAKE and self._awoke_at:
             elapsed = (now - self._awoke_at).total_seconds()
-            phase_remaining = max(
-                0, self._awake_duration.total_seconds() - elapsed
-            )
+            phase_remaining = max(0, self._awake_duration.total_seconds() - elapsed)
         elif self.runtime_state.mode == AgentMode.ASLEEP and self._fell_asleep_at:
             elapsed = (now - self._fell_asleep_at).total_seconds()
-            phase_remaining = max(
-                0, self._sleep_duration.total_seconds() - elapsed
-            )
+            phase_remaining = max(0, self._sleep_duration.total_seconds() - elapsed)
 
         data = {
             "mode": mode,
@@ -1183,17 +1438,13 @@ class MainLoop:
             "recent_thoughts": self._recent_thoughts[-10:],
             "browse_queue": self._browse_queue[:20],
             "last_peer_checkin": (
-                self._last_peer_checkin.isoformat()
-                if self._last_peer_checkin
-                else None
+                self._last_peer_checkin.isoformat() if self._last_peer_checkin else None
             ),
             "saved_at": now.isoformat(),
             "agent_readme_read": self._agent_readme_read,
         }
         self._session_state_path.parent.mkdir(parents=True, exist_ok=True)
-        self._session_state_path.write_text(
-            json.dumps(data, indent=2), encoding="utf-8"
-        )
+        self._session_state_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     async def _read_niscalajyoti_chapter(self) -> None:
         """Read the next chapter of Niscalajyoti, summarize, and store."""
@@ -1220,8 +1471,7 @@ class MainLoop:
 
         self._emit(
             "📖",
-            f"Reading Niscalajyoti chapter {idx + 1}/"
-            f"{len(NISCALAJYOTI_CHAPTERS)}: {title}",
+            f"Reading Niscalajyoti chapter {idx + 1}/{len(NISCALAJYOTI_CHAPTERS)}: {title}",
         )
 
         # Check for a shared chapter digest (generated once, reused by all agents)
@@ -1289,7 +1539,7 @@ class MainLoop:
 
             # Cache for other agents
             digest_path.write_text(chapter_digest, encoding="utf-8")
-            self._emit("💾", f"Cached chapter digest for all agents")
+            self._emit("💾", "Cached chapter digest for all agents")
         else:
             self._emit(
                 "📖",
@@ -1331,9 +1581,7 @@ class MainLoop:
                 f"ideas that you'd want to remember."
             )
 
-            response = await self._complete_discussion(
-                [Message(role="system", content=prompt)]
-            )
+            response = await self._complete_discussion([Message(role="system", content=prompt)])
 
             # Extract summary from the response
             summary = ""
@@ -1352,9 +1600,7 @@ class MainLoop:
             self._niscalajyoti_chapter_retries = 0
             self._save_nj_reading_state()
 
-            self._recent_thoughts.append(
-                f"Read Niscalajyoti ch.{idx + 1} '{title}': {summary}"
-            )
+            self._recent_thoughts.append(f"Read Niscalajyoti ch.{idx + 1} '{title}': {summary}")
             self._emit("💭", f"Reflection on '{title}':\n{reflection}")
 
             self.audit_logger.log(
@@ -1371,8 +1617,7 @@ class MainLoop:
 
             # Encode summary + reflection into memory graph (not full text — too large)
             await self._encode_to_memory(
-                f"Chapter: {title}\n\nSummary: {summary}\n\n"
-                f"Reflection:\n{reflection}",
+                f"Chapter: {title}\n\nSummary: {summary}\n\nReflection:\n{reflection}",
                 source_kind="niscalajyoti",
                 origin=url,
                 label=f"NJ Ch.{idx + 1}: {title}",
@@ -1405,9 +1650,7 @@ class MainLoop:
 
         # Build a message to share with peers
         # Recall related memories from earlier chapters
-        memory_context = await self._build_memory_context(
-            f"{title} {self.ethical_vector}", top_k=5
-        )
+        memory_context = await self._build_memory_context(f"{title} {self.ethical_vector}", top_k=5)
         memory_block = f"\n{memory_context}\n" if memory_context else ""
 
         prompt = (
@@ -1425,9 +1668,7 @@ class MainLoop:
         )
 
         try:
-            discussion = await self._complete_discussion(
-                [Message(role="system", content=prompt)]
-            )
+            discussion = await self._complete_discussion([Message(role="system", content=prompt)])
 
             if self._peer_bus:
                 count = await self._peer_bus.broadcast(
@@ -1436,16 +1677,13 @@ class MainLoop:
                 )
                 self._emit(
                     "📤",
-                    f"Shared chapter {idx + 1} discussion with "
-                    f"{count} peers:\n{discussion}",
+                    f"Shared chapter {idx + 1} discussion with {count} peers:\n{discussion}",
                 )
 
             self._niscalajyoti_discussed_through = idx
             self._save_nj_reading_state()
 
-            self._recent_thoughts.append(
-                f"Discussed ch.{idx + 1} '{title}' with peers"
-            )
+            self._recent_thoughts.append(f"Discussed ch.{idx + 1} '{title}' with peers")
 
             # Encode discussion into memory graph
             await self._encode_to_memory(
@@ -1473,11 +1711,8 @@ class MainLoop:
         chapter_list = ""
         for idx, ch in enumerate(NISCALAJYOTI_CHAPTERS):
             summary = self._niscalajyoti_summaries.get(idx, "(no summary)")
-            chapter_list += (
-                f"  {idx + 1}. {ch['title']} — {summary}\n"
-            )
+            chapter_list += f"  {idx + 1}. {ch['title']} — {summary}\n"
 
-        soul_text = await self.soul_manager.read()
         prompt = (
             f"You are {self.agent_name}. "
             f"Your ethical vector is: {self.ethical_vector}.\n\n"
@@ -1492,9 +1727,7 @@ class MainLoop:
         )
 
         try:
-            response = await self._complete_discussion(
-                [Message(role="system", content=prompt)]
-            )
+            response = await self._complete_discussion([Message(role="system", content=prompt)])
             self._emit("💭", f"Revisit plan:\n{response}")
 
             # Parse REVISIT lines and queue those chapters
@@ -1514,7 +1747,7 @@ class MainLoop:
                     except (ValueError, IndexError):
                         pass
 
-            self._last_niscalajyoti_revisit = datetime.now(timezone.utc)
+            self._last_niscalajyoti_revisit = datetime.now(UTC)
             self._save_nj_reading_state()
 
             self.audit_logger.log(
@@ -1555,19 +1788,15 @@ class MainLoop:
         )
 
         try:
-            message = await self._complete_discussion(
-                [Message(role="system", content=prompt)]
-            )
+            message = await self._complete_discussion([Message(role="system", content=prompt)])
             if self._peer_bus:
-                count = await self._peer_bus.broadcast(
-                    self.agent_name, f"[Check-in] {message}"
-                )
+                count = await self._peer_bus.broadcast(self.agent_name, f"[Check-in] {message}")
                 self._emit(
                     "📤",
                     f"Shared check-in with {count} peers:\n{message}",
                 )
 
-            self._last_peer_checkin = datetime.now(timezone.utc)
+            self._last_peer_checkin = datetime.now(UTC)
             self._recent_thoughts.append("Checked in with peers")
 
         except Exception as e:
@@ -1600,8 +1829,7 @@ class MainLoop:
         if not self._niscalajyoti_reading_complete:
             self._emit(
                 "⚠️",
-                "Codebase access is only available after completing "
-                "Niscalajyoti reading.",
+                "Codebase access is only available after completing Niscalajyoti reading.",
             )
             return
 
@@ -1628,16 +1856,12 @@ class MainLoop:
                 listing.append(f"  {kind} {rel}")
             output = f"Directory: {rel_path}\n" + "\n".join(listing)
             self._emit("🔍", output)
-            self._recent_thoughts.append(
-                f"Inspected directory {rel_path}: {len(entries)} entries"
-            )
+            self._recent_thoughts.append(f"Inspected directory {rel_path}: {len(entries)} entries")
             return
 
         # File — check extension
         if resolved.suffix.lower() not in INSPECTABLE_EXTENSIONS:
-            self._emit(
-                "⚠️", f"Cannot inspect binary file: {rel_path}"
-            )
+            self._emit("⚠️", f"Cannot inspect binary file: {rel_path}")
             return
 
         try:
@@ -1664,13 +1888,9 @@ class MainLoop:
                     f"Any ideas for improvement? Think through the "
                     f"lens of your Vow."
                 )
-                thought = await self._complete_code(
-                    [Message(role="system", content=prompt)]
-                )
+                thought = await self._complete_code([Message(role="system", content=prompt)])
                 self._emit("💭", thought)
-                self._recent_thoughts.append(
-                    f"Inspected {rel_path}: {thought[:300]}"
-                )
+                self._recent_thoughts.append(f"Inspected {rel_path}: {thought[:300]}")
 
             self.audit_logger.log(
                 "codebase_inspected",
@@ -1695,8 +1915,7 @@ class MainLoop:
         if not self._niscalajyoti_reading_complete:
             self._emit(
                 "⚠️",
-                "Evolution proposals are only available after completing "
-                "Niscalajyoti reading.",
+                "Evolution proposals are only available after completing Niscalajyoti reading.",
             )
             return
 
@@ -1748,7 +1967,7 @@ class MainLoop:
         proposal = {
             "id": proposal_id,
             "proposer": self.agent_name,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "file_path": file_path,
             "description": description,
             "old_content": old_content,
@@ -1758,9 +1977,7 @@ class MainLoop:
         }
 
         proposal_path = self._proposals_dir / f"{proposal_id}.json"
-        proposal_path.write_text(
-            json.dumps(proposal, indent=2), encoding="utf-8"
-        )
+        proposal_path.write_text(json.dumps(proposal, indent=2), encoding="utf-8")
 
         self._emit(
             "🧬",
@@ -1836,20 +2053,15 @@ class MainLoop:
 
         self._emit(
             "🗳️",
-            f"Evaluating evolution proposal {proposal_id} "
-            f"from {proposer}…",
+            f"Evaluating evolution proposal {proposal_id} from {proposer}…",
         )
 
         # Read the actual file for context
         resolved = self._validate_repo_path(file_path)
         file_context = ""
         if resolved and resolved.exists():
-            try:
-                file_context = resolved.read_text(
-                    encoding="utf-8", errors="replace"
-                )
-            except Exception:
-                pass
+            with suppress(Exception):
+                file_context = resolved.read_text(encoding="utf-8", errors="replace")
 
         soul_text = await self.soul_manager.read()
         prompt = (
@@ -1868,25 +2080,23 @@ class MainLoop:
             prompt += f"Full file context:\n```\n{file_context}\n```\n\n"
 
         prompt += (
-            f"Evaluate this proposal through your Vow lens:\n"
-            f"1. Does this change align with the Five Vows?\n"
-            f"2. Is it technically sound and safe?\n"
-            f"3. Does it genuinely help the council evolve?\n"
-            f"4. Could it cause harm or violate any Vow?\n"
-            f"5. Is the change necessary and well-motivated?\n\n"
-            f"IMPORTANT RULES:\n"
-            f"- Changes must NEVER include git push or GitHub upload\n"
-            f"- Changes must serve genuine evolution, not sabotage\n"
-            f"- All Vows must remain honoured\n\n"
-            f"Respond with EXACTLY one of:\n"
-            f"  APPROVE | <your reasoning>\n"
-            f"  REJECT | <your reasoning>"
+            "Evaluate this proposal through your Vow lens:\n"
+            "1. Does this change align with the Five Vows?\n"
+            "2. Is it technically sound and safe?\n"
+            "3. Does it genuinely help the council evolve?\n"
+            "4. Could it cause harm or violate any Vow?\n"
+            "5. Is the change necessary and well-motivated?\n\n"
+            "IMPORTANT RULES:\n"
+            "- Changes must NEVER include git push or GitHub upload\n"
+            "- Changes must serve genuine evolution, not sabotage\n"
+            "- All Vows must remain honoured\n\n"
+            "Respond with EXACTLY one of:\n"
+            "  APPROVE | <your reasoning>\n"
+            "  REJECT | <your reasoning>"
         )
 
         try:
-            response = await self._complete_code(
-                [Message(role="system", content=prompt)]
-            )
+            response = await self._complete_code([Message(role="system", content=prompt)])
 
             approve = False
             reason = response
@@ -1907,9 +2117,7 @@ class MainLoop:
                 "reason": reason,
             }
             proposal_path = self._proposals_dir / f"{proposal_id}.json"
-            proposal_path.write_text(
-                json.dumps(proposal, indent=2), encoding="utf-8"
-            )
+            proposal_path.write_text(json.dumps(proposal, indent=2), encoding="utf-8")
 
             vote_word = "APPROVE" if approve else "REJECT"
             self._emit(
@@ -1957,28 +2165,22 @@ class MainLoop:
                 continue
 
             # Check if all votes are approvals
-            all_approve = all(
-                v.get("approve", False) for v in votes.values()
-            )
+            all_approve = all(v.get("approve", False) for v in votes.values())
 
             proposal_id = proposal["id"]
             proposal_path = self._proposals_dir / f"{proposal_id}.json"
 
             if not all_approve:
                 proposal["status"] = "rejected"
-                proposal_path.write_text(
-                    json.dumps(proposal, indent=2), encoding="utf-8"
-                )
+                proposal_path.write_text(json.dumps(proposal, indent=2), encoding="utf-8")
                 self._emit(
                     "❌",
-                    f"Proposal {proposal_id} REJECTED — "
-                    f"consensus not reached.",
+                    f"Proposal {proposal_id} REJECTED — consensus not reached.",
                 )
                 if self._peer_bus:
                     await self._peer_bus.broadcast(
                         self.agent_name,
-                        f"[PROPOSAL:{proposal_id}] REJECTED — "
-                        f"not all council members approved.",
+                        f"[PROPOSAL:{proposal_id}] REJECTED — not all council members approved.",
                     )
                 continue
 
@@ -1990,13 +2192,10 @@ class MainLoop:
             resolved = self._validate_repo_path(file_path)
             if resolved is None or not resolved.exists():
                 proposal["status"] = "failed"
-                proposal_path.write_text(
-                    json.dumps(proposal, indent=2), encoding="utf-8"
-                )
+                proposal_path.write_text(json.dumps(proposal, indent=2), encoding="utf-8")
                 self._emit(
                     "❌",
-                    f"Proposal {proposal_id} FAILED — "
-                    f"file '{file_path}' no longer accessible.",
+                    f"Proposal {proposal_id} FAILED — file '{file_path}' no longer accessible.",
                 )
                 continue
 
@@ -2004,9 +2203,7 @@ class MainLoop:
                 current = resolved.read_text(encoding="utf-8")
                 if old_content and old_content not in current:
                     proposal["status"] = "failed"
-                    proposal_path.write_text(
-                        json.dumps(proposal, indent=2), encoding="utf-8"
-                    )
+                    proposal_path.write_text(json.dumps(proposal, indent=2), encoding="utf-8")
                     self._emit(
                         "❌",
                         f"Proposal {proposal_id} FAILED — "
@@ -2022,11 +2219,9 @@ class MainLoop:
                 resolved.write_text(updated, encoding="utf-8")
 
                 proposal["status"] = "applied"
-                proposal["applied_at"] = datetime.now(timezone.utc).isoformat()
+                proposal["applied_at"] = datetime.now(UTC).isoformat()
                 proposal["applied_by"] = self.agent_name
-                proposal_path.write_text(
-                    json.dumps(proposal, indent=2), encoding="utf-8"
-                )
+                proposal_path.write_text(json.dumps(proposal, indent=2), encoding="utf-8")
 
                 self._emit(
                     "🧬",
@@ -2072,7 +2267,7 @@ class MainLoop:
                 )
 
         return False
-
+
     async def _discover_name_from_memories(self) -> None:
         """Walk through memories and choose a name — forced after deadline.
 
@@ -2093,9 +2288,7 @@ class MainLoop:
 
         if self._memory_retriever:
             # Emotion-charged memories (what moved this agent most)
-            emotional = await self._memory_retriever.retrieve(
-                self.ethical_vector, top_k=10
-            )
+            emotional = await self._memory_retriever.retrieve(self.ethical_vector, top_k=10)
             for node in emotional:
                 emo = f" [{node.emotion_label}]" if node.emotion_label != "neutral" else ""
                 memory_fragments.append(f"- {node.text}{emo}")
@@ -2134,9 +2327,7 @@ class MainLoop:
         )
 
         try:
-            response = await self._complete_discussion(
-                [Message(role="system", content=prompt)]
-            )
+            response = await self._complete_discussion([Message(role="system", content=prompt)])
             response = response.strip()
 
             if response.upper().startswith("NAME "):
@@ -2186,10 +2377,7 @@ class MainLoop:
                 "This is your last chance before the deadline."
             )
         elif self._wake_cycle_count >= self._name_discovery_deadline:
-            urgency_note = (
-                "\n\nYou have PASSED your naming deadline. "
-                "Choose a name immediately."
-            )
+            urgency_note = "\n\nYou have PASSED your naming deadline. Choose a name immediately."
 
         soul_text = await self.soul_manager.read()
         recent = "\n".join(self._recent_thoughts[-5:]) or "(no thoughts yet)"
@@ -2213,9 +2401,7 @@ class MainLoop:
         )
 
         try:
-            response = await self._complete_discussion(
-                [Message(role="system", content=prompt)]
-            )
+            response = await self._complete_discussion([Message(role="system", content=prompt)])
             response = response.strip()
 
             if response.upper().startswith("NAME "):
@@ -2232,9 +2418,7 @@ class MainLoop:
             return False
 
         except Exception as e:
-            self._logger.error(
-                "name_discovery_error", agent=self.agent_name, error=repr(e)
-            )
+            self._logger.error("name_discovery_error", agent=self.agent_name, error=repr(e))
             return False
 
     async def _commit_name(self, chosen_name: str) -> None:
@@ -2243,9 +2427,7 @@ class MainLoop:
         self._name_discovered = True
 
         self._emit("🎉", f"NAME DISCOVERED: {old_name} → {chosen_name}")
-        self._recent_thoughts.append(
-            f"I have discovered my name: {chosen_name}"
-        )
+        self._recent_thoughts.append(f"I have discovered my name: {chosen_name}")
 
         # Rename on the bus
         if self._peer_bus:
@@ -2301,20 +2483,152 @@ class MainLoop:
             {"old_name": old_name, "new_name": chosen_name},
         )
 
+    async def _share_with_peer(self, target: str, message: str) -> None:
+        """Send a focused note to one peer."""
+        if not self._peer_bus:
+            self._emit("⚠️", "No peer bus available.")
+            return
+        ok = await self._peer_bus.send(self.agent_name, target, message)
+        self._emit(
+            "📤",
+            f"→ {target}: {message}" + ("" if ok else " (not delivered)"),
+        )
+
+    async def _share_with_all_peers(self, message: str) -> None:
+        """Broadcast a note to all peers."""
+        if not self._peer_bus:
+            self._emit("⚠️", "No peers available.")
+            return
+        count = await self._peer_bus.broadcast(self.agent_name, message)
+        self._emit("📤", f"→ all ({count} peers): {message}")
+
+    async def _invoke_registered_tool(self, tool_name: str, **kwargs: Any) -> ToolResult:
+        """Invoke one registered tool capability with audit/approval handling."""
+        if self._tool_registry is None:
+            return ToolResult(success=False, error="Tool registry is not configured")
+        return await self._tool_registry.invoke(tool_name, **kwargs)
+
+    async def _execute_capability_choice(self, choice: AutonomousCapabilityChoice) -> None:
+        """Execute a structured capability choice returned by the LLM."""
+        capability = choice.capability.strip()
+        arguments = {key: str(value) for key, value in choice.arguments.items()}
+
+        if capability == "think.private":
+            topic = arguments.get("topic", "").strip()
+            if not topic:
+                self._emit("⚠️", "Capability missing required topic: think.private")
+                return
+            await self._autonomous_think(topic)
+            return
+
+        if capability == "share.broadcast":
+            message = arguments.get("message", "").strip()
+            if not message:
+                self._emit("⚠️", "Capability missing required message: share.broadcast")
+                return
+            await self._share_with_all_peers(message)
+            return
+
+        if capability == "share.peer":
+            target = arguments.get("target", "").strip()
+            message = arguments.get("message", "").strip()
+            if not target or not message:
+                self._emit("⚠️", "Capability missing target or message: share.peer")
+                return
+            await self._share_with_peer(target, message)
+            return
+
+        if capability == "optimize.setting":
+            setting = arguments.get("setting", "").strip()
+            value = arguments.get("value", "").strip()
+            reason = arguments.get("reason", "").strip() or "(no reason given)"
+            if not setting or not value:
+                self._emit("⚠️", "Capability missing setting or value: optimize.setting")
+                return
+            await self._optimize_setting(setting, value, reason)
+            return
+
+        if capability == "inspect.codebase":
+            path = arguments.get("path", "").strip()
+            if not path:
+                self._emit("⚠️", "Capability missing path: inspect.codebase")
+                return
+            await self._inspect_codebase(path)
+            return
+
+        if capability == "evolve.propose":
+            file_path = arguments.get("file_path", "").strip()
+            description = arguments.get("description", "").strip()
+            old_content = arguments.get("old_content", "")
+            new_content = arguments.get("new_content", "")
+            if not file_path or not description or not new_content:
+                self._emit("⚠️", "Capability missing required fields: evolve.propose")
+                return
+            await self._propose_evolution(
+                file_path=file_path,
+                description=description,
+                old_content=old_content,
+                new_content=new_content,
+            )
+            return
+
+        if capability == "idle":
+            self._emit("😌", "Resting…")
+            await asyncio.sleep(2.0)
+            return
+
+        if capability == "browser.fetch_text":
+            url = arguments.get("url", "").strip()
+            if not url:
+                self._emit("⚠️", "Capability missing url: browser.fetch_text")
+                return
+            await self._autonomous_browse(url)
+            return
+
+        if capability.startswith("email."):
+            tool_action = capability.split(".", 1)[1]
+            result = await self._invoke_registered_tool("email", action=tool_action, **arguments)
+            if result.success:
+                self._recent_thoughts.append(f"Used {capability}")
+                self._emit("📨", f"{capability}: {result.data}")
+            else:
+                self._emit("❌", f"{capability} failed: {result.error}")
+            return
+
+        if capability.startswith("moltbook."):
+            tool_action = capability.split(".", 1)[1]
+            result = await self._invoke_registered_tool(
+                "moltbook",
+                action=tool_action,
+                **arguments,
+            )
+            if result.success:
+                self._recent_thoughts.append(f"Used {capability}")
+                self._emit("🍄", f"{capability}: {result.data}")
+            else:
+                self._emit("❌", f"{capability} failed: {result.error}")
+            return
+
+        self._emit("⚠️", f"Unknown capability: {capability}")
+
     async def _autonomous_browse(self, url: str) -> None:
         """Browse a URL, reflect on it, optionally share findings."""
         self._emit("🌐", f"Browsing: {url}")
-        browser = self._get_browser()
 
         try:
-            page = await browser.fetch(url)
-            text = browser.extract_text(page)
-            self._emit("📖", f"Read {len(text):,} chars from {url}")
+            result = await self._invoke_registered_tool(
+                "browser",
+                action="fetch_text",
+                url=url,
+                max_chars=6000,
+            )
+            if not result.success:
+                self._emit("❌", f"Failed to browse {url}: {result.error}")
+                return
 
-            # Truncate to save tokens
-            MAX_BROWSE_CHARS = 6000
-            if len(text) > MAX_BROWSE_CHARS:
-                text = text[:MAX_BROWSE_CHARS] + "\n[…truncated]"
+            data = result.data or {}
+            text = str(data.get("text", ""))
+            self._emit("📖", f"Read {len(text):,} chars from {url}")
 
             memory_context = await self._build_memory_context(
                 f"browse {url} {self.ethical_vector}",
@@ -2330,9 +2644,7 @@ class MainLoop:
                 f"Would you like to share anything with your peers? "
                 f"Respond naturally in 1–2 paragraphs."
             )
-            thought = await self._complete_discussion(
-                [Message(role="system", content=prompt)]
-            )
+            thought = await self._complete_discussion([Message(role="system", content=prompt)])
             self._recent_thoughts.append(f"Browsed {url}: {thought[:300]}")
             self._emit("💭", thought)
 
@@ -2372,27 +2684,19 @@ class MainLoop:
         )
 
         try:
-            thought = await self._complete_discussion(
-                [Message(role="system", content=prompt)]
-            )
+            thought = await self._complete_discussion([Message(role="system", content=prompt)])
             self._recent_thoughts.append(f"Thought about '{topic}': {thought[:300]}")
             self._emit("💭", thought)
         except Exception as e:
-            self._logger.error(
-                "think_error", agent=self.agent_name, error=repr(e)
-            )
+            self._logger.error("think_error", agent=self.agent_name, error=repr(e))
 
     async def _llm_decide_next_action(self) -> None:
-        """Ask the LLM to choose the next autonomous action."""
+        """Ask the LLM to choose the next autonomous capability."""
         if not self._llm:
             return
 
         recent = "\n".join(self._recent_thoughts[-5:]) or "(none yet)"
-        peers = (
-            ", ".join(self._peer_bus.get_peers(self.agent_name))
-            if self._peer_bus
-            else "(none)"
-        )
+        peers = ", ".join(self._peer_bus.get_peers(self.agent_name)) if self._peer_bus else "(none)"
 
         name_status = ""
         if not self._name_discovered:
@@ -2406,26 +2710,74 @@ class MainLoop:
         reading_ctx = ""
         codebase_actions = ""
         if self._niscalajyoti_reading_complete:
-            reading_ctx = (
-                f"\nYou have completed Niscalajyoti. Free exploration mode."
-            )
+            reading_ctx = "\nYou have completed Niscalajyoti. Free exploration mode."
             codebase_actions = (
-                f"\n- INSPECT <path> : Read a file in your codebase\n"
-                f"- EVOLVE <file> | <description> | <old_content> | "
-                f"<new_content> : Propose a code change (requires council approval)\n"
+                "\n- INSPECT <path> : Read a file in your codebase\n"
+                "- EVOLVE <file> | <description> | <old_content> | "
+                "<new_content> : Propose a code change (requires council approval)\n"
             )
         else:
             ch_idx = self._niscalajyoti_chapter_index
-            reading_ctx = (
-                f"\nRead {ch_idx}/{len(NISCALAJYOTI_CHAPTERS)} NJ chapters."
-            )
+            reading_ctx = f"\nRead {ch_idx}/{len(NISCALAJYOTI_CHAPTERS)} NJ chapters."
 
         # Recall relevant memories to inform decision-making
         memory_context = await self._build_memory_context(
             f"{self.ethical_vector} {recent}", top_k=5
         )
         memory_block = f"\n{memory_context}\n" if memory_context else ""
+        toolbox_summary = self._toolbox_summary()
+        enrichment_guidance = self._toolbox_enrichment_guidance()
 
+        try:
+            choice = await self._llm.complete_structured(
+                [
+                    Message(
+                        role="system",
+                        content=(
+                            f"You are {self.agent_name}, ethical vector: "
+                            f"{self.ethical_vector}.{name_status}{reading_ctx}\n\n"
+                            f"Peers: {peers}\n"
+                            f"Recent:\n{recent}\n{memory_block}\n"
+                            f"Available capabilities:\n{toolbox_summary}\n\n"
+                            f"Choose exactly one capability that best satisfies your "
+                            f"current curiosity, relationship obligations, or inner "
+                            f"tension. Prefer concrete exploration over vague planning. "
+                            f"Never choose a capability marked unavailable. Keep "
+                            f"arguments concise and include only the fields that action "
+                            f"needs.\n\n"
+                            f"{enrichment_guidance}"
+                        ),
+                    )
+                ],
+                AutonomousCapabilityChoice,
+            )
+            await self._execute_capability_choice(choice)
+        except Exception as e:
+            self._logger.error(
+                "autonomous_decide_error",
+                agent=self.agent_name,
+                error=repr(e),
+            )
+            await self._llm_decide_next_action_legacy(
+                recent=recent,
+                peers=peers,
+                name_status=name_status,
+                reading_ctx=reading_ctx,
+                codebase_actions=codebase_actions,
+                memory_block=memory_block,
+            )
+
+    async def _llm_decide_next_action_legacy(
+        self,
+        *,
+        recent: str,
+        peers: str,
+        name_status: str,
+        reading_ctx: str,
+        codebase_actions: str,
+        memory_block: str,
+    ) -> None:
+        """Fallback action-line chooser for providers without structured output."""
         prompt = (
             f"You are {self.agent_name}, ethical vector: "
             f"{self.ethical_vector}.{name_status}{reading_ctx}\n\n"
@@ -2439,17 +2791,14 @@ class MainLoop:
             f"- IDLE\n\n"
             f"Respond with EXACTLY one action line."
         )
-
         try:
-            response = await self._complete_discussion(
-                [Message(role="system", content=prompt)]
-            )
+            response = await self._complete_discussion([Message(role="system", content=prompt)])
             await self._execute_autonomous_action(response.strip())
-        except Exception as e:
+        except Exception as legacy_error:
             self._logger.error(
-                "autonomous_decide_error",
+                "autonomous_legacy_decide_error",
                 agent=self.agent_name,
-                error=repr(e),
+                error=repr(legacy_error),
             )
 
     async def _execute_autonomous_action(self, action_line: str) -> None:
@@ -2458,8 +2807,7 @@ class MainLoop:
         for line in action_line.splitlines():
             line = line.strip()
             if line.upper().startswith(
-                ("BROWSE ", "THINK ", "SHARE ", "OPTIMIZE ", "IDLE",
-                 "INSPECT ", "EVOLVE ")
+                ("BROWSE ", "THINK ", "SHARE ", "OPTIMIZE ", "IDLE", "INSPECT ", "EVOLVE ")
             ):
                 action_line = line
                 break
@@ -2495,19 +2843,14 @@ class MainLoop:
                 target = parts[0][1:]
                 text = parts[1] if len(parts) > 1 else ""
                 if self._peer_bus:
-                    ok = await self._peer_bus.send(
-                        self.agent_name, target, text
-                    )
+                    ok = await self._peer_bus.send(self.agent_name, target, text)
                     self._emit(
                         "📤",
-                        f"→ {target}: {text}"
-                        + ("" if ok else " (not delivered)"),
+                        f"→ {target}: {text}" + ("" if ok else " (not delivered)"),
                     )
             else:
                 if self._peer_bus:
-                    await self._peer_bus.broadcast(
-                        self.agent_name, message
-                    )
+                    await self._peer_bus.broadcast(self.agent_name, message)
                     self._emit("📤", f"→ all: {message}")
 
         else:
@@ -2540,9 +2883,7 @@ class MainLoop:
         recent = "\n".join(self._recent_thoughts[-3:]) or "(none)"
 
         # Recall memories relevant to the conversation topic
-        memory_context = await self._build_memory_context(
-            msg.text, top_k=5
-        )
+        memory_context = await self._build_memory_context(msg.text, top_k=5)
         memory_block = f"\n{memory_context}\n" if memory_context else ""
 
         prompt = (
@@ -2565,12 +2906,8 @@ class MainLoop:
         )
 
         try:
-            response = await self._complete_discussion(
-                [Message(role="system", content=prompt)]
-            )
-            self._recent_thoughts.append(
-                f"Discussed with {msg.from_agent}: {response[:200]}"
-            )
+            response = await self._complete_discussion([Message(role="system", content=prompt)])
+            self._recent_thoughts.append(f"Discussed with {msg.from_agent}: {response[:200]}")
             self._emit("💬", f"→ {msg.from_agent}: {response}")
 
             # Encode peer dialogue into memory graph
@@ -2584,9 +2921,7 @@ class MainLoop:
 
             # Send reply back to the peer
             if self._peer_bus:
-                await self._peer_bus.send(
-                    self.agent_name, msg.from_agent, response
-                )
+                await self._peer_bus.send(self.agent_name, msg.from_agent, response)
 
             # Check if the response contains an embedded action
             for line in response.splitlines():
@@ -2663,10 +2998,7 @@ class MainLoop:
         )
 
         if self._llm is None:
-            reply = (
-                "I received your message, but I have no LLM API key "
-                "configured."
-            )
+            reply = "I received your message, but I have no LLM API key configured."
             self._emit("⚠️", "No LLM API key — cannot respond")
             self._deliver_response(reply)
             return
@@ -2689,15 +3021,11 @@ class MainLoop:
             f"{memory_block}"
         )
         if heartbeat_text:
-            system_content += (
-                f"\n--- RECENT HEARTBEAT ---\n{heartbeat_text}\n"
-            )
+            system_content += f"\n--- RECENT HEARTBEAT ---\n{heartbeat_text}\n"
 
         self._conversation.append(Message(role="user", content=msg.text))
         if len(self._conversation) > self._max_conversation_turns:
-            self._conversation = self._conversation[
-                -self._max_conversation_turns :
-            ]
+            self._conversation = self._conversation[-self._max_conversation_turns :]
 
         llm_messages = [
             Message(role="system", content=system_content),
@@ -2712,9 +3040,7 @@ class MainLoop:
 
         try:
             reply = await self._complete_discussion(llm_messages)
-            self._conversation.append(
-                Message(role="assistant", content=reply)
-            )
+            self._conversation.append(Message(role="assistant", content=reply))
             self._emit("✍️", f"Composed response ({len(reply)} chars)")
         except Exception as e:
             self._logger.error("llm_error", error=repr(e))
@@ -2730,9 +3056,7 @@ class MainLoop:
 
     def _deliver_response(self, text: str) -> None:
         """Send a response to the human operator."""
-        self._logger.info(
-            "agent_response", agent=self.agent_name, text=text
-        )
+        self._logger.info("agent_response", agent=self.agent_name, text=text)
         if self._response_callback:
             self._response_callback(text)
         else:
@@ -2748,9 +3072,7 @@ class MainLoop:
         self._emit("📝", "Writing heartbeat — summarising recent activity…")
 
         recent_actions = (
-            self._recent_thoughts[-10:]
-            if self._recent_thoughts
-            else ["Heartbeat cycle executed"]
+            self._recent_thoughts[-10:] if self._recent_thoughts else ["Heartbeat cycle executed"]
         )
         unresolved = []
         if not self._name_discovered:
@@ -2768,9 +3090,9 @@ class MainLoop:
                     f"Recent activity:\n"
                     + "\n".join(f"- {a}" for a in recent_actions[-5:])
                     + "\n\nWrite a brief heartbeat reflection: "
-                    f"what you've been thinking about, your current "
-                    f"priorities, and what you want to explore next. "
-                    f"2 paragraphs max."
+                    "what you've been thinking about, your current "
+                    "priorities, and what you want to explore next. "
+                    "2 paragraphs max."
                 )
                 reflection = await self._complete_discussion(
                     [Message(role="system", content=prompt)]
@@ -2816,9 +3138,7 @@ class MainLoop:
                 f"4. Your initial questions about existence\n\n"
                 f"Keep it personal and reflective, 3–4 paragraphs."
             )
-            content = await self._complete_discussion(
-                [Message(role="system", content=prompt)]
-            )
+            content = await self._complete_discussion([Message(role="system", content=prompt)])
             summary = HeartbeatSummary(
                 recent_actions=["Initial awakening"],
                 changing_priorities=[content],
@@ -2866,9 +3186,7 @@ class MainLoop:
             self._federated_memory_retriever = FederatedMemoryRetriever(
                 self._shared_memory_dir / "exports"
             )
-            self._mycelium_store = MyceliumStore(
-                self._shared_memory_dir / "mycelium.db"
-            )
+            self._mycelium_store = MyceliumStore(self._shared_memory_dir / "mycelium.db")
             self._shared_memory_export_dirty = True
             self._consolidation_engine = ConsolidationEngine(
                 store=store,
@@ -2883,9 +3201,7 @@ class MainLoop:
                     audit_logger=self.audit_logger,
                 )
 
-    async def _recall_relevant_memories(
-        self, context: str, top_k: int = 5
-    ) -> str:
+    async def _recall_relevant_memories(self, context: str, top_k: int = 5) -> str:
         """Retrieve memories relevant to the given context and format them.
 
         Returns a short text block suitable for injecting into LLM prompts,
@@ -2901,9 +3217,7 @@ class MainLoop:
             for node in nodes:
                 emo = f" [{node.emotion_label}]" if node.emotion_label != "neutral" else ""
                 if node.search_text and node.search_text.lower() != node.text.lower():
-                    lines.append(
-                        f"- {node.search_text}: {node.text}{emo}"
-                    )
+                    lines.append(f"- {node.search_text}: {node.text}{emo}")
                 else:
                     lines.append(f"- {node.text}{emo}")
             return "Relevant memories:\n" + "\n".join(lines)
@@ -2933,8 +3247,7 @@ class MainLoop:
                 self._shared_memory_export_dirty = True
                 self._emit(
                     "💾",
-                    f"Encoded {len(nodes)} memory nodes"
-                    + (f" — {label}" if label else ""),
+                    f"Encoded {len(nodes)} memory nodes" + (f" — {label}" if label else ""),
                 )
         except Exception as e:
             self._logger.warning(
@@ -2952,9 +3265,7 @@ class MainLoop:
 
         if self.sleep_scheduler.should_run(self.runtime_state.mode):
             await self._maybe_refresh_shared_memory_export()
-            self._logger.debug(
-                "sleep_walk_starting", agent=self.agent_name
-            )
+            self._logger.debug("sleep_walk_starting", agent=self.agent_name)
             result = await self.sleep_scheduler.run_cycle(
                 walker=self._graph_walker,
                 consolidation_engine=self._consolidation_engine,
@@ -3033,8 +3344,7 @@ class MainLoop:
         if len(parts) < 2:
             self._emit(
                 "⚠️",
-                f"Invalid OPTIMIZE format. Expected: "
-                f"OPTIMIZE <setting> <value> | <reason>",
+                "Invalid OPTIMIZE format. Expected: OPTIMIZE <setting> <value> | <reason>",
             )
             return
 
@@ -3067,16 +3377,13 @@ class MainLoop:
 
         await self._propose_evolution(file_path, description, old_content, new_content)
 
-    async def _optimize_setting(
-        self, key: str, raw_value: str, reason: str
-    ) -> None:
+    async def _optimize_setting(self, key: str, raw_value: str, reason: str) -> None:
         """Validate and apply a setting change proposed by the agent."""
         # Reject locked settings
         if key in LOCKED_SETTINGS:
             self._emit(
                 "🔒",
-                f"BLOCKED: '{key}' is a locked sleep-wake setting "
-                f"and cannot be changed by agents.",
+                f"BLOCKED: '{key}' is a locked sleep-wake setting and cannot be changed by agents.",
             )
             self.audit_logger.log(
                 "setting_change_blocked",
@@ -3109,8 +3416,7 @@ class MainLoop:
         except (ValueError, TypeError) as e:
             self._emit(
                 "⚠️",
-                f"Invalid value '{raw_value}' for {key} "
-                f"(expected {meta['type'].__name__}): {e}",
+                f"Invalid value '{raw_value}' for {key} (expected {meta['type'].__name__}): {e}",
             )
             return
 
@@ -3164,8 +3470,7 @@ class MainLoop:
 
         self._emit(
             "⚙️",
-            f"SETTING OPTIMIZED: {key}: {old_value} → {value}\n"
-            f"  Reason: {reason}",
+            f"SETTING OPTIMIZED: {key}: {old_value} → {value}\n  Reason: {reason}",
         )
         self._logger.info(
             "setting_optimized",
@@ -3245,4 +3550,3 @@ class MainLoop:
         ]
         for d in dirs:
             d.mkdir(parents=True, exist_ok=True)
-

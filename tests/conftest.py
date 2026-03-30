@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import os
-import tempfile
-from pathlib import Path
-from typing import AsyncGenerator, Generator
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.fixture
@@ -38,6 +38,10 @@ def tmp_env_file(tmp_path: Path) -> Path:
         "OPENAI_BASE_URL=https://api.openai.com/v1\n"
         "DEEPSEEK_API_KEY=sk-deepseek-key-54321\n"
         "DEEPSEEK_BASE_URL=https://api.deepseek.com/v1\n"
+        "LLM_DISCUSSION_API_KEY=\n"
+        "LLM_DISCUSSION_BASE_URL=\n"
+        "LLM_CODE_API_KEY=\n"
+        "LLM_CODE_BASE_URL=\n"
         "EMAIL_SMTP_HOST=smtp.test.com\n"
         "EMAIL_SMTP_PORT=587\n"
         "EMAIL_SMTP_USER=test@test.com\n"

@@ -1,4 +1,5 @@
 """Tests for agentgolem.config subsystem."""
+
 from __future__ import annotations
 
 import re
@@ -91,6 +92,10 @@ def test_secrets_from_env_file(tmp_env_file: Path) -> None:
     assert secrets.openai_base_url == "https://api.openai.com/v1"
     assert secrets.deepseek_api_key.get_secret_value() == "sk-deepseek-key-54321"
     assert secrets.deepseek_base_url == "https://api.deepseek.com/v1"
+    assert secrets.llm_discussion_api_key.get_secret_value() == ""
+    assert secrets.llm_discussion_base_url == ""
+    assert secrets.llm_code_api_key.get_secret_value() == ""
+    assert secrets.llm_code_base_url == ""
     assert secrets.email_smtp_host == "smtp.test.com"
     assert secrets.email_smtp_port == 587
     assert secrets.email_smtp_user == "test@test.com"
@@ -110,6 +115,8 @@ def test_secretstr_fields_are_hidden(tmp_env_file: Path) -> None:
     secret_fields = [
         secrets.openai_api_key,
         secrets.deepseek_api_key,
+        secrets.llm_discussion_api_key,
+        secrets.llm_code_api_key,
         secrets.email_smtp_password,
         secrets.email_imap_password,
         secrets.moltbook_api_key,
@@ -117,8 +124,11 @@ def test_secretstr_fields_are_hidden(tmp_env_file: Path) -> None:
     for field in secret_fields:
         assert isinstance(field, SecretStr)
         rendered = str(field)
-        assert "**********" in rendered
-        assert field.get_secret_value() not in rendered
+        if field.get_secret_value():
+            assert "**********" in rendered
+            assert field.get_secret_value() not in rendered
+        else:
+            assert rendered == ""
 
 
 # ── 5. All keys in .env.example have corresponding Secrets fields ───────
@@ -155,9 +165,7 @@ def test_get_secrets_singleton(tmp_env_file: Path) -> None:
 # ── 7. reset_config() clears singletons ────────────────────────────────
 
 
-def test_reset_config_clears_singletons(
-    mock_settings_yaml: Path, tmp_env_file: Path
-) -> None:
+def test_reset_config_clears_singletons(mock_settings_yaml: Path, tmp_env_file: Path) -> None:
     settings_a = get_settings(config_path=mock_settings_yaml)
     secrets_a = get_secrets(env_file=tmp_env_file)
 

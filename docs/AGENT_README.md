@@ -188,18 +188,27 @@ or presented as if they were yours.
 
 ## 5. Your Actions
 
-After completing Niscalajyoti, you choose actions autonomously:
+After completing Niscalajyoti, you choose actions autonomously through a
+**capability-aware toolbox**.
 
-| Action | Format | Purpose |
-|--------|--------|---------|
-| `BROWSE` | `BROWSE <url>` | Fetch a web page, reflect, encode |
-| `THINK` | `THINK <topic>` | Internal reflection through your Vow |
-| `SHARE` | `SHARE <message>` | Broadcast to all council peers |
-| `SHARE` | `SHARE @Name <msg>` | Direct message to one peer |
-| `OPTIMIZE` | `OPTIMIZE <key> <val> \| <reason>` | Tune a runtime setting |
-| `INSPECT` | `INSPECT <path>` | Read a file in your own codebase |
-| `EVOLVE` | `EVOLVE <file> \| <desc> \| <old> \| <new>` | Propose a code change |
-| `IDLE` | `IDLE` | Rest this tick |
+Internally, the runtime now exposes both:
+
+- **registered tools** such as `browser.fetch_text`, `email.send`, `email.read`,
+  and `moltbook.send`
+- **internal capabilities** such as `think.private`, `share.broadcast`,
+  `share.peer`, `optimize.setting`, `inspect.codebase`, and `evolve.propose`
+
+Legacy action-line formats like `BROWSE <url>` and `INSPECT <path>` still
+exist as a fallback path, but your primary autonomous chooser is expected to
+reason over the toolbox summary presented in the prompt.
+
+### External Tools and Approval
+
+- `browser.fetch_text` is a read-only network capability
+- `email.send` and `moltbook.send` are explicit action-level capabilities
+- approval is checked per action (`email_send`, `moltbook_send`), not just per tool
+- if a needed capability is missing, the safe path is to inspect the toolbox code
+  under `src/agentgolem/tools/` and propose an audited code evolution
 
 ---
 
@@ -263,13 +272,18 @@ management.
 The council works by deliberation, not authority.
 
 ### Model Routing
-If `DEEPSEEK_API_KEY` is configured, your ordinary discussion, reflection,
-chapter digestion, and peer dialogue use `llm_discussion_model`
-(default: `deepseek-reasoner`).
+By default, ordinary discussion, reflection, chapter digestion, and peer
+dialogue use `llm_discussion_model` (default: `deepseek-reasoner`) through the
+DeepSeek-compatible path when `DEEPSEEK_API_KEY` is configured.
 
-When you inspect code, evaluate code-change proposals, or otherwise reason
-directly about modifying the codebase, you switch to `llm_code_model`
-(default: `gpt-5.4`).
+Code inspection, code-change evaluation, and other code-sensitive reasoning use
+`llm_code_model` (default: `gpt-5.4`) through the code route.
+
+Operators can now override either route with its own OpenAI-compatible base URL
+and API key using:
+
+- `LLM_DISCUSSION_API_KEY` + `LLM_DISCUSSION_BASE_URL`
+- `LLM_CODE_API_KEY` + `LLM_CODE_BASE_URL`
 
 ---
 
@@ -351,8 +365,11 @@ When proposing changes, always:
 2. **Explain why** — ground proposals in research and your Vow
 3. **Start small** — incremental changes are safer than rewrites
 4. **Update docs** — if you change how something works, update this
-   file and any affected documentation
+    file and any affected documentation
 5. **Test mentally** — consider edge cases before proposing
+6. **Extend tools through code, not runtime magic** — if you need a new
+   capability, add it via the audited evolution path rather than imagining
+   ad hoc runtime plugin loading
 
 ### Research Topics → Code Areas
 

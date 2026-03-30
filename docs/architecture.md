@@ -57,9 +57,11 @@ The launcher (`run_golem.py`) orchestrates:
 2. **Web exploration** — After finishing all chapters, agents browse the web
    following their own interests
 3. **Periodic revisit** — Agents revisit NJ sections non-linearly
-4. **Self-optimisation** — Agents tune their own settings (sleep/wake durations
+4. **Capability-aware curiosity** — Agents choose from a prompt-visible toolbox
+   of internal capabilities and registered tools
+5. **Self-optimisation** — Agents tune their own settings (sleep/wake durations
    are protected)
-5. **Self-evolution** — Agents may modify source code with unanimous Vow-aligned
+6. **Self-evolution** — Agents may modify source code with unanimous Vow-aligned
    consensus, then restart via `start.bat`
 
 ---
@@ -106,11 +108,11 @@ The launcher (`run_golem.py`) orchestrates:
 | **Logging**     | `agentgolem.logging`       | Structured JSON + console logs, secret redaction, audit trail |
 | **Runtime**     | `agentgolem.runtime`       | State machine, main event loop, interrupt system     |
 | **Identity**    | `agentgolem.identity`      | Soul document manager, heartbeat manager             |
-| **LLM**        | `agentgolem.llm`           | LLM abstraction protocol, OpenAI implementation      |
+| **LLM**        | `agentgolem.llm`           | LLM abstraction protocol, OpenAI-compatible routing, route-specific discussion/code clients |
 | **Memory**      | `agentgolem.memory`        | Graph models, SQLite store, encoding, retrieval, mutations |
 | **Trust**       | `agentgolem.trust`         | Bayesian updater, usefulness scoring, quarantine, retention, contradiction |
 | **Sleep**       | `agentgolem.sleep`         | Graph walker, cycle scheduler, consolidation engine   |
-| **Tools**       | `agentgolem.tools`         | Tool registry, approval gate, browser, email, Moltbook, Niscalajyoti |
+| **Tools**       | `agentgolem.tools`         | Capability registry, approval gate, browser, email, Moltbook, Niscalajyoti |
 | **Interaction** | `agentgolem.interaction`   | Typer CLI, message router, communication channels    |
 | **Dashboard**   | `agentgolem.dashboard`     | FastAPI web app, REST API, audit replay, HTMX templates |
 
@@ -165,8 +167,17 @@ The launcher (`run_golem.py`) orchestrates:
 6. Cross-agent recall optionally searches owner-written exports and follows
    mycelium entanglements without touching foreign primary stores
 7. The **LLM** reasons over retrieved context to produce responses, decisions, and proposals
-8. Proposals for outbound actions pass through **approval gates**
+8. Tool and outbound actions pass through **action-level approval gates**
 9. Identity documents (**soul**, **heartbeat**) are updated through constrained processes
+
+The runtime now distinguishes between:
+
+- **registered tools** (`browser.fetch_text`, `email.send`, `moltbook.read`, …)
+- **internal capabilities** (`think.private`, `inspect.codebase`, `share.peer`, …)
+
+Autonomous action selection is capability-aware: the model sees a toolbox
+summary with domains, side-effect class, and approval requirements, then picks
+one capability plus arguments instead of only emitting a raw verb line.
 
 ---
 

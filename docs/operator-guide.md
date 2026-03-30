@@ -64,8 +64,14 @@ control (listed in `.gitignore`). Copy `.env.example` as a starting point.
 
 | Variable              | Required | Description                                  |
 |-----------------------|----------|----------------------------------------------|
-| `OPENAI_API_KEY`      | Yes      | API key for the OpenAI LLM provider          |
-| `OPENAI_BASE_URL`     | No       | Override base URL (default: OpenAI endpoint)  |
+| `OPENAI_API_KEY`      | Yes      | Default API key for OpenAI-compatible traffic |
+| `OPENAI_BASE_URL`     | No       | Default OpenAI-compatible base URL            |
+| `DEEPSEEK_API_KEY`    | No       | Compatibility fallback key for discussion routing |
+| `DEEPSEEK_BASE_URL`   | No       | Compatibility fallback discussion base URL    |
+| `LLM_DISCUSSION_API_KEY` | No    | Route-specific discussion API key             |
+| `LLM_DISCUSSION_BASE_URL` | No   | Route-specific discussion base URL            |
+| `LLM_CODE_API_KEY`    | No       | Route-specific code API key                   |
+| `LLM_CODE_BASE_URL`   | No       | Route-specific code base URL                  |
 | `EMAIL_SMTP_HOST`     | No*      | SMTP server hostname                          |
 | `EMAIL_SMTP_PORT`     | No*      | SMTP server port (typically 587)              |
 | `EMAIL_SMTP_USER`     | No*      | SMTP username / sender address                |
@@ -117,7 +123,9 @@ sleep_dream_noise: 0.18                # Associative noise injected during dream
 
 # --- LLM ---
 llm_provider: "openai"                 # LLM backend (currently only openai)
-llm_model: "gpt-5"                     # Model name for completions
+llm_model: "gpt-5"                     # Legacy fallback discussion model
+llm_discussion_model: "deepseek-reasoner"  # Primary discussion / reflection model
+llm_code_model: "gpt-5.4"              # Primary code model
 
 # --- Logging ---
 log_level: "INFO"                      # DEBUG | INFO | WARNING | ERROR
@@ -409,8 +417,14 @@ If it's not loading, check that the council is running and try the next port
 
 ### LLM API errors / timeouts
 
-**Fix:** Check that `OPENAI_API_KEY` in `.env` is valid. Check `OPENAI_BASE_URL`
-if using a custom endpoint. Review `data/logs/activity.jsonl` for error details.
+**Fix:** Check the route you are actually using:
+
+- default OpenAI-compatible route → `OPENAI_API_KEY`, `OPENAI_BASE_URL`
+- discussion fallback route → `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`
+- explicit route overrides → `LLM_DISCUSSION_*` / `LLM_CODE_*`
+
+Review `data/logs/activity.jsonl` for error details and confirm the base URL is
+OpenAI-compatible (`.../v1` style endpoints are supported).
 
 ### Approval requests piling up
 

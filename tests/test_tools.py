@@ -1,6 +1,8 @@
 """Tests for the tool framework: Tool, ToolResult, ToolRegistry, ApprovalGate."""
+
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -8,7 +10,6 @@ import pytest
 
 from agentgolem.logging.audit import AuditLogger
 from agentgolem.tools.base import ApprovalGate, Tool, ToolRegistry, ToolResult
-
 
 # ── Concrete test tools ─────────────────────────────────────────────
 
@@ -34,6 +35,26 @@ class ApprovalTool(Tool):
     name = "danger"
     description = "Dangerous action requiring approval"
     requires_approval = True
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        return ToolResult(success=True, data=kwargs)
+
+
+class ActionApprovalTool(Tool):
+    name = "mailer"
+    description = "Action-level approval test tool"
+    supports_dry_run = True
+    supported_actions = ("send", "read")
+    action_descriptions = {
+        "send": "Send a message",
+        "read": "Read inbox messages",
+    }
+
+    def requires_approval_for(self, action: str) -> bool:
+        return action == "send"
+
+    def approval_action_name(self, action: str) -> str:
+        return f"mailer_{action}"
 
     async def execute(self, **kwargs: Any) -> ToolResult:
         return ToolResult(success=True, data=kwargs)
@@ -177,3 +198,36 @@ async def test_registry_invoke_requires_approval(registry: ToolRegistry) -> None
     assert result.success is True
     assert result.data["approval_pending"] is True
     assert "request_id" in result.data
+
+
+async def test_registry_action_level_approval() -> None:
+    data_dir = Path(tempfile.mkdtemp(prefix="tool-action-approval-"))
+    (data_dir / "logs").mkdir(exist_ok=True)
+    audit = AuditLogger(data_dir)
+    gate = ApprovalGate(data_dir / "approvals", required_actions=["mailer_send"])
+    reg = ToolRegistry(audit_logger=audit, approval_gate=gate)
+    reg.register(ActionApprovalTool())
+
+    result = await reg.invoke("mailer", action="send", message="hello")
+
+    assert result.success is True
+    assert result.data["approval_pending"] is True
+    assert result.data["approval_action"] == "mailer_send"
+    assert result.data["capability"] == "mailer.send"
+
+
+def test_registry_prompt_summary_and_capabilities() -> None:
+    data_dir = Path(tempfile.mkdtemp(prefix="tool-capability-summary-"))
+    (data_dir / "logs").mkdir(exist_ok=True)
+    audit = AuditLogger(data_dir)
+    reg = ToolRegistry(audit_logger=audit)
+    reg.register(ActionApprovalTool())
+
+    capabilities = reg.list_capabilities()
+    names = [spec.capability_name for spec in capabilities]
+
+    assert names == ["mailer.read", "mailer.send"]
+    summary = reg.prompt_summary()
+    assert "mailer.send" in summary
+    assert "approval=mailer_send" in summary
+    assert "dry_run" in summary

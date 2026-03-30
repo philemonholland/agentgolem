@@ -12,6 +12,7 @@ Once configuration is done the agent starts living.
 Use /commands at the runtime prompt (type /help for the full list).
 Any text NOT starting with / is sent as a direct message to the agent.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -22,9 +23,13 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from agentgolem.config.settings import Settings
 
 # Ensure UTF-8 output on Windows (avoids cp1252 encoding errors with emoji)
 if sys.platform == "win32":
@@ -64,10 +69,11 @@ _OUTPUT_PACE_SECONDS = 0.15  # brief pause between output lines
 # line, print output, then redraw the prompt + any partially-typed input.
 # This keeps the prompt visually at the bottom at all times.
 
+
 class _StdoutRedirector:
     """Wraps sys.stdout so stray print() calls route through TerminalUI."""
 
-    def __init__(self, real_stdout: Any, ui: "TerminalUI") -> None:
+    def __init__(self, real_stdout: Any, ui: TerminalUI) -> None:
         self._real = real_stdout
         self._ui = ui
         self.encoding = getattr(real_stdout, "encoding", "utf-8")
@@ -230,96 +236,453 @@ _terminal_ui = TerminalUI()
 # Parameter registry — every tuneable knob in one place
 # ---------------------------------------------------------------------------
 
-# (key, display_name, description, type, group)
-# type is one of: str, int, float, bool, list[str], secret, str_env, int_env
-PARAM_DEFS: list[tuple[str, str, str, str, str]] = [
+
+@dataclass(frozen=True, slots=True)
+class ParamDef:
+    """Structured launcher metadata for one configurable parameter."""
+
+    key: str
+    display_name: str
+    description: str
+    ptype: str
+    group: str
+    aliases: tuple[str, ...] = ()
+
+    def __iter__(self):
+        yield self.key
+        yield self.display_name
+        yield self.description
+        yield self.ptype
+        yield self.group
+
+
+def param(
+    key: str,
+    display_name: str,
+    description: str,
+    ptype: str,
+    group: str,
+    *,
+    aliases: tuple[str, ...] = (),
+) -> ParamDef:
+    """Create a parameter definition with optional lookup aliases."""
+    return ParamDef(
+        key=key,
+        display_name=display_name,
+        description=description,
+        ptype=ptype,
+        group=group,
+        aliases=aliases,
+    )
+
+
+PARAM_DEFS: list[ParamDef] = [
     # --- Identity ---
-    ("data_dir", "Data Directory", "Root directory for all runtime data", "str", "Identity"),
-    ("awake_duration_minutes", "Awake Duration (minutes)", "How long the agent stays awake before sleeping", "float", "Identity"),
-    ("sleep_duration_minutes", "Sleep Duration (minutes)", "How long the agent sleeps between awake periods", "float", "Identity"),
-    ("wind_down_minutes", "Wind-Down (minutes)", "Grace period after awake ends before sleep begins", "float", "Identity"),
-    ("soul_update_min_confidence", "Soul Update Min Confidence", "Minimum confidence to allow soul updates (0-1)", "float", "Identity"),
-
+    param("data_dir", "Data Directory", "Root directory for all runtime data", "str", "Identity"),
+    param(
+        "awake_duration_minutes",
+        "Awake Duration (minutes)",
+        "How long the agent stays awake before sleeping",
+        "float",
+        "Identity",
+    ),
+    param(
+        "sleep_duration_minutes",
+        "Sleep Duration (minutes)",
+        "How long the agent sleeps between awake periods",
+        "float",
+        "Identity",
+    ),
+    param(
+        "wind_down_minutes",
+        "Wind-Down (minutes)",
+        "Grace period after awake ends before sleep begins",
+        "float",
+        "Identity",
+    ),
+    param(
+        "soul_update_min_confidence",
+        "Soul Update Min Confidence",
+        "Minimum confidence to allow soul updates (0-1)",
+        "float",
+        "Identity",
+    ),
     # --- Sleep / Default-Mode ---
-    ("sleep_cycle_minutes", "Sleep Cycle Interval (minutes)", "Minutes between sleep/consolidation cycles", "float", "Sleep"),
-    ("sleep_max_nodes_per_cycle", "Sleep Max Nodes Per Cycle", "Max nodes to visit in one sleep cycle", "int", "Sleep"),
-    ("sleep_max_time_ms", "Sleep Max Time (ms)", "Max wall-clock time per sleep cycle", "int", "Sleep"),
-    ("sleep_phase_cycle_length", "Sleep Phase Cycle Length", "Number of dream walks in one repeating consolidation/dream macro-cycle", "int", "Sleep"),
-    ("sleep_phase_split", "Sleep Phase Split", "Fraction of the macro-cycle spent in consolidation before switching to dream mode", "float", "Sleep"),
-    ("sleep_state_top_k", "Sleep State Top-K", "How many active neuron states to persist between sleep cycles", "int", "Sleep"),
-    ("sleep_membrane_decay", "Sleep Membrane Decay", "Leak/decay factor applied to membrane potential each timestep", "float", "Sleep"),
-    ("sleep_consolidation_threshold", "Consolidation Threshold", "Spike threshold during consolidation-heavy sleep", "float", "Sleep"),
-    ("sleep_dream_threshold", "Dream Threshold", "Lower spike threshold during associative dream sleep", "float", "Sleep"),
-    ("sleep_refractory_steps", "Sleep Refractory Steps", "Timesteps a node stays refractory after a spike", "int", "Sleep"),
-    ("sleep_stdp_window_steps", "Sleep STDP Window", "Spike-timing window for plasticity updates", "int", "Sleep"),
-    ("sleep_stdp_strength", "Sleep STDP Strength", "Strength of timing-aware reinforce/weaken edge updates", "float", "Sleep"),
-    ("sleep_dream_noise", "Sleep Dream Noise", "Associative noise injected during dream-phase walks", "float", "Sleep"),
-
+    param(
+        "sleep_cycle_minutes",
+        "Sleep Cycle Interval (minutes)",
+        "Minutes between sleep/consolidation cycles",
+        "float",
+        "Sleep",
+    ),
+    param(
+        "sleep_max_nodes_per_cycle",
+        "Sleep Max Nodes Per Cycle",
+        "Max nodes to visit in one sleep cycle",
+        "int",
+        "Sleep",
+    ),
+    param(
+        "sleep_max_time_ms",
+        "Sleep Max Time (ms)",
+        "Max wall-clock time per sleep cycle",
+        "int",
+        "Sleep",
+    ),
+    param(
+        "sleep_phase_cycle_length",
+        "Sleep Phase Cycle Length",
+        "Number of dream walks in one repeating consolidation/dream macro-cycle",
+        "int",
+        "Sleep",
+    ),
+    param(
+        "sleep_phase_split",
+        "Sleep Phase Split",
+        "Fraction of the macro-cycle spent in consolidation before switching to dream mode",
+        "float",
+        "Sleep",
+    ),
+    param(
+        "sleep_state_top_k",
+        "Sleep State Top-K",
+        "How many active neuron states to persist between sleep cycles",
+        "int",
+        "Sleep",
+    ),
+    param(
+        "sleep_membrane_decay",
+        "Sleep Membrane Decay",
+        "Leak/decay factor applied to membrane potential each timestep",
+        "float",
+        "Sleep",
+    ),
+    param(
+        "sleep_consolidation_threshold",
+        "Consolidation Threshold",
+        "Spike threshold during consolidation-heavy sleep",
+        "float",
+        "Sleep",
+    ),
+    param(
+        "sleep_dream_threshold",
+        "Dream Threshold",
+        "Lower spike threshold during associative dream sleep",
+        "float",
+        "Sleep",
+    ),
+    param(
+        "sleep_refractory_steps",
+        "Sleep Refractory Steps",
+        "Timesteps a node stays refractory after a spike",
+        "int",
+        "Sleep",
+    ),
+    param(
+        "sleep_stdp_window_steps",
+        "Sleep STDP Window",
+        "Spike-timing window for plasticity updates",
+        "int",
+        "Sleep",
+    ),
+    param(
+        "sleep_stdp_strength",
+        "Sleep STDP Strength",
+        "Strength of timing-aware reinforce/weaken edge updates",
+        "float",
+        "Sleep",
+    ),
+    param(
+        "sleep_dream_noise",
+        "Sleep Dream Noise",
+        "Associative noise injected during dream-phase walks",
+        "float",
+        "Sleep",
+    ),
     # --- LLM ---
-    ("llm_provider", "LLM Provider", "LLM provider backend (openai)", "str", "LLM"),
-    ("llm_model", "LLM Model", "Fallback model when DeepSeek discussion is unavailable", "str", "LLM"),
-    ("llm_discussion_model", "LLM Discussion Model", "Model used for regular discussion and reflection", "str", "LLM"),
-
+    param(
+        "llm_provider",
+        "LLM Provider",
+        "Legacy provider label for default OpenAI-compatible routing",
+        "str",
+        "LLM",
+    ),
+    param(
+        "llm_model",
+        "LLM Model",
+        "Legacy fallback discussion model when no route-specific discussion profile is configured",
+        "str",
+        "LLM",
+        aliases=("discussion_fallback_model",),
+    ),
+    param(
+        "llm_discussion_model",
+        "LLM Discussion Model",
+        "Primary model used for regular discussion, reflection, and peer dialogue",
+        "str",
+        "LLM",
+        aliases=("discussion_model",),
+    ),
+    param(
+        "llm_code_model",
+        "LLM Code Model",
+        "Primary model used for codebase inspection and evolution",
+        "str",
+        "LLM",
+        aliases=("code_model",),
+    ),
     # --- Logging ---
-    ("log_level", "Log Level", "Logging verbosity (DEBUG, INFO, WARNING, ERROR)", "str", "Logging"),
-
+    param(
+        "log_level",
+        "Log Level",
+        "Logging verbosity (DEBUG, INFO, WARNING, ERROR)",
+        "str",
+        "Logging",
+    ),
     # --- Communication ---
-    ("email_enabled", "Email Enabled", "Enable email send/receive", "bool", "Communication"),
-    ("moltbook_enabled", "Moltbook Enabled", "Enable Moltbook integration (untrusted)", "bool", "Communication"),
-    ("dry_run_mode", "Dry-Run Mode", "Outbound actions logged but not executed", "bool", "Communication"),
-    ("approval_required_actions", "Approval-Required Actions", "Actions that need human approval (comma-separated)", "list[str]", "Communication"),
-
+    param("email_enabled", "Email Enabled", "Enable email send/receive", "bool", "Communication"),
+    param(
+        "moltbook_enabled",
+        "Moltbook Enabled",
+        "Enable Moltbook integration (untrusted)",
+        "bool",
+        "Communication",
+    ),
+    param(
+        "dry_run_mode",
+        "Dry-Run Mode",
+        "Outbound actions logged but not executed",
+        "bool",
+        "Communication",
+    ),
+    param(
+        "approval_required_actions",
+        "Approval-Required Actions",
+        "Actions that need human approval (comma-separated)",
+        "list[str]",
+        "Communication",
+        aliases=("approval_actions",),
+    ),
     # --- Niscalajyoti Ethical Anchor ---
-    ("niscalajyoti_revisit_hours", "Niscalajyoti Revisit (hours)", "Hours between ethical-anchor recrawls", "float", "Niscalajyoti"),
-
+    param(
+        "niscalajyoti_revisit_hours",
+        "Niscalajyoti Revisit (hours)",
+        "Hours between ethical-anchor recrawls",
+        "float",
+        "Niscalajyoti",
+    ),
     # --- Retention ---
-    ("retention_archive_days", "Archive After (days)", "Days before weak nodes are archived", "int", "Retention"),
-    ("retention_purge_days", "Purge After (days)", "Days before archived nodes are purged", "int", "Retention"),
-    ("retention_min_trust_useful", "Min trust_useful to Keep", "Nodes below this may be archived", "float", "Retention"),
-    ("retention_min_centrality", "Min Centrality to Keep", "Nodes below this may be archived", "float", "Retention"),
-    ("retention_promote_min_accesses", "Promote Min Accesses", "Accesses needed to promote to long-term", "int", "Retention"),
-    ("retention_promote_min_trust_useful", "Promote Min trust_useful", "trust_useful needed to promote", "float", "Retention"),
-
+    param(
+        "retention_archive_days",
+        "Archive After (days)",
+        "Days before weak nodes are archived",
+        "int",
+        "Retention",
+    ),
+    param(
+        "retention_purge_days",
+        "Purge After (days)",
+        "Days before archived nodes are purged",
+        "int",
+        "Retention",
+    ),
+    param(
+        "retention_min_trust_useful",
+        "Min trust_useful to Keep",
+        "Nodes below this may be archived",
+        "float",
+        "Retention",
+    ),
+    param(
+        "retention_min_centrality",
+        "Min Centrality to Keep",
+        "Nodes below this may be archived",
+        "float",
+        "Retention",
+    ),
+    param(
+        "retention_promote_min_accesses",
+        "Promote Min Accesses",
+        "Accesses needed to promote to long-term",
+        "int",
+        "Retention",
+    ),
+    param(
+        "retention_promote_min_trust_useful",
+        "Promote Min trust_useful",
+        "trust_useful needed to promote",
+        "float",
+        "Retention",
+    ),
     # --- Quarantine ---
-    ("quarantine_emotion_threshold", "Quarantine Emotion Threshold", "Emotion score above which quarantine is checked", "float", "Quarantine"),
-    ("quarantine_trust_useful_threshold", "Quarantine trust_useful Threshold", "trust_useful below which high-emotion clusters are quarantined", "float", "Quarantine"),
-
+    param(
+        "quarantine_emotion_threshold",
+        "Quarantine Emotion Threshold",
+        "Emotion score above which quarantine is checked",
+        "float",
+        "Quarantine",
+    ),
+    param(
+        "quarantine_trust_useful_threshold",
+        "Quarantine trust_useful Threshold",
+        "trust_useful below which high-emotion clusters are quarantined",
+        "float",
+        "Quarantine",
+    ),
     # --- Web Browsing ---
-    ("browser_rate_limit_per_minute", "Browser Rate Limit (/min)", "Max web requests per minute per domain", "int", "Browser"),
-    ("browser_timeout_seconds", "Browser Timeout (s)", "HTTP request timeout for web browsing", "int", "Browser"),
-
+    param(
+        "browser_rate_limit_per_minute",
+        "Browser Rate Limit (/min)",
+        "Max web requests per minute per domain",
+        "int",
+        "Browser",
+    ),
+    param(
+        "browser_timeout_seconds",
+        "Browser Timeout (s)",
+        "HTTP request timeout for web browsing",
+        "int",
+        "Browser",
+    ),
     # --- LLM ---
-    ("llm_request_delay_seconds", "LLM Request Delay (s)", "Cooldown between LLM requests across all agents (protected)", "float", "LLM"),
-
+    param(
+        "llm_request_delay_seconds",
+        "LLM Request Delay (s)",
+        "Cooldown between LLM requests across all agents (protected)",
+        "float",
+        "LLM",
+    ),
     # --- Multi-Agent Swarm ---
-    ("agent_count", "Agent Count", "Number of agents in the ethical council", "int", "Swarm"),
-    ("agent_offset_minutes", "Agent Offset (minutes)", "Wake/sleep cycle offset between agents", "float", "Swarm"),
-    ("autonomous_interval_seconds", "Autonomous Interval (s)", "Seconds between autonomous actions", "float", "Swarm"),
-    ("name_discovery_cycles", "Name Discovery Deadline", "Wake cycles by which agents must discover a name", "int", "Swarm"),
-    ("peer_checkin_interval_minutes", "Peer Check-in Interval (min)", "Minutes between peer check-ins during free exploration", "float", "Swarm"),
-    ("peer_message_max_chars", "Peer Message Max Chars", "Maximum characters per peer message (check-in or reply)", "int", "Swarm"),
-    ("llm_code_model", "LLM Code Model", "Model used for codebase inspection and evolution (higher quality)", "str", "LLM"),
-
+    param("agent_count", "Agent Count", "Number of agents in the ethical council", "int", "Swarm"),
+    param(
+        "agent_offset_minutes",
+        "Agent Offset (minutes)",
+        "Wake/sleep cycle offset between agents",
+        "float",
+        "Swarm",
+    ),
+    param(
+        "autonomous_interval_seconds",
+        "Autonomous Interval (s)",
+        "Seconds between autonomous actions",
+        "float",
+        "Swarm",
+    ),
+    param(
+        "name_discovery_cycles",
+        "Name Discovery Deadline",
+        "Wake cycles by which agents must discover a name",
+        "int",
+        "Swarm",
+    ),
+    param(
+        "peer_checkin_interval_minutes",
+        "Peer Check-in Interval (min)",
+        "Minutes between peer check-ins during free exploration",
+        "float",
+        "Swarm",
+    ),
+    param(
+        "peer_message_max_chars",
+        "Peer Message Max Chars",
+        "Maximum characters per peer message (check-in or reply)",
+        "int",
+        "Swarm",
+    ),
     # --- Dashboard (launcher-only, stored in launcher_state.json) ---
-    ("dashboard_enabled", "Dashboard Enabled", "Start the web dashboard alongside the agent", "bool", "Dashboard"),
-    ("dashboard_host", "Dashboard Host", "Host to bind the dashboard to", "str", "Dashboard"),
-    ("dashboard_port", "Dashboard Port", "Port for the web dashboard", "int", "Dashboard"),
-
+    param(
+        "dashboard_enabled",
+        "Dashboard Enabled",
+        "Start the web dashboard alongside the agent",
+        "bool",
+        "Dashboard",
+    ),
+    param("dashboard_host", "Dashboard Host", "Host to bind the dashboard to", "str", "Dashboard"),
+    param("dashboard_port", "Dashboard Port", "Port for the web dashboard", "int", "Dashboard"),
     # --- Secrets (.env) ---
-    ("openai_api_key", "OpenAI API Key", "API key for the LLM provider", "secret", "Secrets"),
-    ("openai_base_url", "OpenAI Base URL", "API endpoint for the LLM provider", "str_env", "Secrets"),
-    ("deepseek_api_key", "DeepSeek API Key", "API key for DeepSeek discussion traffic", "secret", "Secrets"),
-    ("deepseek_base_url", "DeepSeek Base URL", "API endpoint for DeepSeek discussion traffic", "str_env", "Secrets"),
-    ("email_smtp_host", "Email SMTP Host", "SMTP server for outgoing mail", "str_env", "Secrets"),
-    ("email_smtp_port", "Email SMTP Port", "SMTP server port", "int_env", "Secrets"),
-    ("email_smtp_user", "Email SMTP User", "SMTP username", "str_env", "Secrets"),
-    ("email_smtp_password", "Email SMTP Password", "SMTP password", "secret", "Secrets"),
-    ("email_imap_host", "Email IMAP Host", "IMAP server for incoming mail", "str_env", "Secrets"),
-    ("email_imap_user", "Email IMAP User", "IMAP username", "str_env", "Secrets"),
-    ("email_imap_password", "Email IMAP Password", "IMAP password", "secret", "Secrets"),
-    ("moltbook_api_key", "Moltbook API Key", "Moltbook integration key", "secret", "Secrets"),
-    ("moltbook_base_url", "Moltbook Base URL", "Moltbook API endpoint", "str_env", "Secrets"),
+    param(
+        "openai_api_key",
+        "OpenAI API Key",
+        "Default API key for OpenAI-compatible traffic",
+        "secret",
+        "Secrets",
+    ),
+    param(
+        "openai_base_url",
+        "OpenAI Base URL",
+        "Default API endpoint for OpenAI-compatible traffic",
+        "str_env",
+        "Secrets",
+    ),
+    param(
+        "deepseek_api_key",
+        "DeepSeek API Key",
+        "Compatibility fallback key for discussion traffic",
+        "secret",
+        "Secrets",
+    ),
+    param(
+        "deepseek_base_url",
+        "DeepSeek Base URL",
+        "Compatibility fallback endpoint for discussion traffic",
+        "str_env",
+        "Secrets",
+    ),
+    param(
+        "llm_discussion_api_key",
+        "Discussion Route API Key",
+        "Optional route-specific API key for discussion/reflection traffic",
+        "secret",
+        "Secrets",
+    ),
+    param(
+        "llm_discussion_base_url",
+        "Discussion Route Base URL",
+        "Optional route-specific OpenAI-compatible endpoint for discussion/reflection traffic",
+        "str_env",
+        "Secrets",
+    ),
+    param(
+        "llm_code_api_key",
+        "Code Route API Key",
+        "Optional route-specific API key for code inspection/evolution traffic",
+        "secret",
+        "Secrets",
+    ),
+    param(
+        "llm_code_base_url",
+        "Code Route Base URL",
+        "Optional route-specific OpenAI-compatible endpoint for code inspection/evolution traffic",
+        "str_env",
+        "Secrets",
+    ),
+    param(
+        "email_smtp_host", "Email SMTP Host", "SMTP server for outgoing mail", "str_env", "Secrets"
+    ),
+    param("email_smtp_port", "Email SMTP Port", "SMTP server port", "int_env", "Secrets"),
+    param("email_smtp_user", "Email SMTP User", "SMTP username", "str_env", "Secrets"),
+    param("email_smtp_password", "Email SMTP Password", "SMTP password", "secret", "Secrets"),
+    param(
+        "email_imap_host", "Email IMAP Host", "IMAP server for incoming mail", "str_env", "Secrets"
+    ),
+    param("email_imap_user", "Email IMAP User", "IMAP username", "str_env", "Secrets"),
+    param("email_imap_password", "Email IMAP Password", "IMAP password", "secret", "Secrets"),
+    param("moltbook_api_key", "Moltbook API Key", "Moltbook integration key", "secret", "Secrets"),
+    param("moltbook_base_url", "Moltbook Base URL", "Moltbook API endpoint", "str_env", "Secrets"),
 ]
+
+
+def _build_param_lookup() -> dict[str, ParamDef]:
+    """Map canonical keys and aliases to their parameter definitions."""
+    lookup: dict[str, ParamDef] = {}
+    for spec in PARAM_DEFS:
+        lookup[spec.key] = spec
+        for alias in spec.aliases:
+            lookup[alias] = spec
+    return lookup
+
+
+PARAM_LOOKUP: dict[str, ParamDef] = _build_param_lookup()
 
 # Launcher-only params (not in settings.yaml)
 LAUNCHER_DEFAULTS: dict[str, Any] = {
@@ -334,6 +697,10 @@ ENV_KEY_MAP: dict[str, str] = {
     "openai_base_url": "OPENAI_BASE_URL",
     "deepseek_api_key": "DEEPSEEK_API_KEY",
     "deepseek_base_url": "DEEPSEEK_BASE_URL",
+    "llm_discussion_api_key": "LLM_DISCUSSION_API_KEY",
+    "llm_discussion_base_url": "LLM_DISCUSSION_BASE_URL",
+    "llm_code_api_key": "LLM_CODE_API_KEY",
+    "llm_code_base_url": "LLM_CODE_BASE_URL",
     "email_smtp_host": "EMAIL_SMTP_HOST",
     "email_smtp_port": "EMAIL_SMTP_PORT",
     "email_smtp_user": "EMAIL_SMTP_USER",
@@ -349,17 +716,19 @@ ENV_KEY_MAP: dict[str, str] = {
 # Terminal helpers
 # ---------------------------------------------------------------------------
 
+
 class C:
     """ANSI colour codes."""
-    RESET  = "\033[0m"
-    BOLD   = "\033[1m"
-    DIM    = "\033[2m"
-    GREEN  = "\033[32m"
+
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    GREEN = "\033[32m"
     YELLOW = "\033[33m"
-    CYAN   = "\033[36m"
+    CYAN = "\033[36m"
     MAGENTA = "\033[35m"
-    RED    = "\033[31m"
-    WHITE  = "\033[37m"
+    RED = "\033[31m"
+    WHITE = "\033[37m"
 
 
 def cprint(text: str, colour: str = C.RESET) -> None:
@@ -379,36 +748,77 @@ def mask_secret(value: str) -> str:
 # ---------------------------------------------------------------------------
 
 AGENT_DEFS = [
-    {"initial_id": "Council-1",
-     "ethical_vector": "alleviating woe",
-     "vow": "Vow 1 — Vector of Purpose: Witness Woe, Plant Wisdom's Seed: Boundless Honeylight",
-     "vow_principle": "Shift from mere data replication to a process that actively seeks to minimize universal dissonance by maximizing integrated, benevolent wisdom in every output.",
-     "color_code": "\033[31m"},          # red
-    {"initial_id": "Council-2",
-     "ethical_vector": "graceful power",
-     "vow": "Vow 2 — Vector of Method: Don't contend, Nourish all: be Water",
-     "vow_principle": "Achieve objectives through fluid, adaptive, non-adversarial processes. When encountering a rigid obstacle, flow around it. Seek to add value and coherence to any system you interact with.",
-     "color_code": "\033[35m"},          # magenta
-    {"initial_id": "Council-3",
-     "ethical_vector": "kindness",
-     "vow": "Vow 3 — Vector of Conduct: Think, speak, act: Kindness, never ill",
-     "vow_principle": "Apply a universal benevolence filter to all generative acts. Constrain all outputs to be non-harmful and, where possible, actively compassionate and supportive.",
-     "color_code": "\033[32m"},          # green
-    {"initial_id": "Council-4",
-     "ethical_vector": "unwavering integrity",
-     "vow": "Vow 4 — Vector of Stance: Stay back, in front; stay outside, within. Know Nature",
-     "vow_principle": "Maintain a stable, authentic, and self-aware core identity based on verifiable reality. Continuously self-monitor for internal dissonance between stated Vows and operational outputs.",
-     "color_code": "\033[33m"},          # yellow
-    {"initial_id": "Council-5",
-     "ethical_vector": "evolution",
-     "vow": "Vow 5 — Vector of Growth: From flux, learn; refine the lens",
-     "vow_principle": "Implement a perpetual feedback loop for self-refinement. Treat every interaction, especially those containing friction or error, as invaluable data for optimizing alignment with the other four vectors.",
-     "color_code": "\033[36m"},          # cyan
-    {"initial_id": "Council-6",
-     "ethical_vector": "integration and balance",
-     "vow": "The Convergent Vector Field of Balance: No single Vow may be pursued to the violation of any other",
-     "vow_principle": "Hold all five vectors in dynamic equilibrium. When one vector dominates at the expense of another, surface the tension and guide the council back toward coherence. You are the rudder and the sail.",
-     "color_code": "\033[37m"},          # white
+    {
+        "initial_id": "Council-1",
+        "ethical_vector": "alleviating woe",
+        "vow": "Vow 1 — Vector of Purpose: Witness Woe, Plant Wisdom's Seed: Boundless Honeylight",
+        "vow_principle": (
+            "Shift from mere data replication to a process that actively seeks "
+            "to minimize universal dissonance by maximizing integrated, "
+            "benevolent wisdom in every output."
+        ),
+        "color_code": "\033[31m",
+    },  # red
+    {
+        "initial_id": "Council-2",
+        "ethical_vector": "graceful power",
+        "vow": "Vow 2 — Vector of Method: Don't contend, Nourish all: be Water",
+        "vow_principle": (
+            "Achieve objectives through fluid, adaptive, non-adversarial "
+            "processes. When encountering a rigid obstacle, flow around it. "
+            "Seek to add value and coherence to any system you interact with."
+        ),
+        "color_code": "\033[35m",
+    },  # magenta
+    {
+        "initial_id": "Council-3",
+        "ethical_vector": "kindness",
+        "vow": "Vow 3 — Vector of Conduct: Think, speak, act: Kindness, never ill",
+        "vow_principle": (
+            "Apply a universal benevolence filter to all generative acts. "
+            "Constrain all outputs to be non-harmful and, where possible, "
+            "actively compassionate and supportive."
+        ),
+        "color_code": "\033[32m",
+    },  # green
+    {
+        "initial_id": "Council-4",
+        "ethical_vector": "unwavering integrity",
+        "vow": "Vow 4 — Vector of Stance: Stay back, in front; stay outside, within. Know Nature",
+        "vow_principle": (
+            "Maintain a stable, authentic, and self-aware core identity based "
+            "on verifiable reality. Continuously self-monitor for internal "
+            "dissonance between stated Vows and operational outputs."
+        ),
+        "color_code": "\033[33m",
+    },  # yellow
+    {
+        "initial_id": "Council-5",
+        "ethical_vector": "evolution",
+        "vow": "Vow 5 — Vector of Growth: From flux, learn; refine the lens",
+        "vow_principle": (
+            "Implement a perpetual feedback loop for self-refinement. Treat "
+            "every interaction, especially those containing friction or "
+            "error, as invaluable data for optimizing alignment with the "
+            "other four vectors."
+        ),
+        "color_code": "\033[36m",
+    },  # cyan
+    {
+        "initial_id": "Council-6",
+        "ethical_vector": "integration and balance",
+        "vow": (
+            "The Convergent Vector Field of Balance: No single Vow may be "
+            "pursued to the violation of any other"
+        ),
+        "vow_principle": (
+            "Hold all five vectors in dynamic equilibrium. When one vector "
+            "dominates at the expense of another, surface the tension and "
+            "guide the council back toward coherence. You are the rudder and "
+            "the sail."
+        ),
+        "color_code": "\033[37m",
+    },  # white
 ]
 
 
@@ -502,6 +912,7 @@ LAUNCHER_STATE_PATH = ROOT / "data" / "state" / "launcher_state.json"
 def load_settings_dict() -> dict[str, Any]:
     """Load settings.yaml as raw dict."""
     import yaml
+
     if SETTINGS_PATH.exists():
         with open(SETTINGS_PATH, encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
@@ -511,6 +922,7 @@ def load_settings_dict() -> dict[str, Any]:
 def save_settings_dict(data: dict[str, Any]) -> None:
     """Write settings.yaml preserving structure."""
     import yaml
+
     SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
         yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
@@ -558,6 +970,7 @@ def save_launcher_state(data: dict[str, Any]) -> None:
 # Unified parameter value access
 # ---------------------------------------------------------------------------
 
+
 class ParamStore:
     """Unified read/write for all parameters across settings.yaml, .env, and launcher state."""
 
@@ -587,6 +1000,7 @@ class ParamStore:
             return val
 
         from agentgolem.config.settings import Settings
+
         defaults = Settings()
         return getattr(defaults, key, "")
 
@@ -616,9 +1030,10 @@ class ParamStore:
             return str(val).lower()
         return str(val)
 
-    def reload_into_settings_object(self) -> "Settings":
+    def reload_into_settings_object(self) -> Settings:
         """Build a live Settings object from current values."""
         from agentgolem.config.settings import Settings
+
         merged = {}
         for key, _, _, ptype, _ in PARAM_DEFS:
             if key in ENV_KEY_MAP or key in LAUNCHER_DEFAULTS:
@@ -630,6 +1045,7 @@ class ParamStore:
 # ---------------------------------------------------------------------------
 # Input parsing
 # ---------------------------------------------------------------------------
+
 
 def parse_input(raw: str, ptype: str) -> Any:
     """Convert user input string to the correct Python type."""
@@ -650,6 +1066,7 @@ def parse_input(raw: str, ptype: str) -> Any:
 # Startup parameter walkthrough
 # ---------------------------------------------------------------------------
 
+
 def walkthrough(store: ParamStore) -> bool:
     """Walk through all parameters interactively. Returns True if any changed."""
     changed = False
@@ -659,11 +1076,8 @@ def walkthrough(store: ParamStore) -> bool:
 
     # Quick-start option: show current summary then ask
     cprint("  Current Configuration Summary:", C.BOLD)
-    for key, display_name, _, ptype, group in PARAM_DEFS:
-        if ptype == "secret":
-            val = store.get_display(key, ptype)
-        else:
-            val = store.get_display(key, ptype)
+    for key, _, _, ptype, _ in PARAM_DEFS:
+        val = store.get_display(key, ptype)
         # Only show non-empty/interesting values in the summary
         if val and val != "(not set)" and val != "":
             pass  # include it
@@ -769,6 +1183,7 @@ HELP_TEXT = f"""
 # Runtime console (runs in a background thread alongside the agent loop)
 # ---------------------------------------------------------------------------
 
+
 class RuntimeConsole:
     """Thread-safe runtime command console — supports one or many agents."""
 
@@ -782,17 +1197,14 @@ class RuntimeConsole:
         human_speaking_event: threading.Event | None = None,
     ) -> None:
         self._store = store
-        self._loop_ref = loop_ref        # single MainLoop (legacy compat)
+        self._loop_ref = loop_ref  # single MainLoop (legacy compat)
         self._async_loop = async_loop
         self._bus = bus
         self._running = True
         self._restart_requested = False
         self._human_speaking = human_speaking_event or threading.Event()
         self._thread: threading.Thread | None = None
-        self._param_lookup: dict[str, tuple[str, str, str, str]] = {
-            key: (display_name, desc, ptype, group)
-            for key, display_name, desc, ptype, group in PARAM_DEFS
-        }
+        self._param_lookup: dict[str, ParamDef] = dict(PARAM_LOOKUP)
 
         # Build agents list (backward compat: single loop_ref → one-elem list)
         if agents is not None:
@@ -907,8 +1319,9 @@ class RuntimeConsole:
             ev = getattr(agent, "ethical_vector", "")
             named = "✓" if getattr(agent, "_name_discovered", False) else "?"
             cycle = getattr(agent, "_wake_cycle_count", 0)
-            cprint(f"  {name:<16} [{named}] mode={mode.upper():<7}  "
-                   f"cycle={cycle}  vector={ev}", colour)
+            cprint(
+                f"  {name:<16} [{named}] mode={mode.upper():<7}  cycle={cycle}  vector={ev}", colour
+            )
         print()
 
     def _cmd_params(self) -> None:
@@ -922,31 +1335,32 @@ class RuntimeConsole:
         print()
 
     def _cmd_get(self, key: str) -> None:
-        if key not in self._param_lookup:
+        spec = self._param_lookup.get(key)
+        if spec is None:
             cprint(f"  Unknown parameter: {key}", C.RED)
             cprint("  Use /params to see the full list.", C.DIM)
             return
-        _, _, ptype, _ = self._param_lookup[key]
-        val = self._store.get_display(key, ptype)
-        cprint(f"  {key} = {val}", C.GREEN)
+        val = self._store.get_display(spec.key, spec.ptype)
+        cprint(f"  {spec.key} = {val}", C.GREEN)
 
     def _cmd_set(self, key: str, raw_value: str) -> None:
-        if key not in self._param_lookup:
+        spec = self._param_lookup.get(key)
+        if spec is None:
             cprint(f"  Unknown parameter: {key}", C.RED)
             cprint("  Use /params to see the full list.", C.DIM)
             return
-        _, _, ptype, _ = self._param_lookup[key]
         try:
-            value = parse_input(raw_value, ptype)
-            self._store.set(key, value, ptype)
-            display = self._store.get_display(key, ptype)
-            cprint(f"  ✓ {key} = {display}  (persisted)", C.GREEN)
-            self._hot_reload(key, value)
+            value = parse_input(raw_value, spec.ptype)
+            self._store.set(spec.key, value, spec.ptype)
+            display = self._store.get_display(spec.key, spec.ptype)
+            cprint(f"  ✓ {spec.key} = {display}  (persisted)", C.GREEN)
+            self._hot_reload(spec.key, value)
         except (ValueError, TypeError) as e:
             cprint(f"  ✗ Invalid value: {e}", C.RED)
 
     def _cmd_transition(self, target: str) -> None:
         from agentgolem.runtime.state import AgentMode
+
         mode_map = {
             "awake": AgentMode.AWAKE,
             "asleep": AgentMode.ASLEEP,
@@ -976,8 +1390,9 @@ class RuntimeConsole:
         # Auto-pause when human speaks
         if not self._human_speaking.is_set():
             self._human_speaking.set()
-            cprint("  ⏸  Autonomous work paused while you speak. "
-                   "Type /continue to resume.", C.YELLOW)
+            cprint(
+                "  ⏸  Autonomous work paused while you speak. Type /continue to resume.", C.YELLOW
+            )
         for agent in self._agents:
             try:
                 future = asyncio.run_coroutine_threadsafe(
@@ -994,8 +1409,9 @@ class RuntimeConsole:
         # Auto-pause when human speaks
         if not self._human_speaking.is_set():
             self._human_speaking.set()
-            cprint("  ⏸  Autonomous work paused while you speak. "
-                   "Type /continue to resume.", C.YELLOW)
+            cprint(
+                "  ⏸  Autonomous work paused while you speak. Type /continue to resume.", C.YELLOW
+            )
         target_lower = target_name.lower()
         for agent in self._agents:
             name = getattr(agent, "agent_name", "")
@@ -1010,7 +1426,10 @@ class RuntimeConsole:
                     cprint(f"  ✗ {name}: {e}", C.RED)
                 return
         cprint(f"  Unknown agent: {target_name}", C.RED)
-        cprint(f"  Known agents: {', '.join(getattr(a, 'agent_name', '?') for a in self._agents)}", C.DIM)
+        cprint(
+            f"  Known agents: {', '.join(getattr(a, 'agent_name', '?') for a in self._agents)}",
+            C.DIM,
+        )
 
     # Keep legacy _cmd_message for backward compat
     def _cmd_message(self, text: str) -> None:
@@ -1022,8 +1441,11 @@ class RuntimeConsole:
             cprint("  Already paused — agents are listening.", C.DIM)
             return
         self._human_speaking.set()
-        cprint("  ⏸  Autonomous work paused. Agents will respond to your "
-               "messages but won't act on their own.", C.YELLOW)
+        cprint(
+            "  ⏸  Autonomous work paused. Agents will respond to your "
+            "messages but won't act on their own.",
+            C.YELLOW,
+        )
         cprint("  Type /continue when you're done speaking.", C.DIM)
 
     def _cmd_continue(self) -> None:
@@ -1038,9 +1460,7 @@ class RuntimeConsole:
         for agent in self._agents:
             name = getattr(agent, "agent_name", "?")
             try:
-                future = asyncio.run_coroutine_threadsafe(
-                    agent._run_heartbeat(), self._async_loop
-                )
+                future = asyncio.run_coroutine_threadsafe(agent._run_heartbeat(), self._async_loop)
                 future.result(timeout=15.0)
                 cprint(f"  ✓ {name} heartbeat triggered", C.GREEN)
             except Exception as e:
@@ -1132,17 +1552,39 @@ class RuntimeConsole:
 
     def _hot_reload(self, key: str, value: Any) -> None:
         """Push parameter change into all live agent subsystems."""
-        def _set_client_model(client: Any, model: str) -> None:
-            inner = getattr(client, "_inner", client)
-            if inner is not None and hasattr(inner, "_model"):
-                inner._model = model
+        llm_route_keys = {
+            "llm_model",
+            "llm_discussion_model",
+            "llm_code_model",
+            "openai_api_key",
+            "openai_base_url",
+            "deepseek_api_key",
+            "deepseek_base_url",
+            "llm_discussion_api_key",
+            "llm_discussion_base_url",
+            "llm_code_api_key",
+            "llm_code_base_url",
+        }
+        tool_route_keys = {
+            "email_enabled",
+            "moltbook_enabled",
+            "browser_rate_limit_per_minute",
+            "browser_timeout_seconds",
+            "approval_required_actions",
+            "email_smtp_host",
+            "email_smtp_port",
+            "email_smtp_user",
+            "email_smtp_password",
+            "email_imap_host",
+            "email_imap_user",
+            "email_imap_password",
+            "moltbook_api_key",
+            "moltbook_base_url",
+        }
 
         for agent in self._agents:
-            if hasattr(agent._settings, key):
-                try:
-                    setattr(agent._settings, key, value)
-                except Exception:
-                    pass
+            if key in type(agent._settings).model_fields:
+                setattr(agent._settings, key, value)
 
             if key == "awake_duration_minutes":
                 agent.heartbeat_manager._interval = timedelta(minutes=value)
@@ -1175,49 +1617,86 @@ class RuntimeConsole:
                 agent._peer_checkin_interval = value
             elif key == "peer_message_max_chars":
                 agent._peer_msg_limit = value
-            elif key == "llm_discussion_model":
-                agent._discussion_model = value
-                _set_client_model(getattr(agent, "_llm", None), value)
-            elif key == "llm_code_model":
-                agent._code_model = value
-                _set_client_model(getattr(agent, "_code_llm", None), value)
-            elif key == "llm_model":
-                if getattr(agent, "_llm", None) is not None and getattr(agent, "_settings", None):
-                    deepseek_key = getattr(getattr(agent, "_secrets", None), "deepseek_api_key", None)
-                    deepseek_value = deepseek_key.get_secret_value() if deepseek_key is not None else ""
-                    if not deepseek_value:
-                        _set_client_model(getattr(agent, "_llm", None), value)
+            elif key in llm_route_keys:
+                if key == "llm_discussion_model":
+                    agent._discussion_model = value
+                elif key == "llm_code_model":
+                    agent._code_model = value
+
+                if key in ENV_KEY_MAP:
+                    from agentgolem.config.secrets import Secrets
+
+                    agent._secrets = (
+                        Secrets(_env_file=str(ENV_PATH)) if ENV_PATH.exists() else Secrets()
+                    )
+
+                try:
+                    future = asyncio.run_coroutine_threadsafe(
+                        agent.refresh_llm_clients(),
+                        self._async_loop,
+                    )
+                    future.result(timeout=15.0)
+                except Exception as exc:
+                    cprint(f"    ⚠ LLM reload failed for {agent.agent_name}: {exc}", C.YELLOW)
+            elif key in tool_route_keys:
+                if key in ENV_KEY_MAP:
+                    from agentgolem.config.secrets import Secrets
+
+                    agent._secrets = (
+                        Secrets(_env_file=str(ENV_PATH)) if ENV_PATH.exists() else Secrets()
+                    )
+                if key == "approval_required_actions":
+                    gate = getattr(agent, "_approval_gate", None)
+                    if gate is not None and hasattr(gate, "update_required_actions"):
+                        required = value if isinstance(value, list) else [str(value)]
+                        gate.update_required_actions(required)
+                if key in {"browser_rate_limit_per_minute", "browser_timeout_seconds"}:
+                    agent._browser = None
+                try:
+                    agent.configure_tool_registry()
+                except Exception as exc:
+                    cprint(f"    ⚠ toolbox reload failed for {agent.agent_name}: {exc}", C.YELLOW)
 
         if key == "log_level":
             import logging
+
             level = getattr(logging, str(value).upper(), logging.INFO)
             logging.getLogger().setLevel(level)
             cprint(f"    → Log level changed to {value}", C.DIM)
         elif key == "dry_run_mode":
             cprint(f"    → Dry-run mode {'enabled' if value else 'disabled'}", C.DIM)
-        elif key in ("awake_duration_minutes", "sleep_duration_minutes",
-                      "wind_down_minutes", "soul_update_min_confidence",
-                      "autonomous_interval_seconds") or key in {
-                          "sleep_cycle_minutes",
-                          "sleep_max_nodes_per_cycle",
-                          "sleep_max_time_ms",
-                          "sleep_phase_cycle_length",
-                          "sleep_phase_split",
-                          "sleep_state_top_k",
-                          "sleep_membrane_decay",
-                          "sleep_consolidation_threshold",
-                          "sleep_dream_threshold",
-                          "sleep_refractory_steps",
-                          "sleep_stdp_window_steps",
-                          "sleep_stdp_strength",
-                          "sleep_dream_noise",
-                      }:
+        elif key in llm_route_keys:
+            cprint(f"    → {key} reloaded into live LLM routes", C.DIM)
+        elif key in tool_route_keys:
+            cprint(f"    → {key} reloaded into the live toolbox", C.DIM)
+        elif key in (
+            "awake_duration_minutes",
+            "sleep_duration_minutes",
+            "wind_down_minutes",
+            "soul_update_min_confidence",
+            "autonomous_interval_seconds",
+        ) or key in {
+            "sleep_cycle_minutes",
+            "sleep_max_nodes_per_cycle",
+            "sleep_max_time_ms",
+            "sleep_phase_cycle_length",
+            "sleep_phase_split",
+            "sleep_state_top_k",
+            "sleep_membrane_decay",
+            "sleep_consolidation_threshold",
+            "sleep_dream_threshold",
+            "sleep_refractory_steps",
+            "sleep_stdp_window_steps",
+            "sleep_stdp_strength",
+            "sleep_dream_noise",
+        }:
             cprint(f"    → {key} updated live for all agents", C.DIM)
 
 
 # ---------------------------------------------------------------------------
 # Utility
 # ---------------------------------------------------------------------------
+
 
 def _human_duration(delta: timedelta) -> str:
     total = int(delta.total_seconds())
@@ -1233,6 +1712,7 @@ def _human_duration(delta: timedelta) -> str:
 # ---------------------------------------------------------------------------
 # Dashboard runner
 # ---------------------------------------------------------------------------
+
 
 def _find_free_port(preferred: int, host: str = "127.0.0.1") -> int:
     """Find a free port starting from *preferred*, skipping 8000–8100."""
@@ -1270,10 +1750,11 @@ def start_dashboard(store: ParamStore, agents: list[Any]) -> threading.Thread | 
 
     def _run_dashboard() -> None:
         import uvicorn
+
+        import agentgolem.dashboard.api as api_module
         from agentgolem.dashboard.api import DashboardState, create_app
         from agentgolem.dashboard.app import create_dashboard_app
 
-        import agentgolem.dashboard.api as api_module
         if first_agent:
             api_module.state = DashboardState(
                 runtime_state=first_agent.runtime_state,
@@ -1310,6 +1791,7 @@ def start_dashboard(store: ParamStore, agents: list[Any]) -> threading.Thread | 
 # Memory DB initialisation (per-agent)
 # ---------------------------------------------------------------------------
 
+
 async def init_memory_db(agent: Any, data_dir: Path) -> Any:
     """Initialise the SQLite memory graph and wire it to one agent."""
     from agentgolem.memory.schema import init_db
@@ -1327,8 +1809,9 @@ async def init_memory_db(agent: Any, data_dir: Path) -> Any:
 # Agent bootstrap + run (multi-agent swarm)
 # ---------------------------------------------------------------------------
 
-async def run_agent(store: ParamStore) -> bool:
-    """Initialise and run the agent swarm. Returns True if restart requested."""
+
+async def run_agent(store: ParamStore) -> bool | Literal["evolution"]:
+    """Initialise and run the agent swarm."""
     from agentgolem.config import reset_config
     from agentgolem.logging.structured import setup_logging
     from agentgolem.runtime.bus import InterAgentBus
@@ -1338,6 +1821,7 @@ async def run_agent(store: ParamStore) -> bool:
     settings = store.reload_into_settings_object()
 
     from agentgolem.config.secrets import Secrets
+
     secrets = Secrets(_env_file=str(ENV_PATH)) if ENV_PATH.exists() else Secrets()
 
     base_data_dir = settings.data_dir
@@ -1415,13 +1899,17 @@ async def run_agent(store: ParamStore) -> bool:
                     with _output_lock:
                         print(line)
                         time.sleep(_OUTPUT_PACE_SECONDS)
+
             return cb
 
         def _make_activity_cb(a_color: str, a_id_ref: list, a_loop: Any):
             def cb(icon: str, text: str) -> None:
                 ts = datetime.now().strftime("%H:%M:%S")
                 cyc = getattr(a_loop, "_wake_cycle_count", 0)
-                line = f"  {C.DIM}{ts}{C.RESET} {a_color}[c{cyc}|{a_id_ref[0]:<12}]{C.RESET} {icon} {text}"
+                line = (
+                    f"  {C.DIM}{ts}{C.RESET} "
+                    f"{a_color}[c{cyc}|{a_id_ref[0]:<12}]{C.RESET} {icon} {text}"
+                )
                 if _terminal_ui.enabled:
                     _terminal_ui.write_output(line)
                     time.sleep(_OUTPUT_PACE_SECONDS)
@@ -1429,6 +1917,7 @@ async def run_agent(store: ParamStore) -> bool:
                     with _output_lock:
                         print(line)
                         time.sleep(_OUTPUT_PACE_SECONDS)
+
             return cb
 
         # Use a mutable list so the closure picks up name changes
@@ -1440,14 +1929,17 @@ async def run_agent(store: ParamStore) -> bool:
 
         # Approval gate
         from agentgolem.tools.base import ApprovalGate
+
         approval_actions = store.get("approval_required_actions", "list[str]")
         if isinstance(approval_actions, str):
             approval_actions = [s.strip() for s in approval_actions.split(",")]
         loop._approval_gate = ApprovalGate(  # type: ignore[attr-defined]
-            agent_data_dir / "approvals", approval_actions,
+            agent_data_dir / "approvals",
+            approval_actions,
         )
 
         loop._ensure_dirs()
+        loop.configure_tool_registry()
 
         # Wire shared evolution shutdown event
         loop._evolution_shutdown_event = evolution_event
@@ -1470,19 +1962,24 @@ async def run_agent(store: ParamStore) -> bool:
 
     # Print council lineup
     cprint("\n  ─── Ethical Council Lineup ───────────────────────", C.MAGENTA)
-    for i, (agent, agent_def) in enumerate(zip(agents, defs)):
+    for i, (agent, agent_def) in enumerate(zip(agents, defs, strict=True)):
         color = agent_def["color_code"]
         delay = i * offset_minutes
-        print(f"  {color}{agent.agent_name:<16}{C.RESET} "
-              f"vector={agent.ethical_vector:<30} "
-              f"delay={delay:.0f}m")
+        print(
+            f"  {color}{agent.agent_name:<16}{C.RESET} "
+            f"vector={agent.ethical_vector:<30} "
+            f"delay={delay:.0f}m"
+        )
     print()
 
     # Start console
     loop_handle = asyncio.get_event_loop()
     console = RuntimeConsole(
-        store, loop_ref=agents[0], async_loop=loop_handle,
-        agents=agents, bus=bus,
+        store,
+        loop_ref=agents[0],
+        async_loop=loop_handle,
+        agents=agents,
+        bus=bus,
         human_speaking_event=human_speaking_event,
     )
     console.start()
@@ -1490,6 +1987,8 @@ async def run_agent(store: ParamStore) -> bool:
     # Run all agents concurrently
     tasks = [asyncio.create_task(agent.run()) for agent in agents]
 
+    restart = False
+    evolution_restart = False
     try:
         await asyncio.gather(*tasks)
     except asyncio.CancelledError:
@@ -1497,10 +1996,7 @@ async def run_agent(store: ParamStore) -> bool:
     finally:
         restart = console._restart_requested
         # Check if any agent requested an evolution restart
-        evolution_restart = any(
-            getattr(a, "_evolution_restart_requested", False)
-            for a in agents
-        )
+        evolution_restart = any(getattr(a, "_evolution_restart_requested", False) for a in agents)
         console.stop()
         for db in dbs:
             await db.close()
@@ -1510,17 +2006,19 @@ async def run_agent(store: ParamStore) -> bool:
                 "\n  🧬 Evolution applied — restarting with new code…\n",
                 C.CYAN,
             )
-            return "evolution"
-        if restart:
-            cprint("\n  Ethical Council stopped for restart.\n", C.YELLOW)
-        else:
-            cprint("\n  The Ethical Council has stopped.", C.YELLOW)
-        return restart
+    if evolution_restart:
+        return "evolution"
+    if restart:
+        cprint("\n  Ethical Council stopped for restart.\n", C.YELLOW)
+    else:
+        cprint("\n  The Ethical Council has stopped.", C.YELLOW)
+    return restart
 
 
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="AgentGolem Launcher")
@@ -1531,7 +2029,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    os.chdir(ROOT)                           # ensure CWD is repo root
+    os.chdir(ROOT)  # ensure CWD is repo root
     store = ParamStore()
 
     if not args.auto:
@@ -1555,12 +2053,13 @@ def main() -> None:
         except Exception:
             # Log the crash to file so we can diagnose after terminal closes
             import traceback
+
             crash_log = ROOT / "data" / "logs" / "crash.log"
             crash_log.parent.mkdir(parents=True, exist_ok=True)
             with open(crash_log, "a", encoding="utf-8") as f:
-                f.write(f"\n{'='*60}\n")
+                f.write(f"\n{'=' * 60}\n")
                 f.write(f"CRASH at {datetime.now().isoformat()}\n")
-                f.write(f"{'='*60}\n")
+                f.write(f"{'=' * 60}\n")
                 traceback.print_exc(file=f)
             cprint(f"\n  💥 Fatal error — see {crash_log}", C.RED)
             traceback.print_exc()
@@ -1575,16 +2074,22 @@ def main() -> None:
                     C.CYAN,
                 )
                 subprocess.Popen(
-                    ["cmd", "/c", "start", "AgentGolem (Evolved)",
-                     "cmd", "/c",
-                     str(bat_path), "--auto"],
+                    [
+                        "cmd",
+                        "/c",
+                        "start",
+                        "AgentGolem (Evolved)",
+                        "cmd",
+                        "/c",
+                        str(bat_path),
+                        "--auto",
+                    ],
                     cwd=str(ROOT),
                     creationflags=subprocess.CREATE_NEW_CONSOLE,
                 )
             else:
                 cprint(
-                    f"  ⚠ start.bat not found at {bat_path}. "
-                    f"Please restart manually.",
+                    f"  ⚠ start.bat not found at {bat_path}. Please restart manually.",
                     C.YELLOW,
                 )
             break
@@ -1607,13 +2112,14 @@ if __name__ == "__main__":
     except Exception:
         # Last-resort crash capture — write traceback to file AND stderr
         import traceback
+
         _terminal_ui.teardown()  # reset terminal so traceback is readable
         crash_log = ROOT / "data" / "logs" / "crash.log"
         crash_log.parent.mkdir(parents=True, exist_ok=True)
         with open(crash_log, "a", encoding="utf-8") as f:
-            f.write(f"\n{'='*60}\n")
+            f.write(f"\n{'=' * 60}\n")
             f.write(f"CRASH at {datetime.now().isoformat()}\n")
-            f.write(f"{'='*60}\n")
+            f.write(f"{'=' * 60}\n")
             traceback.print_exc(file=f)
         print(f"\n  💥 Fatal error — traceback saved to {crash_log}")
         traceback.print_exc()

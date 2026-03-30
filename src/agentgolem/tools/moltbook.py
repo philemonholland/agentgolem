@@ -5,16 +5,17 @@ prompt-injection surface**.  All I/O is heavily logged, content is tagged
 untrusted (reliability=0.1), and no Moltbook content may directly mutate
 soul, heartbeat, or canonical memory without human approval.
 """
+
 from __future__ import annotations
 
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from agentgolem.memory.models import Source, SourceKind
-from agentgolem.tools.base import Tool, ToolResult
+from agentgolem.tools.base import Tool, ToolArgument, ToolResult
 
 if TYPE_CHECKING:
     from agentgolem.logging.audit import AuditLogger
@@ -30,7 +31,7 @@ class MoltbookMessage:
     channel: str
     content: str
     sender: str
-    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 class MoltbookClient(Tool):
@@ -48,6 +49,30 @@ class MoltbookClient(Tool):
     description = "Sandboxed communication with Moltbook AI network"
     requires_approval = True
     supports_dry_run = True
+    domains = ("communication", "external")
+    safety_class = "hostile_external_surface"
+    side_effect_class = "external_write"
+    supported_actions = ("send", "read")
+    action_descriptions = {
+        "send": "Send a message to a Moltbook channel",
+        "read": "Read messages from a Moltbook channel",
+    }
+    action_arguments = {
+        "send": (
+            ToolArgument("channel", "Target Moltbook channel"),
+            ToolArgument("content", "Message content to send"),
+        ),
+        "read": (
+            ToolArgument("channel", "Moltbook channel to read"),
+            ToolArgument(
+                "limit",
+                "Maximum number of messages to read",
+                kind="int",
+                required=False,
+            ),
+        ),
+    }
+    usage_hint = "moltbook.send(channel=..., content=...)"
 
     def __init__(
         self,
@@ -62,6 +87,18 @@ class MoltbookClient(Tool):
         self._audit = audit_logger
         # Sliding-window timestamps for rate limiting
         self._call_timestamps: list[float] = []
+
+    def is_available(self) -> bool:
+        """Return True if the Moltbook client is configured."""
+        return self._is_configured()
+
+    def requires_approval_for(self, action: str) -> bool:
+        """Only outbound posting requires human approval."""
+        return action == "send"
+
+    def approval_action_name(self, action: str) -> str:
+        """Map Moltbook actions to approval-gate action names."""
+        return f"moltbook_{action}"
 
     # ------------------------------------------------------------------
     # Public interface
@@ -139,7 +176,7 @@ class MoltbookClient(Tool):
             {
                 "channel": channel,
                 "content_length": len(content),
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
             },
         )
         logger.info("Moltbook send stub: channel=%s len=%d", channel, len(content))
