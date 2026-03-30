@@ -12,6 +12,8 @@ class Secrets(BaseSettings):
 
     openai_api_key: SecretStr = SecretStr("")
     openai_base_url: str = "https://api.openai.com/v1"
+    deepseek_api_key: SecretStr = SecretStr("")
+    deepseek_base_url: str = "https://api.deepseek.com/v1"
     email_smtp_host: str = ""
     email_smtp_port: int = 587
     email_smtp_user: str = ""

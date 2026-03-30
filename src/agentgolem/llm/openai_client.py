@@ -51,12 +51,16 @@ class OpenAIClient:
             **kwargs,
         }
         response = await client.post(
-            "/chat/completions", json=payload,
+            "chat/completions", json=payload,
             **({"timeout": timeout} if timeout else {}),
         )
         response.raise_for_status()
         data = response.json()
         return data["choices"][0]["message"]["content"]
+
+    @property
+    def model_name(self) -> str:
+        return self._model
 
     async def complete_structured(
         self, messages: list[Message], schema: type[T], **kwargs: Any

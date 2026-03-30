@@ -63,3 +63,7 @@ class RateLimitedLLM:
 
     async def close(self) -> None:
         await self._inner.close()
+
+    @property
+    def model_name(self) -> str:
+        return getattr(self._inner, "model_name", getattr(self._inner, "_model", "unknown"))

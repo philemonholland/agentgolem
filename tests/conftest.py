@@ -36,6 +36,8 @@ def tmp_env_file(tmp_path: Path) -> Path:
     env_path.write_text(
         "OPENAI_API_KEY=sk-test-key-12345\n"
         "OPENAI_BASE_URL=https://api.openai.com/v1\n"
+        "DEEPSEEK_API_KEY=sk-deepseek-key-54321\n"
+        "DEEPSEEK_BASE_URL=https://api.deepseek.com/v1\n"
         "EMAIL_SMTP_HOST=smtp.test.com\n"
         "EMAIL_SMTP_PORT=587\n"
         "EMAIL_SMTP_USER=test@test.com\n"
@@ -62,6 +64,8 @@ def mock_settings_yaml(tmp_path: Path) -> Path:
         "log_level: DEBUG\n"
         "llm_provider: openai\n"
         "llm_model: gpt-4o-mini\n"
+        "llm_discussion_model: deepseek-reasoner\n"
+        "llm_code_model: gpt-5.4\n"
         "soul_update_min_confidence: 0.5\n"
         "dry_run_mode: true\n"
         "email_enabled: false\n"

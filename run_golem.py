@@ -247,7 +247,8 @@ PARAM_DEFS: list[tuple[str, str, str, str, str]] = [
 
     # --- LLM ---
     ("llm_provider", "LLM Provider", "LLM provider backend (openai)", "str", "LLM"),
-    ("llm_model", "LLM Model", "Model name for completions", "str", "LLM"),
+    ("llm_model", "LLM Model", "Fallback model when DeepSeek discussion is unavailable", "str", "LLM"),
+    ("llm_discussion_model", "LLM Discussion Model", "Model used for regular discussion and reflection", "str", "LLM"),
 
     # --- Logging ---
     ("log_level", "Log Level", "Logging verbosity (DEBUG, INFO, WARNING, ERROR)", "str", "Logging"),
@@ -297,6 +298,8 @@ PARAM_DEFS: list[tuple[str, str, str, str, str]] = [
     # --- Secrets (.env) ---
     ("openai_api_key", "OpenAI API Key", "API key for the LLM provider", "secret", "Secrets"),
     ("openai_base_url", "OpenAI Base URL", "API endpoint for the LLM provider", "str_env", "Secrets"),
+    ("deepseek_api_key", "DeepSeek API Key", "API key for DeepSeek discussion traffic", "secret", "Secrets"),
+    ("deepseek_base_url", "DeepSeek Base URL", "API endpoint for DeepSeek discussion traffic", "str_env", "Secrets"),
     ("email_smtp_host", "Email SMTP Host", "SMTP server for outgoing mail", "str_env", "Secrets"),
     ("email_smtp_port", "Email SMTP Port", "SMTP server port", "int_env", "Secrets"),
     ("email_smtp_user", "Email SMTP User", "SMTP username", "str_env", "Secrets"),
@@ -319,6 +322,8 @@ LAUNCHER_DEFAULTS: dict[str, Any] = {
 ENV_KEY_MAP: dict[str, str] = {
     "openai_api_key": "OPENAI_API_KEY",
     "openai_base_url": "OPENAI_BASE_URL",
+    "deepseek_api_key": "DEEPSEEK_API_KEY",
+    "deepseek_base_url": "DEEPSEEK_BASE_URL",
     "email_smtp_host": "EMAIL_SMTP_HOST",
     "email_smtp_port": "EMAIL_SMTP_PORT",
     "email_smtp_user": "EMAIL_SMTP_USER",
@@ -1117,6 +1122,11 @@ class RuntimeConsole:
 
     def _hot_reload(self, key: str, value: Any) -> None:
         """Push parameter change into all live agent subsystems."""
+        def _set_client_model(client: Any, model: str) -> None:
+            inner = getattr(client, "_inner", client)
+            if inner is not None and hasattr(inner, "_model"):
+                inner._model = model
+
         for agent in self._agents:
             if hasattr(agent._settings, key):
                 try:
@@ -1145,8 +1155,18 @@ class RuntimeConsole:
                 agent._peer_checkin_interval = value
             elif key == "peer_message_max_chars":
                 agent._peer_msg_limit = value
+            elif key == "llm_discussion_model":
+                agent._discussion_model = value
+                _set_client_model(getattr(agent, "_llm", None), value)
             elif key == "llm_code_model":
                 agent._code_model = value
+                _set_client_model(getattr(agent, "_code_llm", None), value)
+            elif key == "llm_model":
+                if getattr(agent, "_llm", None) is not None and getattr(agent, "_settings", None):
+                    deepseek_key = getattr(getattr(agent, "_secrets", None), "deepseek_api_key", None)
+                    deepseek_value = deepseek_key.get_secret_value() if deepseek_key is not None else ""
+                    if not deepseek_value:
+                        _set_client_model(getattr(agent, "_llm", None), value)
 
         if key == "log_level":
             import logging

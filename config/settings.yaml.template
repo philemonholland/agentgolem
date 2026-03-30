@@ -12,6 +12,7 @@ sleep_max_nodes_per_cycle: 1000
 sleep_max_time_ms: 5000
 llm_provider: openai
 llm_model: gpt-5
+llm_discussion_model: deepseek-reasoner   # regular discussion model when DEEPSEEK_API_KEY is set
 log_level: INFO
 email_enabled: false
 moltbook_enabled: false
@@ -37,4 +38,4 @@ autonomous_interval_seconds: 60.0
 name_discovery_cycles: 4
 peer_checkin_interval_minutes: 30.0
 peer_message_max_chars: 3000
-llm_code_model: gpt-5          # model used for codebase inspection & evolution (higher quality)
+llm_code_model: gpt-5.4        # model used for codebase inspection & evolution (higher quality)

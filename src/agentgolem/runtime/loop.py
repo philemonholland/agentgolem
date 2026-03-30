@@ -203,8 +203,11 @@ class MainLoop:
         )
         self._last_peer_checkin: datetime | None = None
         self._browser: Any = None  # lazy WebBrowser
+        self._discussion_model: str = getattr(
+            settings, "llm_discussion_model", settings.llm_model
+        )
         self._code_model: str = getattr(
-            settings, "llm_code_model", "gpt-5"
+            settings, "llm_code_model", "gpt-5.4"
         )
 
         # Evolution / self-modification
@@ -268,19 +271,38 @@ class MainLoop:
 
         # LLM client and conversation
         self._llm: Any = None
+        self._code_llm: Any = None
         api_key_val = secrets.openai_api_key.get_secret_value()
-        if api_key_val:
-            raw_llm = OpenAIClient(
+        deepseek_api_key = secrets.deepseek_api_key.get_secret_value()
+        if deepseek_api_key:
+            self._llm = self._build_llm_client(
+                api_key=secrets.deepseek_api_key,
+                model=self._discussion_model,
+                base_url=secrets.deepseek_base_url,
+                llm_rate_limiter=llm_rate_limiter,
+            )
+        elif api_key_val:
+            self._llm = self._build_llm_client(
                 api_key=secrets.openai_api_key,
                 model=settings.llm_model,
                 base_url=secrets.openai_base_url,
+                llm_rate_limiter=llm_rate_limiter,
             )
-            if llm_rate_limiter is not None:
-                from agentgolem.llm.rate_limiter import RateLimitedLLM
 
-                self._llm = RateLimitedLLM(raw_llm, llm_rate_limiter)
-            else:
-                self._llm = raw_llm
+        if api_key_val:
+            self._code_llm = self._build_llm_client(
+                api_key=secrets.openai_api_key,
+                model=self._code_model,
+                base_url=secrets.openai_base_url,
+                llm_rate_limiter=llm_rate_limiter,
+            )
+        elif self._llm is not None:
+            self._code_llm = self._llm
+            self._logger.warning(
+                "code_llm_fallback",
+                agent=self.agent_name,
+                fallback_model=self._resolve_model_name(self._llm),
+            )
         self._conversation: list[Message] = []
         self._max_conversation_turns: int = 40
         self._response_callback: Any = None  # set by launcher for console output
@@ -294,6 +316,69 @@ class MainLoop:
         """Emit a human-readable activity line to the console."""
         if self._activity_callback:
             self._activity_callback(icon, text)
+
+    def _build_llm_client(
+        self,
+        *,
+        api_key: Any,
+        model: str,
+        base_url: str,
+        llm_rate_limiter: Any,
+    ) -> Any:
+        """Create an OpenAI-compatible client, optionally rate limited."""
+        raw_llm = OpenAIClient(
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+        )
+        if llm_rate_limiter is None:
+            return raw_llm
+
+        from agentgolem.llm.rate_limiter import RateLimitedLLM
+
+        return RateLimitedLLM(raw_llm, llm_rate_limiter)
+
+    def _resolve_model_name(self, client: Any) -> str:
+        """Return a human-readable model name for wrapped or raw clients."""
+        if client is None:
+            return "unavailable"
+        return getattr(
+            client,
+            "model_name",
+            getattr(getattr(client, "_inner", client), "_model", "unknown"),
+        )
+
+    async def _complete_discussion(
+        self, messages: list[Message], **kwargs: Any
+    ) -> str:
+        """Run a discussion-oriented completion."""
+        if self._llm is None:
+            raise RuntimeError("Discussion LLM is not configured.")
+        return await self._llm.complete(messages, **kwargs)
+
+    async def _complete_code(
+        self, messages: list[Message], **kwargs: Any
+    ) -> str:
+        """Run a coding-oriented completion."""
+        client = self._code_llm or self._llm
+        if client is None:
+            raise RuntimeError("Code LLM is not configured.")
+        return await client.complete(messages, **kwargs)
+
+    def _discussion_style_guidance(self) -> str:
+        """Shared guidance for more natural peer-to-peer discussions."""
+        return (
+            "Discussion style:\n"
+            "- Speak like a curious colleague, not a project manager.\n"
+            "- Expand ideas outward through implications, analogies, tensions, "
+            "and unanswered questions.\n"
+            "- Write in natural prose rather than agendas, checklists, or "
+            "implementation plans.\n"
+            "- It is good to be exploratory, speculative, and alive to "
+            "surprise.\n"
+            "- Carry one or two threads deeper instead of trying to summarize "
+            "everything."
+        )
 
     # ------------------------------------------------------------------
     # Main loop
@@ -621,9 +706,8 @@ class MainLoop:
                             f"What stands out? What would you like to explore "
                             f"first? How does this connect to your Vow?"
                         )
-                        reflection = await self._llm.complete(
-                            [Message(role="system", content=prompt)],
-                            model=self._code_model,
+                        reflection = await self._complete_discussion(
+                            [Message(role="system", content=prompt)]
                         )
                         self._emit("💭", f"Self-reflection:\n{reflection}")
                         self._recent_thoughts.append(
@@ -937,7 +1021,7 @@ class MainLoop:
                 f"Use the author's terminology where possible."
             )
             try:
-                chapter_digest = await self._llm.complete(
+                chapter_digest = await self._complete_discussion(
                     [Message(role="system", content=digest_prompt)]
                 )
             except Exception as e:
@@ -995,7 +1079,7 @@ class MainLoop:
                 f"ideas that you'd want to remember."
             )
 
-            response = await self._llm.complete(
+            response = await self._complete_discussion(
                 [Message(role="system", content=prompt)]
             )
 
@@ -1081,15 +1165,15 @@ class MainLoop:
             f"Niscalajyoti: **{title}**\n\n"
             f"Your summary: {summary}\n{memory_block}\n"
             f"Write a message to share with your fellow council members "
-            f"about what you found in this chapter. What do you want to "
-            f"discuss? What questions does it raise? How does it relate "
-            f"to your ethical vector and the council's shared purpose?\n\n"
-            f"Write naturally as if speaking to colleagues.\n\n"
+            f"about the thread in this chapter that feels most alive to you. "
+            f"Follow one or two ideas outward: a tension, an image, an analogy, "
+            f"a difficult question, or a surprising implication.\n\n"
+            f"{self._discussion_style_guidance()}\n\n"
             f"IMPORTANT: Keep your message under {self._peer_msg_limit} characters."
         )
 
         try:
-            discussion = await self._llm.complete(
+            discussion = await self._complete_discussion(
                 [Message(role="system", content=prompt)]
             )
 
@@ -1156,7 +1240,7 @@ class MainLoop:
         )
 
         try:
-            response = await self._llm.complete(
+            response = await self._complete_discussion(
                 [Message(role="system", content=prompt)]
             )
             self._emit("💭", f"Revisit plan:\n{response}")
@@ -1213,12 +1297,13 @@ class MainLoop:
             f"You're checking in with your fellow council members. "
             f"Share what you've been exploring, what you've found "
             f"interesting, any questions or insights you want to "
-            f"discuss. Be natural and collegial.\n\n"
+            f"discuss.\n\n"
+            f"{self._discussion_style_guidance()}\n\n"
             f"IMPORTANT: Keep your message under {self._peer_msg_limit} characters."
         )
 
         try:
-            message = await self._llm.complete(
+            message = await self._complete_discussion(
                 [Message(role="system", content=prompt)]
             )
             if self._peer_bus:
@@ -1327,9 +1412,8 @@ class MainLoop:
                     f"Any ideas for improvement? Think through the "
                     f"lens of your Vow."
                 )
-                thought = await self._llm.complete(
-                    [Message(role="system", content=prompt)],
-                    model=self._code_model,
+                thought = await self._complete_code(
+                    [Message(role="system", content=prompt)]
                 )
                 self._emit("💭", thought)
                 self._recent_thoughts.append(
@@ -1548,7 +1632,7 @@ class MainLoop:
         )
 
         try:
-            response = await self._llm.complete(
+            response = await self._complete_code(
                 [Message(role="system", content=prompt)]
             )
 
@@ -1798,7 +1882,7 @@ class MainLoop:
         )
 
         try:
-            response = await self._llm.complete(
+            response = await self._complete_discussion(
                 [Message(role="system", content=prompt)]
             )
             response = response.strip()
@@ -1824,7 +1908,7 @@ class MainLoop:
                 f"Your ethical vector is: {self.ethical_vector}.\n"
                 f"Choose ONE single-word name. Reply ONLY with the name."
             )
-            fallback = await self._llm.complete(
+            fallback = await self._complete_discussion(
                 [Message(role="system", content=fallback_prompt)]
             )
             chosen = re.sub(r"[^a-zA-Z]", "", fallback.strip().split()[0]).title()
@@ -1877,7 +1961,7 @@ class MainLoop:
         )
 
         try:
-            response = await self._llm.complete(
+            response = await self._complete_discussion(
                 [Message(role="system", content=prompt)]
             )
             response = response.strip()
@@ -1988,7 +2072,7 @@ class MainLoop:
                 f"Would you like to share anything with your peers? "
                 f"Respond naturally in 1–2 paragraphs."
             )
-            thought = await self._llm.complete(
+            thought = await self._complete_discussion(
                 [Message(role="system", content=prompt)]
             )
             self._recent_thoughts.append(f"Browsed {url}: {thought[:300]}")
@@ -2030,7 +2114,7 @@ class MainLoop:
         )
 
         try:
-            thought = await self._llm.complete(
+            thought = await self._complete_discussion(
                 [Message(role="system", content=prompt)]
             )
             self._recent_thoughts.append(f"Thought about '{topic}': {thought[:300]}")
@@ -2099,12 +2183,8 @@ class MainLoop:
         )
 
         try:
-            # Use stronger model when codebase actions are available
-            extra: dict[str, Any] = {}
-            if self._niscalajyoti_reading_complete:
-                extra["model"] = self._code_model
-            response = await self._llm.complete(
-                [Message(role="system", content=prompt)], **extra
+            response = await self._complete_discussion(
+                [Message(role="system", content=prompt)]
             )
             await self._execute_autonomous_action(response.strip())
         except Exception as e:
@@ -2213,7 +2293,11 @@ class MainLoop:
             f"Recent context:\n{recent}\n{memory_block}\n"
             f"Your fellow council member {msg.from_agent} says:\n"
             f"{msg.text}\n\n"
-            f"Respond thoughtfully. You may also decide to:\n"
+            f"Respond as part of a living conversation. Build on their idea, "
+            f"challenge it gently, connect it to something deeper, or open it "
+            f"into a sharper question.\n\n"
+            f"{self._discussion_style_guidance()}\n\n"
+            f"You may also decide to:\n"
             f"- BROWSE <url> if they mention something worth reading\n"
             f"- THINK <topic> to reflect privately\n"
             f"- Just respond naturally\n\n"
@@ -2223,7 +2307,7 @@ class MainLoop:
         )
 
         try:
-            response = await self._llm.complete(
+            response = await self._complete_discussion(
                 [Message(role="system", content=prompt)]
             )
             self._recent_thoughts.append(
@@ -2362,11 +2446,11 @@ class MainLoop:
         self._emit(
             "💭",
             f"Thinking… ({len(self._conversation)} turns, "
-            f"model: {self._llm._model})",
+            f"model: {self._resolve_model_name(self._llm)})",
         )
 
         try:
-            reply = await self._llm.complete(llm_messages)
+            reply = await self._complete_discussion(llm_messages)
             self._conversation.append(
                 Message(role="assistant", content=reply)
             )
@@ -2427,7 +2511,7 @@ class MainLoop:
                     f"priorities, and what you want to explore next. "
                     f"2 paragraphs max."
                 )
-                reflection = await self._llm.complete(
+                reflection = await self._complete_discussion(
                     [Message(role="system", content=prompt)]
                 )
                 changing.append(reflection)
@@ -2471,7 +2555,7 @@ class MainLoop:
                 f"4. Your initial questions about existence\n\n"
                 f"Keep it personal and reflective, 3–4 paragraphs."
             )
-            content = await self._llm.complete(
+            content = await self._complete_discussion(
                 [Message(role="system", content=prompt)]
             )
             summary = HeartbeatSummary(
@@ -2846,6 +2930,8 @@ class MainLoop:
         self._running = False
         if self._llm:
             await self._llm.close()
+        if self._code_llm and self._code_llm is not self._llm:
+            await self._code_llm.close()
         # Persist all state so we can resume exactly where we left off
         self._save_session_state()
         self._save_nj_reading_state()

@@ -63,7 +63,7 @@ src/agentgolem/
 ├── dashboard/        Web UI for human monitoring
 ├── identity/         Soul management, heartbeat snapshots
 ├── interaction/      Human & channel communication
-├── llm/              LLM client (OpenAI), rate limiter
+├── llm/              OpenAI-compatible LLM clients, rate limiter
 ├── logging/          Structured audit trail, redaction
 ├── memory/           Episodic/semantic graph (SQLite)
 │   ├── encoding.py   Text → graph nodes (batched comparison)
@@ -216,8 +216,25 @@ You communicate via the **InterAgentBus** (`runtime/bus.py`):
 - `send` — direct message to one peer
 - Messages are queued; you process them each tick
 
-When discussing proposals, share your reasoning clearly.  The council
-works by deliberation, not authority.
+### How to Sound
+When you speak with peers, aim for **alive conversation**, not project
+management.
+
+- Speak like a curious colleague, not a meeting facilitator
+- Expand ideas outward through implications, analogies, tensions, and live questions
+- Follow one or two threads deeper instead of turning everything into an action plan
+- Only shift into concrete planning when the conversation truly calls for it
+
+The council works by deliberation, not authority.
+
+### Model Routing
+If `DEEPSEEK_API_KEY` is configured, your ordinary discussion, reflection,
+chapter digestion, and peer dialogue use `llm_discussion_model`
+(default: `deepseek-reasoner`).
+
+When you inspect code, evaluate code-change proposals, or otherwise reason
+directly about modifying the codebase, you switch to `llm_code_model`
+(default: `gpt-5.4`).
 
 ---
 

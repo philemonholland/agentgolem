@@ -18,6 +18,7 @@ class Settings(BaseModel):
     sleep_max_time_ms: int = 5000
     llm_provider: str = "openai"
     llm_model: str = "gpt-5"
+    llm_discussion_model: str = "deepseek-reasoner"
     log_level: str = "INFO"
     email_enabled: bool = False
     moltbook_enabled: bool = False
@@ -45,7 +46,7 @@ class Settings(BaseModel):
     name_discovery_cycles: int = 4
     peer_checkin_interval_minutes: float = 30.0
     peer_message_max_chars: int = 3000
-    llm_code_model: str = "gpt-5"
+    llm_code_model: str = "gpt-5.4"
 
 
 def load_settings(config_path: Path = Path("config/settings.yaml")) -> Settings:

@@ -29,7 +29,8 @@ and gradually evolve their own code through unanimous, Vow-aligned consensus.
 - **Crash Resilience** — Tick-level error isolation, crash logs to `data/logs/crash.log`
 - **State Persistence** — Ctrl+C saves session state; agents resume exactly where they left off (chapter, sleep progress, name)
 - **Configurable Peer Limits** — Inter-agent message length is tunable (`peer_message_max_chars`)
-- **Dedicated Code Model** — Agents use a stronger LLM (`llm_code_model`) for codebase operations
+- **Natural Peer Deliberation** — Peer messages are guided toward exploratory, collegial discussion rather than agendas and planning memos
+- **Split Model Routing** — Regular discussion/reflection can use DeepSeek (`llm_discussion_model`), while code inspection/evolution uses a stronger GPT model (`llm_code_model`)
 
 ---
 
@@ -100,18 +101,21 @@ Key settings (see the template for all defaults):
 | `agent_offset_minutes`           | `0.0`      | Stagger between agent wake times (0 = sync)|
 | `awake_duration_minutes`         | `10.0`     | Minutes each agent stays awake             |
 | `sleep_duration_minutes`         | `5.0`      | Minutes each agent sleeps                  |
-| `autonomous_interval_seconds`    | `15.0`     | Seconds between autonomous tick actions    |
-| `peer_checkin_interval_minutes`  | `10.0`     | How often agents check in with peers       |
+| `autonomous_interval_seconds`    | `60.0`     | Seconds between autonomous tick actions    |
+| `peer_checkin_interval_minutes`  | `30.0`     | How often agents check in with peers       |
 | `name_discovery_cycles`          | `4`        | Wake cycles before agents discover names   |
-| `llm_model`                      | `gpt-5`    | LLM model for agent reasoning              |
-| `llm_code_model`                 | `gpt-5`    | Stronger model for codebase ops            |
+| `llm_model`                      | `gpt-5`    | Fallback reasoning model when DeepSeek discussion is unavailable |
+| `llm_discussion_model`           | `deepseek-reasoner` | Discussion/reflection model when `DEEPSEEK_API_KEY` is configured |
+| `llm_code_model`                 | `gpt-5.4`  | Stronger model for codebase ops            |
 | `peer_message_max_chars`         | `3000`     | Max chars for inter-agent messages         |
 | `niscalajyoti_revisit_hours`     | `6.0`      | Hours between NJ revisit cycles            |
 | `browser_rate_limit_per_minute`  | `10`       | Max web requests per minute                |
 
 ### `.env` — Secrets (never committed)
 
-Copy `.env.example` → `.env` and fill in your API keys.
+Copy `.env.example` → `.env` and fill in your API keys. If you want the
+council to use DeepSeek for everyday discussion while keeping GPT-5.4 for
+code work, set both `DEEPSEEK_API_KEY` and `OPENAI_API_KEY`.
 
 ---
 

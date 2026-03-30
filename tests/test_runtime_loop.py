@@ -165,3 +165,40 @@ async def test_auto_sleep_wake_cycle(loop_env: tuple[Settings, Secrets, Path]) -
             await task
         except asyncio.CancelledError:
             pass
+
+
+def test_main_loop_prefers_deepseek_for_discussion_and_openai_for_code(
+    loop_env: tuple[Settings, Secrets, Path]
+) -> None:
+    settings, _, _ = loop_env
+    routed_settings = Settings(
+        data_dir=settings.data_dir,
+        llm_model="gpt-4.1",
+        llm_discussion_model="deepseek-reasoner",
+        llm_code_model="gpt-5.4",
+    )
+    secrets = Secrets(
+        _env_file=None,
+        openai_api_key="sk-openai-test",
+        openai_base_url="https://api.openai.com/v1",
+        deepseek_api_key="sk-deepseek-test",
+        deepseek_base_url="https://api.deepseek.com/v1",
+    )
+
+    loop = MainLoop(settings=routed_settings, secrets=secrets)
+
+    assert loop._resolve_model_name(loop._llm) == "deepseek-reasoner"
+    assert loop._resolve_model_name(loop._code_llm) == "gpt-5.4"
+
+
+def test_discussion_style_guidance_discourages_planning(
+    loop_env: tuple[Settings, Secrets, Path]
+) -> None:
+    settings, secrets, _ = loop_env
+    loop = MainLoop(settings=settings, secrets=secrets)
+
+    guidance = loop._discussion_style_guidance()
+
+    assert "curious colleague" in guidance
+    assert "project manager" in guidance
+    assert "implementation plans" in guidance

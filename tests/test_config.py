@@ -39,6 +39,8 @@ def test_settings_from_yaml(mock_settings_yaml: Path) -> None:
     assert settings.sleep_cycle_minutes == 1.0
     assert settings.log_level == "DEBUG"
     assert settings.llm_model == "gpt-4o-mini"
+    assert settings.llm_discussion_model == "deepseek-reasoner"
+    assert settings.llm_code_model == "gpt-5.4"
     assert settings.dry_run_mode is True
     assert isinstance(settings.data_dir, Path)
 
@@ -53,6 +55,8 @@ def test_settings_defaults_when_no_yaml(tmp_path: Path) -> None:
     assert settings.sleep_duration_minutes == 5.0
     assert settings.wind_down_minutes == 2.0
     assert settings.llm_model == "gpt-5"
+    assert settings.llm_discussion_model == "deepseek-reasoner"
+    assert settings.llm_code_model == "gpt-5.4"
     assert settings.log_level == "INFO"
     assert settings.dry_run_mode is False
     assert settings.approval_required_actions == ["email_send", "moltbook_send"]
@@ -65,6 +69,8 @@ def test_secrets_from_env_file(tmp_env_file: Path) -> None:
     secrets = Secrets(_env_file=str(tmp_env_file))
     assert secrets.openai_api_key.get_secret_value() == "sk-test-key-12345"
     assert secrets.openai_base_url == "https://api.openai.com/v1"
+    assert secrets.deepseek_api_key.get_secret_value() == "sk-deepseek-key-54321"
+    assert secrets.deepseek_base_url == "https://api.deepseek.com/v1"
     assert secrets.email_smtp_host == "smtp.test.com"
     assert secrets.email_smtp_port == 587
     assert secrets.email_smtp_user == "test@test.com"
@@ -83,6 +89,7 @@ def test_secretstr_fields_are_hidden(tmp_env_file: Path) -> None:
     secrets = Secrets(_env_file=str(tmp_env_file))
     secret_fields = [
         secrets.openai_api_key,
+        secrets.deepseek_api_key,
         secrets.email_smtp_password,
         secrets.email_imap_password,
         secrets.moltbook_api_key,
