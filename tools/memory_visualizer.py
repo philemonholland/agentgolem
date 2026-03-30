@@ -518,7 +518,7 @@ function renderGraph(data) {
 
   // Labels
   const labels = graphG.append('g').attr('class', 'labels-group').selectAll('text')
-    .data(data.nodes.filter(n => n.centrality > 0.2 || data.nodes.length < 50))
+    .data(data.nodes)
     .enter().append('text')
     .attr('class', 'node-label')
     .text(d => d.text.length > 35 ? d.text.slice(0, 33) + '…' : d.text)

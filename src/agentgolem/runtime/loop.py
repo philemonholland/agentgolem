@@ -758,7 +758,7 @@ class MainLoop:
                 "niscalajyoti_chapter_error",
                 agent=self.agent_name,
                 chapter=title,
-                error=str(e),
+                error=repr(e),
             )
             self._emit("❌", f"Failed to read '{title}': {e}")
 
@@ -828,7 +828,7 @@ class MainLoop:
             self._logger.error(
                 "niscalajyoti_discuss_error",
                 agent=self.agent_name,
-                error=str(e),
+                error=repr(e),
             )
 
     async def _revisit_niscalajyoti(self) -> None:
@@ -897,7 +897,7 @@ class MainLoop:
             self._logger.error(
                 "niscalajyoti_revisit_error",
                 agent=self.agent_name,
-                error=str(e),
+                error=repr(e),
             )
 
     async def _peer_checkin(self) -> None:
@@ -938,7 +938,7 @@ class MainLoop:
             self._logger.error(
                 "peer_checkin_error",
                 agent=self.agent_name,
-                error=str(e),
+                error=repr(e),
             )
 
     # ------------------------------------------------------------------
@@ -1300,7 +1300,7 @@ class MainLoop:
                 "evolution_vote_error",
                 agent=self.agent_name,
                 proposal_id=proposal_id,
-                error=str(e),
+                error=repr(e),
             )
 
     async def _apply_approved_proposals(self) -> bool:
@@ -1424,7 +1424,7 @@ class MainLoop:
                     "evolution_apply_error",
                     agent=self.agent_name,
                     proposal_id=proposal_id,
-                    error=str(e),
+                    error=repr(e),
                 )
                 self._emit(
                     "❌",
@@ -1492,7 +1492,7 @@ class MainLoop:
 
         except Exception as e:
             self._logger.error(
-                "name_discovery_error", agent=self.agent_name, error=str(e)
+                "name_discovery_error", agent=self.agent_name, error=repr(e)
             )
             return False
 
@@ -1541,7 +1541,7 @@ class MainLoop:
             self._logger.error(
                 "soul_name_update_error",
                 agent=self.agent_name,
-                error=str(e),
+                error=repr(e),
             )
 
         # Announce to peers
@@ -1597,7 +1597,7 @@ class MainLoop:
                 "browse_error",
                 agent=self.agent_name,
                 url=url,
-                error=str(e),
+                error=repr(e),
             )
             self._emit("❌", f"Failed to browse {url}: {e}")
 
@@ -1622,7 +1622,7 @@ class MainLoop:
             self._emit("💭", thought)
         except Exception as e:
             self._logger.error(
-                "think_error", agent=self.agent_name, error=str(e)
+                "think_error", agent=self.agent_name, error=repr(e)
             )
 
     async def _llm_decide_next_action(self) -> None:
@@ -1709,7 +1709,7 @@ class MainLoop:
             self._logger.error(
                 "autonomous_decide_error",
                 agent=self.agent_name,
-                error=str(e),
+                error=repr(e),
             )
 
     async def _execute_autonomous_action(self, action_line: str) -> None:
@@ -1858,7 +1858,7 @@ class MainLoop:
             self._logger.error(
                 "peer_response_error",
                 agent=self.agent_name,
-                error=str(e),
+                error=repr(e),
             )
 
     # ------------------------------------------------------------------
@@ -1885,7 +1885,7 @@ class MainLoop:
                 self._logger.warning(
                     "inbox_message_invalid",
                     file=msg_file.name,
-                    error=str(e),
+                    error=repr(e),
                 )
                 self._emit("⚠️", f"Bad inbox file {msg_file.name}: {e}")
 
@@ -1965,7 +1965,7 @@ class MainLoop:
             )
             self._emit("✍️", f"Composed response ({len(reply)} chars)")
         except Exception as e:
-            self._logger.error("llm_error", error=str(e))
+            self._logger.error("llm_error", error=repr(e))
             self._emit("❌", f"LLM error: {e}")
             reply = f"I encountered an error: {e}"
 
@@ -2028,7 +2028,7 @@ class MainLoop:
                 self._logger.error(
                     "heartbeat_llm_error",
                     agent=self.agent_name,
-                    error=str(e),
+                    error=repr(e),
                 )
 
         summary = HeartbeatSummary(
@@ -2083,7 +2083,7 @@ class MainLoop:
             self._logger.error(
                 "initial_heartbeat_error",
                 agent=self.agent_name,
-                error=str(e),
+                error=repr(e),
             )
 
     # ------------------------------------------------------------------

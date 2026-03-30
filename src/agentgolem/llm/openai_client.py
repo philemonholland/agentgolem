@@ -20,7 +20,7 @@ class OpenAIClient:
         api_key: SecretStr,
         model: str = "gpt-5.4-mini",
         base_url: str = "https://api.openai.com/v1",
-        timeout: float = 60.0,
+        timeout: float = 120.0,
     ) -> None:
         self._api_key = api_key
         self._model = model
