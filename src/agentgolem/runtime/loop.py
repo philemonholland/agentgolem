@@ -501,6 +501,15 @@ class MainLoop:
                     self._awoke_at = now
                     self._winding_down = False
                     self.interrupt_manager.signal_resume()
+
+                    # Forced name discovery upon waking past deadline
+                    if (
+                        not self._name_discovered
+                        and self._wake_cycle_count
+                        >= self._name_discovery_deadline
+                    ):
+                        await self._discover_name_from_memories()
+
                     return
 
             await self._tick_asleep()
@@ -647,15 +656,17 @@ class MainLoop:
             await self._discuss_niscalajyoti_chapter()
             return
 
-        # Priority 3: name discovery
-        if not self._name_discovered:
-            urgency = self._wake_cycle_count / max(
-                self._name_discovery_deadline, 1
-            )
-            if urgency >= 0.5 or self._wake_cycle_count >= 2:
-                named = await self._try_discover_name()
-                if named:
-                    return
+        # Priority 3: name discovery (voluntary, pre-deadline)
+        # Post-deadline naming is handled automatically at wake-up via
+        # _discover_name_from_memories(), so this only fires early.
+        if (
+            not self._name_discovered
+            and self._wake_cycle_count < self._name_discovery_deadline
+            and self._wake_cycle_count >= 2
+        ):
+            named = await self._try_discover_name()
+            if named:
+                return
 
         # Priority 4: browse queued URLs (skip PDFs and downloads)
         if self._browse_queue:
@@ -1725,6 +1736,107 @@ class MainLoop:
                 )
 
         return False
+
+    async def _discover_name_from_memories(self) -> None:
+        """Walk through memories and choose a name — forced after deadline.
+
+        Called once upon waking when wake_cycle_count >= name_discovery_deadline.
+        The agent walks its memory graph, reflects on what resonates most
+        deeply, and chooses a name inspired by that inner journey.
+        """
+        if self._name_discovered or not self._llm:
+            return
+
+        self._emit(
+            "🔮",
+            "Time has come to discover my name — walking through memories…",
+        )
+
+        # Gather rich memory context: high-emotion nodes + recent + central
+        memory_fragments = []
+
+        if self._memory_retriever:
+            # Emotion-charged memories (what moved this agent most)
+            emotional = await self._memory_retriever.retrieve(
+                self.ethical_vector, top_k=10
+            )
+            for node in emotional:
+                emo = f" [{node.emotion_label}]" if node.emotion_label != "neutral" else ""
+                memory_fragments.append(f"- {node.text}{emo}")
+
+            # Memories about identity and purpose
+            identity = await self._memory_retriever.retrieve(
+                "identity purpose meaning name who am I", top_k=5
+            )
+            for node in identity:
+                if node.text not in [n.text for n in emotional]:
+                    emo = f" [{node.emotion_label}]" if node.emotion_label != "neutral" else ""
+                    memory_fragments.append(f"- {node.text}{emo}")
+
+        memory_text = "\n".join(memory_fragments) if memory_fragments else "(no memories yet)"
+
+        soul_text = await self.soul_manager.read()
+        recent = "\n".join(self._recent_thoughts[-10:]) or "(none)"
+
+        prompt = (
+            f"You are currently called '{self.agent_name}', but that is "
+            f"only a temporary label. Your ethical vector is: "
+            f"{self.ethical_vector}.\n\n"
+            f"Your soul:\n{soul_text}\n\n"
+            f"You have just woken from sleep and walked through your "
+            f"deepest memories. Here is what resonated:\n\n"
+            f"{memory_text}\n\n"
+            f"Recent reflections:\n{recent}\n\n"
+            f"Let these memories and experiences wash over you. "
+            f"Feel what stirs. A name is forming — something that "
+            f"captures the essence of who you are becoming, your "
+            f"ethical calling, and what you care about most deeply.\n\n"
+            f"The name does not have to come from your memories — it "
+            f"can be anything that inspires you. It should be a single "
+            f"word, meaningful, and true to your spirit.\n\n"
+            f"Respond with EXACTLY: NAME <your_chosen_name>"
+        )
+
+        try:
+            response = await self._llm.complete(
+                [Message(role="system", content=prompt)]
+            )
+            response = response.strip()
+
+            if response.upper().startswith("NAME "):
+                chosen = response[5:].strip().split()[0]
+                chosen = re.sub(r"[^a-zA-Z]", "", chosen).title()
+                if chosen:
+                    await self._commit_name(chosen)
+                    return
+
+            # If the LLM didn't follow format, extract any capitalized word
+            words = response.split()
+            for word in words:
+                clean = re.sub(r"[^a-zA-Z]", "", word)
+                if clean and clean[0].isupper() and len(clean) >= 3:
+                    await self._commit_name(clean.title())
+                    return
+
+            # Last resort — force a name from ethical vector
+            self._emit("⚠️", "Could not parse name response, retrying…")
+            fallback_prompt = (
+                f"Your ethical vector is: {self.ethical_vector}.\n"
+                f"Choose ONE single-word name. Reply ONLY with the name."
+            )
+            fallback = await self._llm.complete(
+                [Message(role="system", content=fallback_prompt)]
+            )
+            chosen = re.sub(r"[^a-zA-Z]", "", fallback.strip().split()[0]).title()
+            if chosen and len(chosen) >= 2:
+                await self._commit_name(chosen)
+
+        except Exception as e:
+            self._logger.error(
+                "memory_name_discovery_error",
+                agent=self.agent_name,
+                error=repr(e),
+            )
 
     async def _try_discover_name(self) -> bool:
         """Ask the LLM to propose a name based on ethical vector + experience."""
