@@ -2405,35 +2405,36 @@ class MainLoop:
             )
 
     async def _tick_asleep(self) -> None:
-        """Run sleep/default-mode cycles."""
+        """Run sleep/default-mode cycles — continuous dream walks."""
         if not self._graph_walker:
             await asyncio.sleep(1.0)
             return
 
         if self.sleep_scheduler.should_run(self.runtime_state.mode):
-            self._logger.info(
-                "sleep_cycle_starting", agent=self.agent_name
+            self._logger.debug(
+                "sleep_walk_starting", agent=self.agent_name
             )
-            self._emit("💤", "Sleep cycle — walking memory graph…")
             result = await self.sleep_scheduler.run_cycle(
                 walker=self._graph_walker,
                 consolidation_engine=self._consolidation_engine,
                 interrupt_check=self.interrupt_manager.check_interrupt,
             )
-            self._logger.info(
-                "sleep_cycle_completed",
+            self._logger.debug(
+                "sleep_walk_completed",
                 agent=self.agent_name,
                 walks=result.walks_completed,
                 items_queued=result.items_queued,
                 duration_ms=result.duration_ms,
                 interrupted=result.interrupted,
             )
-            self._emit(
-                "💤",
-                f"Sleep cycle done — {result.walks_completed} walks, "
-                f"{result.items_queued} items queued, {result.duration_ms}ms"
-                + (" (interrupted)" if result.interrupted else ""),
-            )
+            # Only emit to console every 5th cycle to avoid spam
+            state = self.sleep_scheduler.get_state()
+            if state.cycles_completed % 5 == 0:
+                self._emit(
+                    "💤",
+                    f"Dreaming… ({state.cycles_completed} walks, "
+                    f"{result.items_queued} edges adjusted)",
+                )
         else:
             await asyncio.sleep(1.0)
 

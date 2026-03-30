@@ -58,7 +58,11 @@ class SleepScheduler:
     # -- public API ---------------------------------------------------------
 
     def should_run(self, mode: AgentMode) -> bool:
-        """Return True when a sleep cycle is due."""
+        """Return True when a sleep walk is due.
+
+        Walks run continuously throughout sleep with a short cooldown
+        between cycles (10 seconds) to avoid busy-looping.
+        """
         if mode != AgentMode.ASLEEP:
             return False
 
@@ -67,7 +71,8 @@ class SleepScheduler:
 
         last = datetime.fromisoformat(self._state.last_cycle_time)
         elapsed = datetime.now(timezone.utc) - last
-        return elapsed >= timedelta(minutes=self.cycle_minutes)
+        # Short cooldown between dream walks (10s) rather than full cycle gap
+        return elapsed >= timedelta(seconds=10)
 
     async def run_cycle(
         self,
