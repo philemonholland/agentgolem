@@ -286,6 +286,7 @@ PARAM_DEFS: list[tuple[str, str, str, str, str]] = [
     ("autonomous_interval_seconds", "Autonomous Interval (s)", "Seconds between autonomous actions", "float", "Swarm"),
     ("name_discovery_cycles", "Name Discovery Deadline", "Wake cycles by which agents must discover a name", "int", "Swarm"),
     ("peer_checkin_interval_minutes", "Peer Check-in Interval (min)", "Minutes between peer check-ins during free exploration", "float", "Swarm"),
+    ("peer_message_max_chars", "Peer Message Max Chars", "Maximum characters per peer message (check-in or reply)", "int", "Swarm"),
 
     # --- Dashboard (launcher-only, stored in launcher_state.json) ---
     ("dashboard_enabled", "Dashboard Enabled", "Start the web dashboard alongside the agent", "bool", "Dashboard"),
@@ -1141,6 +1142,8 @@ class RuntimeConsole:
                 agent._autonomous_interval = value
             elif key == "peer_checkin_interval_minutes":
                 agent._peer_checkin_interval = value
+            elif key == "peer_message_max_chars":
+                agent._peer_msg_limit = value
 
         if key == "log_level":
             import logging

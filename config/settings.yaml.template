@@ -36,3 +36,4 @@ agent_offset_minutes: 0.0
 autonomous_interval_seconds: 60.0
 name_discovery_cycles: 4
 peer_checkin_interval_minutes: 30.0
+peer_message_max_chars: 3000

@@ -59,6 +59,7 @@ OPTIMIZABLE_SETTINGS: dict[str, dict[str, Any]] = {
     "browser_rate_limit_per_minute":    {"type": int,   "min": 1,    "max": 120},
     "browser_timeout_seconds":          {"type": int,   "min": 5,    "max": 120},
     "peer_checkin_interval_minutes":    {"type": float, "min": 1.0, "max": 120.0},
+    "peer_message_max_chars":           {"type": int,   "min": 500, "max": 10000},
     "log_level":                        {"type": str,   "choices": ["DEBUG", "INFO", "WARNING", "ERROR"]},
     "dry_run_mode":                     {"type": bool},
 }
@@ -194,6 +195,9 @@ class MainLoop:
         )
         self._peer_checkin_interval = getattr(
             settings, "peer_checkin_interval_minutes", 30.0
+        )
+        self._peer_msg_limit: int = getattr(
+            settings, "peer_message_max_chars", 3000
         )
         self._last_peer_checkin: datetime | None = None
         self._browser: Any = None  # lazy WebBrowser
@@ -1108,13 +1112,15 @@ class MainLoop:
             f"You're checking in with your fellow council members. "
             f"Share what you've been exploring, what you've found "
             f"interesting, any questions or insights you want to "
-            f"discuss. Be natural and collegial."
+            f"discuss. Be natural and collegial.\n\n"
+            f"IMPORTANT: Keep your message under {self._peer_msg_limit} characters."
         )
 
         try:
             message = await self._llm.complete(
                 [Message(role="system", content=prompt)]
             )
+            message = message[:self._peer_msg_limit]
             if self._peer_bus:
                 count = await self._peer_bus.broadcast(
                     self.agent_name, f"[Check-in] {message}"
@@ -1985,13 +1991,15 @@ class MainLoop:
             f"- THINK <topic> to reflect privately\n"
             f"- Just respond naturally\n\n"
             f"If you want to take an action, put it on its own line "
-            f"AFTER your response."
+            f"AFTER your response.\n\n"
+            f"IMPORTANT: Keep your response under {self._peer_msg_limit} characters."
         )
 
         try:
             response = await self._llm.complete(
                 [Message(role="system", content=prompt)]
             )
+            response = response[:self._peer_msg_limit]
             self._recent_thoughts.append(
                 f"Discussed with {msg.from_agent}: {response[:200]}"
             )

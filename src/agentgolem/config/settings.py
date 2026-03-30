@@ -44,6 +44,7 @@ class Settings(BaseModel):
     autonomous_interval_seconds: float = 60.0
     name_discovery_cycles: int = 4
     peer_checkin_interval_minutes: float = 30.0
+    peer_message_max_chars: int = 3000
 
 
 def load_settings(config_path: Path = Path("config/settings.yaml")) -> Settings:
