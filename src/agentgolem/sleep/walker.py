@@ -37,7 +37,7 @@ class GraphWalker:
     # ------------------------------------------------------------------
 
     async def sample_seeds(self, n: int) -> list[str]:
-        """Return up to *n* node IDs weighted by centrality × recency × emotion.
+        """Return up to *n* node IDs weighted by centrality × recency × emotion × salience.
 
         Higher emotion_score nodes are more likely to be selected,
         mimicking how dreams preferentially replay emotionally charged
@@ -46,7 +46,7 @@ class GraphWalker:
         now = datetime.now(timezone.utc)
 
         async with self._store._db.execute(
-            "SELECT id, centrality, last_accessed, emotion_score "
+            "SELECT id, centrality, last_accessed, emotion_score, salience "
             "FROM nodes WHERE status = 'active'"
         ) as cur:
             rows = await cur.fetchall()
@@ -60,12 +60,14 @@ class GraphWalker:
             node_id: str = row["id"]
             centrality: float = row["centrality"]
             emotion: float = row["emotion_score"] or 0.0
+            salience: float = row["salience"] or 0.5
             last_accessed = datetime.fromisoformat(row["last_accessed"])
             days_since = (now - last_accessed).total_seconds() / 86_400
             recency_score = 1.0 / max(1.0, days_since)
             # Emotion boost: neutral (0.0) gets 1×, high emotion (1.0) gets 3×
             emotion_boost = 1.0 + 2.0 * min(abs(emotion), 1.0)
-            weight = centrality * recency_score * emotion_boost
+            salience_boost = 1.0 + min(max(salience, 0.0), 1.0)
+            weight = centrality * recency_score * emotion_boost * salience_boost
             ids.append(node_id)
             weights.append(max(weight, 1e-9))
 

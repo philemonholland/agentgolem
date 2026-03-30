@@ -154,7 +154,8 @@ The launcher (`run_golem.py`) orchestrates:
 2. Content is **encoded** into conceptual nodes with `Source` provenance objects
 3. Nodes pass through the **trust pipeline** (Bayesian update, independence discount)
 4. Trusted nodes are stored in the **memory graph** (SQLite, WAL mode)
-5. The **retrieval** system queries the graph for relevant context
+5. The **retrieval** system queries the graph for relevant context using
+   full-text claims plus compact `search_text` projections
 6. The **LLM** reasons over retrieved context to produce responses, decisions, and proposals
 7. Proposals for outbound actions pass through **approval gates**
 8. Identity documents (**soul**, **heartbeat**) are updated through constrained processes
@@ -165,19 +166,22 @@ The launcher (`run_golem.py`) orchestrates:
 
 ### Conceptual Nodes
 
-Each memory is represented as a **ConceptualNode** — a short natural-language
-claim (3–15 words) with metadata.
+Each memory is represented as a **ConceptualNode** — a natural-language claim
+that captures **one clean idea** with metadata. Claims are no longer forced
+into a 3–15 word micro-phrase.
 
 | Field              | Type           | Description                                |
 |--------------------|----------------|--------------------------------------------|
 | `id`               | `str` (UUID)   | Unique identifier                          |
-| `text`             | `str`          | Natural-language claim (3–15 words)        |
+| `text`             | `str`          | Full natural-language claim                |
+| `search_text`      | `str`          | Compact search/retrieval projection        |
 | `type`             | `NodeType`     | One of 10 types (see below)                |
 | `created_at`       | `str` (ISO)    | Creation timestamp (UTC)                   |
 | `last_accessed`    | `str` (ISO)    | Last retrieval timestamp                   |
 | `access_count`     | `int`          | Number of times retrieved                  |
 | `base_usefulness`  | `float`        | Base usefulness score [0, 1]               |
 | `trustworthiness`  | `float`        | Bayesian trust probability [0.01, 0.99]    |
+| `salience`         | `float`        | Within-source importance [0, 1]            |
 | `emotion_label`    | `str \| None`  | Optional emotion label                     |
 | `emotion_score`    | `float`        | Emotion intensity [0, 1]                   |
 | `centrality`       | `float`        | Graph centrality score [0, 1]              |
@@ -231,7 +235,7 @@ rarely-used ones.
 
 The memory graph is stored in **SQLite** with WAL mode for concurrent reads.
 Tables: `nodes`, `edges`, `sources`, `node_sources` (junction), `clusters`,
-`cluster_nodes` (junction).
+`cluster_members` (junction), `cluster_sources` (junction).
 
 All `datetime` values are stored as ISO 8601 strings. The `canonical` boolean
 is stored as `INTEGER` (0/1).
@@ -300,8 +304,10 @@ trust_useful = base_usefulness × trustworthiness
 
 - `base_usefulness` is adjusted by bump/penalize events
 - `trustworthiness` comes from Bayesian updates
-- `trust_useful` is the composite score used for retrieval ranking, retention
-  decisions, and quarantine checks
+- `trust_useful` is the core memory-value score used by retrieval, retention,
+  and quarantine
+- retrieval also blends query match, `salience`, `centrality`, recency, and
+  source reliability for dynamic ranking
 
 ---
 
@@ -313,7 +319,8 @@ When in `ASLEEP` mode, the agent runs periodic consolidation cycles.
 
 The `GraphWalker` performs **spreading-activation walks** over the memory graph:
 
-1. **Seed selection** — Sample seed nodes weighted by `centrality × recency`
+1. **Seed selection** — Sample seed nodes weighted by
+   `centrality × recency × emotion × salience`
 2. **Bounded walk** — Starting from the seed, traverse edges probabilistically
    weighted by edge `weight`. Respect budget constraints:
    - `sleep_max_nodes_per_cycle` (default: 100 nodes)

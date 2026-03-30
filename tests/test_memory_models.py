@@ -1,4 +1,6 @@
 """Tests for memory graph data models."""
+from __future__ import annotations
+
 from datetime import datetime, timezone
 
 from agentgolem.memory.models import (
@@ -18,6 +20,7 @@ from agentgolem.memory.models import (
 def test_conceptual_node_defaults():
     node = ConceptualNode(text="Python is great", type=NodeType.FACT)
     assert node.text == "Python is great"
+    assert node.search_text == ""
     assert node.type is NodeType.FACT
     assert isinstance(node.id, str) and len(node.id) == 36
     assert isinstance(node.created_at, datetime)
@@ -25,6 +28,7 @@ def test_conceptual_node_defaults():
     assert node.access_count == 0
     assert node.base_usefulness == 0.5
     assert node.trustworthiness == 0.5
+    assert node.salience == 0.5
     assert node.emotion_label == "neutral"
     assert node.emotion_score == 0.0
     assert node.centrality == 0.0
@@ -113,10 +117,17 @@ def test_node_filter_defaults():
 
 
 def test_node_update_partial():
-    update = NodeUpdate(text="updated text", base_usefulness=0.9)
+    update = NodeUpdate(
+        text="updated text",
+        search_text="updated search text",
+        base_usefulness=0.9,
+        salience=0.8,
+    )
     assert update.text == "updated text"
+    assert update.search_text == "updated search text"
     assert update.base_usefulness == 0.9
     assert update.trustworthiness is None
+    assert update.salience == 0.8
     assert update.emotion_label is None
     assert update.status is None
     assert update.canonical is None

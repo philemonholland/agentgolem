@@ -15,7 +15,7 @@ and gradually evolve their own code through unanimous, Vow-aligned consensus.
 - **Ethical Council** — Six agents with distinct vectors (alleviating woe, graceful power, kindness, unwavering integrity, evolution, integration & balance)
 - **Chapter-by-Chapter Reading** — Agents read Niscalajyoti.org sequentially, discuss after each chapter, then revisit freely once done
 - **Evolving Identity** — Per-agent `soul.md` that changes only through evidenced, versioned updates
-- **Graph Memory** — Conceptual nodes, typed edges, memory clusters in SQLite per agent
+- **Graph Memory** — EKG-inspired multi-view memory graphs with richer claims, typed edges, search projections, and clusters in SQLite per agent
 - **Bayesian Trust Model** — Odds-space updates with independence discount; per-source reliability
 - **Sleep / Default-Mode** — Continuous dream-like graph walks with emotion-weighted seed selection during sleep cycles
 - **Memory-Informed Decisions** — Agents recall relevant past memories when thinking, deciding, and discussing
@@ -164,6 +164,10 @@ Double-click **`reset.bat`** to wipe agent state and start fresh:
 - **Full reset** — clears memory graphs, reading progress, logs, heartbeats
 - **Soft reset** — clears progress & logs but keeps memory graphs intact
 
+If the memory schema version changes, outdated `graph.db` files are rebuilt
+automatically on startup. This EKG overhaul intentionally invalidates the older
+flat short-claim graph format.
+
 `soul.md` files (agent personality) are always preserved.
 
 ---
@@ -176,7 +180,7 @@ pytest --cov=agentgolem          # With coverage
 pytest -m "not integration"      # Skip integration tests
 ```
 
-The test suite contains 531 tests across 32+ test files.
+The test suite contains 539 tests across 32+ test files.
 
 ---
 

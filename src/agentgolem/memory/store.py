@@ -33,19 +33,21 @@ class SQLiteMemoryStore:
         """Insert a node. Returns the node id."""
         await self._db.execute(
             """INSERT INTO nodes
-               (id, text, type, created_at, last_accessed, access_count,
-                base_usefulness, trustworthiness, emotion_label, emotion_score,
+               (id, text, search_text, type, created_at, last_accessed, access_count,
+                base_usefulness, trustworthiness, salience, emotion_label, emotion_score,
                 centrality, status, canonical)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 node.id,
                 node.text,
+                node.search_text,
                 node.type.value,
                 node.created_at.isoformat(),
                 node.last_accessed.isoformat(),
                 node.access_count,
                 node.base_usefulness,
                 node.trustworthiness,
+                node.salience,
                 node.emotion_label,
                 node.emotion_score,
                 node.centrality,
@@ -84,8 +86,10 @@ class SQLiteMemoryStore:
         params: list[Any] = []
         for fld, val in [
             ("text", updates.text),
+            ("search_text", updates.search_text),
             ("base_usefulness", updates.base_usefulness),
             ("trustworthiness", updates.trustworthiness),
+            ("salience", updates.salience),
             ("emotion_label", updates.emotion_label),
             ("emotion_score", updates.emotion_score),
             ("centrality", updates.centrality),
@@ -143,8 +147,10 @@ class SQLiteMemoryStore:
             clauses.append("base_usefulness <= ?")
             params.append(filters.usefulness_max)
         if filters.text_contains is not None:
-            clauses.append("text LIKE ?")
-            params.append(f"%{filters.text_contains}%")
+            clauses.append("(text LIKE ? OR search_text LIKE ?)")
+            params.extend(
+                [f"%{filters.text_contains}%", f"%{filters.text_contains}%"]
+            )
 
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         sql = f"SELECT * FROM nodes{where} LIMIT ? OFFSET ?"  # noqa: S608
@@ -160,8 +166,10 @@ class SQLiteMemoryStore:
         """Search active nodes matching ANY of the given keywords."""
         if not keywords:
             return []
-        clauses = " OR ".join("text LIKE ?" for _ in keywords)
-        params: list[Any] = [f"%{kw}%" for kw in keywords]
+        clauses = " OR ".join("(text LIKE ? OR search_text LIKE ?)" for _ in keywords)
+        params: list[Any] = []
+        for kw in keywords:
+            params.extend([f"%{kw}%", f"%{kw}%"])
         params.append(limit)
         sql = (
             f"SELECT * FROM nodes WHERE status = 'active'"  # noqa: S608
@@ -476,12 +484,14 @@ class SQLiteMemoryStore:
         return ConceptualNode(
             id=row["id"],
             text=row["text"],
+            search_text=row["search_text"],
             type=NodeType(row["type"]),
             created_at=datetime.fromisoformat(row["created_at"]),
             last_accessed=datetime.fromisoformat(row["last_accessed"]),
             access_count=row["access_count"],
             base_usefulness=row["base_usefulness"],
             trustworthiness=row["trustworthiness"],
+            salience=row["salience"],
             emotion_label=row["emotion_label"],
             emotion_score=row["emotion_score"],
             centrality=row["centrality"],

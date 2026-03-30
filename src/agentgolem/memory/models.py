@@ -57,16 +57,18 @@ def _now() -> datetime:
 
 @dataclass
 class ConceptualNode:
-    """A short atomic concept (3-15 words)."""
+    """A memory claim that expresses one clean idea."""
 
     text: str
     type: NodeType
+    search_text: str = ""
     id: str = field(default_factory=_new_id)
     created_at: datetime = field(default_factory=_now)
     last_accessed: datetime = field(default_factory=_now)
     access_count: int = 0
     base_usefulness: float = 0.5
     trustworthiness: float = 0.5
+    salience: float = 0.5
     emotion_label: str = "neutral"
     emotion_score: float = 0.0
     centrality: float = 0.0
@@ -148,8 +150,10 @@ class NodeUpdate:
     """Partial update for a node."""
 
     text: str | None = None
+    search_text: str | None = None
     base_usefulness: float | None = None
     trustworthiness: float | None = None
+    salience: float | None = None
     emotion_label: str | None = None
     emotion_score: float | None = None
     centrality: float | None = None

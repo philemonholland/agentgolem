@@ -44,7 +44,13 @@ def _make_node(
 
 
 async def test_add_and_get_node(store: SQLiteMemoryStore):
-    node = _make_node(trustworthiness=0.8, base_usefulness=0.7, canonical=True)
+    node = _make_node(
+        trustworthiness=0.8,
+        base_usefulness=0.7,
+        canonical=True,
+        search_text="python dynamically typed",
+        salience=0.85,
+    )
     returned_id = await store.add_node(node)
     assert returned_id == node.id
 
@@ -52,9 +58,11 @@ async def test_add_and_get_node(store: SQLiteMemoryStore):
     assert fetched is not None
     assert fetched.id == node.id
     assert fetched.text == node.text
+    assert fetched.search_text == "python dynamically typed"
     assert fetched.type == NodeType.FACT
     assert fetched.trustworthiness == 0.8
     assert fetched.base_usefulness == 0.7
+    assert fetched.salience == 0.85
     assert fetched.canonical is True
     assert fetched.status == NodeStatus.ACTIVE
     assert fetched.emotion_label == "neutral"
@@ -83,11 +91,21 @@ async def test_update_node(store: SQLiteMemoryStore):
     node = _make_node()
     await store.add_node(node)
 
-    await store.update_node(node.id, NodeUpdate(text="Updated text", trustworthiness=0.9))
+    await store.update_node(
+        node.id,
+        NodeUpdate(
+            text="Updated text",
+            search_text="updated text search",
+            trustworthiness=0.9,
+            salience=0.75,
+        ),
+    )
     fetched = await store.get_node(node.id)
     assert fetched is not None
     assert fetched.text == "Updated text"
+    assert fetched.search_text == "updated text search"
     assert fetched.trustworthiness == 0.9
+    assert fetched.salience == 0.75
     # Unchanged fields stay the same
     assert fetched.base_usefulness == 0.5
     assert fetched.emotion_label == "neutral"
@@ -137,6 +155,30 @@ async def test_query_nodes_text_contains(store: SQLiteMemoryStore):
 
     results = await store.query_nodes(NodeFilter(text_contains="Python"))
     assert len(results) == 2
+
+
+async def test_query_nodes_text_contains_matches_search_text(store: SQLiteMemoryStore):
+    await store.add_node(
+        _make_node(
+            "Long-form memory about runtime tuning",
+            search_text="runtime tuning optimization",
+        )
+    )
+
+    results = await store.query_nodes(NodeFilter(text_contains="optimization"))
+    assert len(results) == 1
+
+
+async def test_search_nodes_by_keywords_matches_search_text(store: SQLiteMemoryStore):
+    await store.add_node(
+        _make_node(
+            "Long-form memory about runtime tuning",
+            search_text="runtime tuning optimization",
+        )
+    )
+
+    results = await store.search_nodes_by_keywords(["optimization"], limit=5)
+    assert len(results) == 1
 
 
 async def test_query_nodes_limit_offset(store: SQLiteMemoryStore):

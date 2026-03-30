@@ -32,10 +32,17 @@ def _node(
     trustworthiness: float = 0.5,
     node_type: NodeType = NodeType.FACT,
     node_id: str | None = None,
+    **extra,
 ) -> ConceptualNode:
-    kwargs: dict = dict(text=text, type=node_type, base_usefulness=base_usefulness, trustworthiness=trustworthiness)
+    kwargs: dict = dict(
+        text=text,
+        type=node_type,
+        base_usefulness=base_usefulness,
+        trustworthiness=trustworthiness,
+    )
     if node_id is not None:
         kwargs["id"] = node_id
+    kwargs.update(extra)
     return ConceptualNode(**kwargs)
 
 
@@ -55,6 +62,20 @@ async def test_retrieve_by_keyword(setup):
     assert results[0].text == "Python is dynamically typed"
 
 
+async def test_retrieve_matches_search_text(setup):
+    store, retriever = setup
+    await store.add_node(
+        _node(
+            "Long-form reflection about runtime behavior",
+            search_text="runtime optimization",
+        )
+    )
+
+    results = await retriever.retrieve("optimization")
+    assert len(results) == 1
+    assert results[0].search_text == "runtime optimization"
+
+
 async def test_retrieve_ranked_by_trust_useful(setup):
     store, retriever = setup
     # trust_useful = base_usefulness * trustworthiness
@@ -71,6 +92,30 @@ async def test_retrieve_ranked_by_trust_useful(setup):
     assert results[0].text == "Python advanced guide"
     assert results[1].text == "Python standard library"
     assert results[2].text == "Python basics intro"
+
+
+async def test_retrieve_uses_salience_as_tiebreaker(setup):
+    store, retriever = setup
+    await store.add_node(
+        _node(
+            "Python memory one",
+            base_usefulness=0.5,
+            trustworthiness=0.5,
+            salience=0.2,
+        )
+    )
+    await store.add_node(
+        _node(
+            "Python memory two",
+            base_usefulness=0.5,
+            trustworthiness=0.5,
+            salience=0.9,
+        )
+    )
+
+    results = await retriever.retrieve("Python")
+    assert len(results) == 2
+    assert results[0].text == "Python memory two"
 
 
 async def test_retrieve_empty_query(setup):

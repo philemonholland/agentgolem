@@ -4,8 +4,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import aiosqlite
+import structlog
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+logger = structlog.get_logger(__name__)
 
 TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -15,12 +17,14 @@ CREATE TABLE IF NOT EXISTS schema_version (
 CREATE TABLE IF NOT EXISTS nodes (
     id TEXT PRIMARY KEY,
     text TEXT NOT NULL,
+    search_text TEXT DEFAULT '',
     type TEXT NOT NULL,
     created_at TEXT NOT NULL,
     last_accessed TEXT NOT NULL,
     access_count INTEGER DEFAULT 0,
     base_usefulness REAL DEFAULT 0.5,
     trustworthiness REAL DEFAULT 0.5,
+    salience REAL DEFAULT 0.5,
     emotion_label TEXT DEFAULT 'neutral',
     emotion_score REAL DEFAULT 0.0,
     centrality REAL DEFAULT 0.0,
@@ -94,12 +98,37 @@ CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(type);
 CREATE INDEX IF NOT EXISTS idx_nodes_status ON nodes(status);
 CREATE INDEX IF NOT EXISTS idx_nodes_trustworthiness ON nodes(trustworthiness);
 CREATE INDEX IF NOT EXISTS idx_nodes_base_usefulness ON nodes(base_usefulness);
+CREATE INDEX IF NOT EXISTS idx_nodes_search_text ON nodes(search_text);
 CREATE INDEX IF NOT EXISTS idx_nodes_last_accessed ON nodes(last_accessed);
 CREATE INDEX IF NOT EXISTS idx_nodes_canonical ON nodes(canonical);
 CREATE INDEX IF NOT EXISTS idx_edges_source_id ON edges(source_id, edge_type);
 CREATE INDEX IF NOT EXISTS idx_edges_target_id ON edges(target_id, edge_type);
 CREATE INDEX IF NOT EXISTS idx_clusters_status ON clusters(status);
 """
+
+
+def _remove_db_files(db_path: Path) -> None:
+    """Delete the main DB file and SQLite sidecars."""
+    for path in (
+        db_path,
+        Path(f"{db_path}-wal"),
+        Path(f"{db_path}-shm"),
+    ):
+        path.unlink(missing_ok=True)
+
+
+async def _peek_db_version(db: aiosqlite.Connection) -> int:
+    """Read an existing DB version without assuming the schema exists."""
+    async with db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'"
+    ) as cursor:
+        row = await cursor.fetchone()
+    if row is None:
+        return 0
+
+    async with db.execute("SELECT MAX(version) FROM schema_version") as cursor:
+        row = await cursor.fetchone()
+    return row[0] if row and row[0] else 0
 
 
 async def init_db(db_path: Path) -> aiosqlite.Connection:
@@ -112,6 +141,21 @@ async def init_db(db_path: Path) -> aiosqlite.Connection:
     await db.execute("PRAGMA journal_mode=WAL")
     await db.execute("PRAGMA foreign_keys=ON")
 
+    current_version = await _peek_db_version(db)
+    if current_version not in (0, SCHEMA_VERSION):
+        await db.close()
+        logger.warning(
+            "memory_schema_reset",
+            path=str(db_path),
+            old_version=current_version,
+            new_version=SCHEMA_VERSION,
+        )
+        _remove_db_files(db_path)
+        db = await aiosqlite.connect(str(db_path))
+        db.row_factory = aiosqlite.Row
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA foreign_keys=ON")
+
     # Create tables
     await db.executescript(TABLES_SQL)
     await db.executescript(INDEXES_SQL)
@@ -119,10 +163,15 @@ async def init_db(db_path: Path) -> aiosqlite.Connection:
     # Set version
     async with db.execute("SELECT COUNT(*) FROM schema_version") as cursor:
         row = await cursor.fetchone()
-        if row[0] == 0:
-            await db.execute(
-                "INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
-            )
+    if row[0] == 0:
+        await db.execute(
+            "INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+        )
+    else:
+        await db.execute("DELETE FROM schema_version")
+        await db.execute(
+            "INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+        )
 
     await db.commit()
     return db

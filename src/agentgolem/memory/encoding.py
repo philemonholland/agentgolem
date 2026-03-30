@@ -1,11 +1,11 @@
-"""Memory encoding — input → conceptual memories pipeline."""
+"""Memory encoding — EKG-inspired input → multi-level memory graph pipeline."""
 from __future__ import annotations
 
-import json
 import re
-from typing import Any
+from dataclasses import dataclass
+from datetime import datetime, timezone
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from agentgolem.llm.base import LLMClient, Message
 from agentgolem.logging.audit import AuditLogger
@@ -14,10 +14,9 @@ from agentgolem.memory.models import (
     EdgeType,
     MemoryCluster,
     MemoryEdge,
-    NodeFilter,
     NodeType,
+    NodeUpdate,
     Source,
-    SourceKind,
 )
 from agentgolem.memory.store import SQLiteMemoryStore
 
@@ -35,7 +34,6 @@ TYPE_PRIORS: dict[NodeType, float] = {
     NodeType.PROCEDURE: 0.6,
 }
 
-# Short words to skip when building keyword searches
 _STOP_WORDS = frozenset(
     "a an the is are was were be been being have has had do does did "
     "will would shall should may might can could of in to for on with "
@@ -45,24 +43,57 @@ _STOP_WORDS = frozenset(
     "our they them their he she him her who what which where when how".split()
 )
 
+_DEFAULT_RELATION_WEIGHT = 0.7
 
-def _extract_keywords(text: str, max_words: int = 5) -> list[str]:
+
+def _extract_keywords(text: str, max_words: int = 6) -> list[str]:
     """Extract significant keywords from text for graph search."""
     words = re.findall(r"[a-zA-Z]{3,}", text.lower())
     return [w for w in words if w not in _STOP_WORDS][:max_words]
 
 
+def _normalize_text_key(text: str) -> str:
+    """Normalize free text into a stable merge/matching key."""
+    words = re.findall(r"[a-z0-9]+", text.lower())
+    return " ".join(words[:12])
+
+
+@dataclass
+class _AppliedConcept:
+    concept: DecomposedConcept
+    node: ConceptualNode
+    created: bool
+
+
 class DecomposedConcept(BaseModel):
     text: str
-    type: str  # will be mapped to NodeType
+    type: str
+    search_text: str = ""
+    salience: float = 0.5
+    emotion_label: str = "neutral"
+    emotion_score: float = 0.0
+
+
+class DecompositionRelation(BaseModel):
+    source_text: str
+    target_text: str
+    edge_type: str
+    weight: float = _DEFAULT_RELATION_WEIGHT
+
+
+class DecompositionView(BaseModel):
+    label: str = ""
+    concepts: list[DecomposedConcept] = Field(default_factory=list)
+    relations: list[DecompositionRelation] = Field(default_factory=list)
 
 
 class DecompositionResult(BaseModel):
-    concepts: list[DecomposedConcept]
+    grounded_view: DecompositionView = Field(default_factory=DecompositionView)
+    semantic_view: DecompositionView = Field(default_factory=DecompositionView)
 
 
 class ComparisonDecision(BaseModel):
-    decision: str  # "new_node", "keep_exact", "keep_both", "merge_candidate", "supersedes", "contradicts"
+    decision: str  # new_node, keep_exact, keep_both, merge_candidate, supersedes, contradicts
     existing_node_id: str = ""
     reason: str = ""
 
@@ -83,50 +114,43 @@ class MemoryEncoder:
         self._audit = audit_logger
 
     async def encode(self, input_text: str, source: Source) -> list[ConceptualNode]:
-        """Full encoding pipeline: decompose → classify → compare → store → link."""
-        # Step 1-2: Decompose and classify
-        concepts = await self._decompose(input_text)
+        """Encode text into a richer multi-level memory graph."""
+        concepts, relations, cluster_label = await self._decompose(input_text)
+        if not concepts:
+            return []
 
-        # Store source
         await self._store.add_source(source)
 
-        # Step 3: Map types
         node_types = [self._map_type(c.type) for c in concepts]
-
-        # Step 4: Find related existing nodes for ALL concepts at once
-        all_keywords: set[str] = set()
-        for concept in concepts:
-            all_keywords.update(_extract_keywords(concept.text))
-        existing = await self._store.search_nodes_by_keywords(
-            list(all_keywords), limit=20
-        ) if all_keywords else []
-
-        # Step 5: Batch-decide actions for all concepts in one LLM call
+        existing = await self._collect_existing_candidates(concepts)
         decisions = await self._compare_batch(concepts, existing)
 
-        # Step 6: Create or update based on decisions
-        created_nodes: list[ConceptualNode] = []
+        applied: list[_AppliedConcept] = []
         for concept, node_type, decision in zip(concepts, node_types, decisions):
-            node = await self._apply_decision(concept, node_type, decision, source)
-            if node:
-                created_nodes.append(node)
+            result = await self._apply_decision(concept, node_type, decision, source)
+            if result is not None:
+                applied.append(result)
 
-        # Step 7: Link nodes from this batch to each other (RELATED_TO)
-        await self._link_batch(created_nodes)
+        resolved_nodes = [entry.node for entry in applied]
+        if not resolved_nodes:
+            return []
 
-        # Step 8: Build cluster if multiple nodes
-        if len(created_nodes) > 1:
-            cluster = MemoryCluster(
-                label=input_text[:60],
-                node_ids=[n.id for n in created_nodes],
-                source_ids=[source.id],
+        await self._apply_relations(applied, relations)
+        if len(resolved_nodes) > 1 and not relations:
+            await self._ensure_batch_connectivity(resolved_nodes)
+
+        if len(resolved_nodes) > 1:
+            cluster = self._build_cluster(
+                label=cluster_label or input_text[:60],
+                nodes=resolved_nodes,
+                source_id=source.id,
             )
             cluster_id = await self._store.add_cluster(cluster)
-            for n in created_nodes:
-                await self._store.add_cluster_member(cluster_id, n.id)
+            for node in resolved_nodes:
+                await self._store.add_cluster_member(cluster_id, node.id)
             await self._store.link_cluster_source(cluster_id, source.id)
 
-        # Log
+        created_nodes = [entry.node for entry in applied if entry.created]
         if self._audit:
             self._audit.log(
                 mutation_type="memory_encode",
@@ -135,60 +159,231 @@ class MemoryEncoder:
                     "input_length": len(input_text),
                     "concepts_found": len(concepts),
                     "nodes_created": len(created_nodes),
-                    "source_kind": source.kind.value,
+                    "nodes_resolved": len(resolved_nodes),
+                    "relations_created": len(relations),
+                    "source_origin": source.origin,
                 },
             )
 
         return created_nodes
 
-    async def _decompose(self, text: str) -> list[DecomposedConcept]:
-        """Use LLM to decompose text into atomic concepts."""
+    async def _decompose(
+        self, text: str
+    ) -> tuple[list[DecomposedConcept], list[DecompositionRelation], str]:
+        """Build two graph views of the same input, then reconcile them."""
         prompt = (
-            "Decompose the following text into atomic conceptual memories. "
-            "Each concept should be 3-15 words. Classify each as one of: "
-            "fact, preference, event, goal, risk, interpretation, identity, rule, association, procedure.\n\n"
-            f"Text: {text}\n\n"
-            'Respond with JSON: {{"concepts": [{{"text": "...", "type": "..."}}]}}'
+            "Build a robust memory graph for the following text using TWO complementary views.\n\n"
+            "View 1 (grounded_view): extract direct source-grounded memory claims.\n"
+            "View 2 (semantic_view): extract thematic/relational memory claims and relations.\n\n"
+            "Rules:\n"
+            "- Each claim must express one clean idea.\n"
+            "- Claims may be longer than 15 words if needed.\n"
+            "- search_text should be a short retrieval projection (keywords or compact paraphrase).\n"
+            "- salience is a float from 0.0 to 1.0.\n"
+            "- emotion_score is a float from -1.0 to 1.0.\n"
+            "- relation edge_type must be one of: related_to, part_of, supports, contradicts, supersedes, same_as, merge_candidate, derived_from.\n"
+            "- relation source_text and target_text must reference claims from the same view.\n\n"
+            f"Text:\n{text}"
         )
         result = await self._llm.complete_structured(
             [Message(role="user", content=prompt)],
             DecompositionResult,
             timeout=120.0,
         )
-        return result.concepts
+        return self._reconcile_views(result, text)
+
+    def _reconcile_views(
+        self, result: DecompositionResult, original_text: str
+    ) -> tuple[list[DecomposedConcept], list[DecompositionRelation], str]:
+        """Merge grounded + semantic views into one consistent candidate graph."""
+        merged: dict[str, DecomposedConcept] = {}
+        alias_to_key: dict[str, str] = {}
+        counts: dict[str, int] = {}
+        labels: list[str] = []
+
+        for view in (result.grounded_view, result.semantic_view):
+            if view.label:
+                labels.append(view.label.strip())
+            for concept in view.concepts:
+                key = self._concept_key(concept)
+                if not key:
+                    continue
+                alias_to_key[_normalize_text_key(concept.text)] = key
+                if concept.search_text:
+                    alias_to_key[_normalize_text_key(concept.search_text)] = key
+
+                existing = merged.get(key)
+                if existing is None:
+                    merged[key] = concept.model_copy(deep=True)
+                else:
+                    merged[key] = self._merge_concepts(existing, concept)
+                counts[key] = counts.get(key, 0) + 1
+
+        for key, concept in merged.items():
+            if counts.get(key, 0) > 1:
+                concept.salience = min(1.0, concept.salience + 0.15)
+            if not concept.search_text:
+                concept.search_text = " ".join(_extract_keywords(concept.text))
+
+        relation_map: dict[tuple[str, str, str], float] = {}
+        relation_counts: dict[tuple[str, str, str], int] = {}
+        for view in (result.grounded_view, result.semantic_view):
+            for relation in view.relations:
+                source_key = alias_to_key.get(_normalize_text_key(relation.source_text))
+                target_key = alias_to_key.get(_normalize_text_key(relation.target_text))
+                if not source_key or not target_key or source_key == target_key:
+                    continue
+
+                edge_type = self._map_edge_type(relation.edge_type)
+                rel_key = (source_key, target_key, edge_type.value)
+                relation_map[rel_key] = max(
+                    relation_map.get(rel_key, 0.0),
+                    min(max(relation.weight, 0.1), 1.0),
+                )
+                relation_counts[rel_key] = relation_counts.get(rel_key, 0) + 1
+
+        resolved_relations: list[DecompositionRelation] = []
+        for (source_key, target_key, edge_type), weight in relation_map.items():
+            count = relation_counts[(source_key, target_key, edge_type)]
+            boosted_weight = min(1.0, weight + 0.1 if count > 1 else weight)
+            resolved_relations.append(
+                DecompositionRelation(
+                    source_text=merged[source_key].text,
+                    target_text=merged[target_key].text,
+                    edge_type=edge_type,
+                    weight=boosted_weight,
+                )
+            )
+
+        cluster_label = next((label for label in labels if label), original_text[:60])
+        return list(merged.values()), resolved_relations, cluster_label[:120]
+
+    def _merge_concepts(
+        self, current: DecomposedConcept, incoming: DecomposedConcept
+    ) -> DecomposedConcept:
+        """Merge duplicate ideas from multiple extraction views."""
+        chosen_text = incoming.text if len(incoming.text) > len(current.text) else current.text
+        chosen_search = current.search_text or incoming.search_text
+        salience = max(current.salience, incoming.salience)
+
+        chosen_type = current.type
+        if incoming.salience > current.salience:
+            chosen_type = incoming.type
+
+        emotion = current
+        if abs(incoming.emotion_score) > abs(current.emotion_score):
+            emotion = incoming
+
+        return DecomposedConcept(
+            text=chosen_text,
+            type=chosen_type,
+            search_text=chosen_search,
+            salience=salience,
+            emotion_label=emotion.emotion_label,
+            emotion_score=emotion.emotion_score,
+        )
+
+    def _concept_key(self, concept: DecomposedConcept) -> str:
+        basis = concept.search_text or concept.text
+        return _normalize_text_key(basis)
+
+    async def _collect_existing_candidates(
+        self, concepts: list[DecomposedConcept]
+    ) -> list[ConceptualNode]:
+        all_keywords: set[str] = set()
+        for concept in concepts:
+            all_keywords.update(_extract_keywords(concept.text))
+            all_keywords.update(_extract_keywords(concept.search_text))
+
+        if not all_keywords:
+            return []
+
+        existing = await self._store.search_nodes_by_keywords(
+            list(all_keywords), limit=60
+        )
+        return await self._rank_existing_candidates(existing)
+
+    async def _rank_existing_candidates(
+        self, candidates: list[ConceptualNode]
+    ) -> list[ConceptualNode]:
+        """Apply dynamic-attention-style ranking to candidate memory nodes."""
+        now = datetime.now(timezone.utc)
+        scored: list[tuple[float, ConceptualNode]] = []
+
+        for node in candidates:
+            age_days = max(
+                0.0,
+                (now - node.last_accessed).total_seconds() / 86400.0,
+            )
+            recency_score = 1.0 / (1.0 + (age_days / 7.0))
+            source_quality = await self._average_source_reliability(node.id)
+            score = (
+                (0.35 * node.trust_useful)
+                + (0.20 * node.centrality)
+                + (0.15 * recency_score)
+                + (0.10 * abs(node.emotion_score))
+                + (0.10 * node.salience)
+                + (0.10 * source_quality)
+            )
+            scored.append((score, node))
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [node for _, node in scored[:20]]
+
+    async def _average_source_reliability(self, node_id: str) -> float:
+        sources = await self._store.get_node_sources(node_id)
+        if not sources:
+            return 0.5
+        return sum(source.reliability for source in sources) / len(sources)
 
     def _map_type(self, type_str: str) -> NodeType:
         """Map a string type to NodeType enum."""
         try:
             return NodeType(type_str.lower())
         except ValueError:
-            return NodeType.FACT  # default fallback
+            return NodeType.FACT
+
+    def _map_edge_type(self, type_str: str) -> EdgeType:
+        """Map relation text to a valid edge type."""
+        try:
+            return EdgeType(type_str.lower())
+        except ValueError:
+            return EdgeType.RELATED_TO
 
     async def _compare_batch(
         self,
         concepts: list[DecomposedConcept],
         existing: list[ConceptualNode],
     ) -> list[ComparisonDecision]:
-        """Compare ALL candidate concepts against existing nodes in one LLM call."""
+        """Compare all candidate concepts against existing nodes in one call."""
         if not existing:
             return [ComparisonDecision(decision="new_node") for _ in concepts]
 
         existing_descriptions = "\n".join(
-            f"- [{n.id}] {n.text} (type={n.type.value}, trust={n.trustworthiness:.2f})"
-            for n in existing
+            (
+                f"- [{node.id}] {node.text} "
+                f"(search={node.search_text or '(none)'}, "
+                f"type={node.type.value}, trust={node.trustworthiness:.2f}, "
+                f"salience={node.salience:.2f})"
+            )
+            for node in existing
         )
         concept_list = "\n".join(
-            f"  {i + 1}. \"{c.text}\" (type={c.type})"
-            for i, c in enumerate(concepts)
+            (
+                f'  {i + 1}. "{concept.text}" '
+                f"(search={concept.search_text or '(none)'}, "
+                f"type={concept.type}, salience={concept.salience:.2f})"
+            )
+            for i, concept in enumerate(concepts)
         )
         prompt = (
-            f"New concepts to store:\n{concept_list}\n\n"
+            f"New memory claims to store:\n{concept_list}\n\n"
             f"Existing nodes in memory:\n{existing_descriptions}\n\n"
-            f"For EACH new concept, decide: new_node, keep_exact (identical exists), "
-            f"keep_both (similar but different), merge_candidate (should merge), "
-            f"supersedes (new replaces old), contradicts (conflicts).\n"
-            f"Return one decision per concept in order.\n"
-            f'Respond with JSON: {{"decisions": [{{"decision": "...", "existing_node_id": "...", "reason": "..."}}]}}'
+            "For EACH new claim, decide one of: "
+            "new_node, keep_exact, keep_both, merge_candidate, supersedes, contradicts.\n"
+            "Use keep_exact only for materially identical claims.\n"
+            "Use keep_both when both claims should coexist.\n"
+            "Return one decision per claim in order."
         )
         try:
             result = await self._llm.complete_structured(
@@ -197,12 +392,10 @@ class MemoryEncoder:
                 timeout=120.0,
             )
             decisions = result.decisions
-            # Pad or trim to match concept count
             while len(decisions) < len(concepts):
                 decisions.append(ComparisonDecision(decision="new_node"))
             return decisions[: len(concepts)]
         except Exception:
-            # Fallback: treat everything as new
             return [ComparisonDecision(decision="new_node") for _ in concepts]
 
     async def _apply_decision(
@@ -211,33 +404,51 @@ class MemoryEncoder:
         node_type: NodeType,
         decision: ComparisonDecision,
         source: Source,
-    ) -> ConceptualNode | None:
+    ) -> _AppliedConcept | None:
         """Create/update nodes based on comparison decision."""
         trust_prior = TYPE_PRIORS.get(node_type, 0.5)
 
-        if decision.decision == "keep_exact":
-            # Node already exists, just link source (verify it exists first)
-            if decision.existing_node_id:
-                existing = await self._store.get_node(decision.existing_node_id)
-                if existing:
-                    await self._store.link_node_source(decision.existing_node_id, source.id)
-            return None
+        if decision.decision == "keep_exact" and decision.existing_node_id:
+            existing = await self._store.get_node(decision.existing_node_id)
+            if existing is None:
+                return None
 
-        # Create new node for: new_node, keep_both, merge_candidate, supersedes, contradicts
+            await self._store.link_node_source(existing.id, source.id)
+            updates = NodeUpdate()
+            dirty = False
+            if concept.search_text and not existing.search_text:
+                updates.search_text = concept.search_text
+                dirty = True
+            if concept.salience > existing.salience:
+                updates.salience = concept.salience
+                dirty = True
+            if abs(concept.emotion_score) > abs(existing.emotion_score):
+                updates.emotion_label = concept.emotion_label
+                updates.emotion_score = concept.emotion_score
+                dirty = True
+            if dirty:
+                await self._store.update_node(existing.id, updates)
+                refreshed = await self._store.get_node(existing.id)
+                if refreshed is not None:
+                    existing = refreshed
+            return _AppliedConcept(concept=concept, node=existing, created=False)
+
         node = ConceptualNode(
             text=concept.text,
+            search_text=concept.search_text,
             type=node_type,
             base_usefulness=trust_prior,
             trustworthiness=trust_prior,
+            salience=concept.salience,
+            emotion_label=concept.emotion_label,
+            emotion_score=concept.emotion_score,
         )
         await self._store.add_node(node)
         await self._store.link_node_source(node.id, source.id)
 
-        # Add relationship edges based on decision
         if decision.existing_node_id:
-            # Verify the referenced node actually exists (LLM may hallucinate IDs)
             existing_node = await self._store.get_node(decision.existing_node_id)
-            if existing_node:
+            if existing_node is not None:
                 edge_type_map = {
                     "supersedes": EdgeType.SUPERSEDES,
                     "contradicts": EdgeType.CONTRADICTS,
@@ -245,27 +456,71 @@ class MemoryEncoder:
                     "keep_both": EdgeType.RELATED_TO,
                 }
                 edge_type = edge_type_map.get(decision.decision)
-                if edge_type:
-                    edge = MemoryEdge(
-                        source_id=node.id,
-                        target_id=decision.existing_node_id,
-                        edge_type=edge_type,
+                if edge_type is not None:
+                    await self._store.add_edge(
+                        MemoryEdge(
+                            source_id=node.id,
+                            target_id=decision.existing_node_id,
+                            edge_type=edge_type,
+                        )
                     )
-                    await self._store.add_edge(edge)
 
-        return node
+        return _AppliedConcept(concept=concept, node=node, created=True)
 
-    async def _link_batch(self, nodes: list[ConceptualNode]) -> None:
-        """Connect nodes from the same encoding batch with RELATED_TO edges.
+    async def _apply_relations(
+        self,
+        applied: list[_AppliedConcept],
+        relations: list[DecompositionRelation],
+    ) -> None:
+        """Persist relation-aware edges from the reconciled batch graph."""
+        node_by_alias: dict[str, ConceptualNode] = {}
+        for entry in applied:
+            node_by_alias[_normalize_text_key(entry.concept.text)] = entry.node
+            if entry.concept.search_text:
+                node_by_alias[_normalize_text_key(entry.concept.search_text)] = entry.node
 
-        Uses a lightweight sequential chain (A→B→C→D) rather than a full mesh
-        to keep edge count linear while ensuring the batch is fully connected.
-        """
-        for i in range(len(nodes) - 1):
-            edge = MemoryEdge(
-                source_id=nodes[i].id,
-                target_id=nodes[i + 1].id,
-                edge_type=EdgeType.RELATED_TO,
-                weight=0.5,
+        for relation in relations:
+            source_node = node_by_alias.get(_normalize_text_key(relation.source_text))
+            target_node = node_by_alias.get(_normalize_text_key(relation.target_text))
+            if source_node is None or target_node is None or source_node.id == target_node.id:
+                continue
+
+            await self._store.add_edge(
+                MemoryEdge(
+                    source_id=source_node.id,
+                    target_id=target_node.id,
+                    edge_type=self._map_edge_type(relation.edge_type),
+                    weight=min(max(relation.weight, 0.1), 1.0),
+                )
             )
-            await self._store.add_edge(edge)
+
+    async def _ensure_batch_connectivity(self, nodes: list[ConceptualNode]) -> None:
+        """Fallback connectivity when the model produces no explicit relations."""
+        for i in range(len(nodes) - 1):
+            await self._store.add_edge(
+                MemoryEdge(
+                    source_id=nodes[i].id,
+                    target_id=nodes[i + 1].id,
+                    edge_type=EdgeType.RELATED_TO,
+                    weight=0.5,
+                )
+            )
+
+    def _build_cluster(
+        self, label: str, nodes: list[ConceptualNode], source_id: str
+    ) -> MemoryCluster:
+        """Create a cluster representing one encoding batch."""
+        trustworthiness = sum(node.trustworthiness for node in nodes) / len(nodes)
+        usefulness = sum(node.base_usefulness for node in nodes) / len(nodes)
+        emotion_node = max(nodes, key=lambda node: abs(node.emotion_score))
+        emotion_score = sum(node.emotion_score for node in nodes) / len(nodes)
+        return MemoryCluster(
+            label=label,
+            cluster_type="encoding_batch",
+            node_ids=[node.id for node in nodes],
+            source_ids=[source_id],
+            emotion_label=emotion_node.emotion_label,
+            emotion_score=emotion_score,
+            base_usefulness=usefulness,
+            trustworthiness=trustworthiness,
+        )

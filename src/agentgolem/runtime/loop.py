@@ -2536,7 +2536,12 @@ class MainLoop:
             lines = []
             for node in nodes:
                 emo = f" [{node.emotion_label}]" if node.emotion_label != "neutral" else ""
-                lines.append(f"- {node.text}{emo}")
+                if node.search_text and node.search_text.lower() != node.text.lower():
+                    lines.append(
+                        f"- {node.search_text}: {node.text}{emo}"
+                    )
+                else:
+                    lines.append(f"- {node.text}{emo}")
             return "Relevant memories:\n" + "\n".join(lines)
         except Exception:
             return ""

@@ -31,6 +31,7 @@ EXPECTED_INDEXES = {
     "idx_nodes_status",
     "idx_nodes_trustworthiness",
     "idx_nodes_base_usefulness",
+    "idx_nodes_search_text",
     "idx_nodes_last_accessed",
     "idx_nodes_canonical",
     "idx_edges_source_id",
@@ -94,3 +95,29 @@ async def test_init_db_idempotent(tmp_path):
         assert version == SCHEMA_VERSION
     finally:
         await close_db(conn2)
+
+
+async def test_init_db_resets_outdated_schema(tmp_path):
+    db_path = tmp_path / "memory" / "graph.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    stale = await aiosqlite.connect(str(db_path))
+    try:
+        await stale.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY)")
+        await stale.execute("INSERT INTO schema_version (version) VALUES (1)")
+        await stale.execute("CREATE TABLE nodes (id TEXT PRIMARY KEY, text TEXT NOT NULL)")
+        await stale.commit()
+    finally:
+        await stale.close()
+
+    conn = await init_db(db_path)
+    try:
+        version = await get_db_version(conn)
+        assert version == SCHEMA_VERSION
+
+        async with conn.execute("PRAGMA table_info(nodes)") as cursor:
+            columns = {row[1] async for row in cursor}
+        assert "search_text" in columns
+        assert "salience" in columns
+    finally:
+        await close_db(conn)

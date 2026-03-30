@@ -88,6 +88,35 @@ async def test_sample_seeds_weighted(walker: GraphWalker, store: SQLiteMemorySto
     assert counts[node_a.id] > counts[node_c.id]
 
 
+async def test_sample_seeds_respects_salience(walker: GraphWalker, store: SQLiteMemoryStore):
+    """Higher-salience nodes should be replayed more often when other factors match."""
+    low = ConceptualNode(
+        text="low salience node",
+        type=NodeType.FACT,
+        centrality=0.5,
+        base_usefulness=0.6,
+        trustworthiness=0.7,
+        salience=0.2,
+    )
+    high = ConceptualNode(
+        text="high salience node",
+        type=NodeType.FACT,
+        centrality=0.5,
+        base_usefulness=0.6,
+        trustworthiness=0.7,
+        salience=0.9,
+    )
+    await store.add_node(low)
+    await store.add_node(high)
+
+    counts = {low.id: 0, high.id: 0}
+    for _ in range(200):
+        seeds = await walker.sample_seeds(1)
+        counts[seeds[0]] += 1
+
+    assert counts[high.id] > counts[low.id]
+
+
 async def test_sample_seeds_fewer_than_n(walker: GraphWalker, store: SQLiteMemoryStore):
     """When fewer active nodes exist than n, return all of them."""
     node_a, node_b, node_c, *_ = await create_test_graph(store)

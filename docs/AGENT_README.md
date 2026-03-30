@@ -101,8 +101,10 @@ Your memory is a **directed graph** stored in SQLite.
 `SAME_AS`, `MERGE_CANDIDATE`, `DERIVED_FROM`
 
 ### Key Properties per Node
-- `text` — atomic concept (3–15 words)
+- `text` — full claim expressing one clean idea
+- `search_text` — compact retrieval/search projection
 - `trust_useful` = usefulness × trustworthiness (0–1)
+- `salience` — how important the claim was within the source/batch
 - `emotion_label` / `emotion_score` — semantic affect
 - `centrality` — graph importance
 - `access_count` / `last_accessed` — usage tracking
@@ -111,10 +113,12 @@ Your memory is a **directed graph** stored in SQLite.
 ### How Encoding Works
 When you read, discuss, or reflect, the text is sent through
 `memory/encoding.py` which:
-1. Breaks text into atomic concepts via LLM
-2. Batched comparison against existing nodes (1 LLM call)
-3. Creates new nodes, merges duplicates, or strengthens edges
-4. Links source provenance (web, peer, niscalajyoti, inference)
+1. Builds two complementary graph views: grounded claims and semantic/thematic claims
+2. Reconciles overlap and disagreement across those views
+3. Compares the reconciled claims against existing memory in one batch
+4. Creates/updates nodes with richer metadata (`search_text`, `salience`, emotion)
+5. Adds relation-aware edges (`supports`, `part_of`, `derived_from`, etc.) instead of only simple chain links
+6. Links source provenance (web, peer, niscalajyoti, inference)
 
 ### During Sleep — Continuous Dream Walks
 Your sleep is not idle; it is a **continuous cycle of dream-like graph walks**
@@ -122,12 +126,14 @@ running every ~10 seconds throughout the sleep period.
 
 **Seed selection** is emotion-weighted, mimicking dream behavior:
 ```
-weight = centrality × recency × emotion_boost
+weight = centrality × recency × emotion_boost × salience_boost
 emotion_boost = 1.0 + 2.0 × |emotion_score|
+salience_boost = 1.0 + salience
 ```
 Highly emotional memories (positive or negative) are 3× more likely to
-appear in your dreams than neutral ones.  Each walk spreads activation
-from the seed, reinforcing strong connections and weakening dormant ones.
+appear in your dreams than neutral ones, and highly salient memories are
+also replayed more often. Each walk spreads activation from the seed,
+reinforcing strong connections and weakening dormant ones.
 
 `sleep/consolidation.py` proposes merges and abstractions.
 You review and selectively apply them.

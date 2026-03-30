@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import deque
+from datetime import datetime, timezone
 from typing import Any
 
 from agentgolem.memory.models import (
@@ -10,7 +11,6 @@ from agentgolem.memory.models import (
     MemoryEdge,
     NodeFilter,
     NodeStatus,
-    NodeUpdate,
 )
 from agentgolem.memory.store import SQLiteMemoryStore
 
@@ -22,33 +22,69 @@ class MemoryRetriever:
     async def retrieve(
         self, query: str, top_k: int = 10, status: NodeStatus = NodeStatus.ACTIVE
     ) -> list[ConceptualNode]:
-        """Retrieve nodes matching a text query, ranked by trust_useful.
-
-        Uses keyword matching (text_contains) since we don't have embeddings yet.
-        Ranking: sort by trust_useful descending (NOT emotion).
-        """
-        words = query.split()
+        """Retrieve nodes with dynamic-attention-style ranking."""
+        words = [
+            word.strip()
+            for word in query.split()
+            if len(word.strip()) >= 3
+        ]
         all_results: dict[str, ConceptualNode] = {}
 
         for word in words:
-            if len(word) < 3:
-                continue
             nodes = await self._store.query_nodes(
-                NodeFilter(text_contains=word, status=status, limit=top_k * 3)
+                NodeFilter(text_contains=word, status=status, limit=top_k * 5)
             )
             for node in nodes:
                 all_results[node.id] = node
 
-        # Also do a full-phrase search
         phrase_results = await self._store.query_nodes(
             NodeFilter(text_contains=query, status=status, limit=top_k)
         )
         for node in phrase_results:
             all_results[node.id] = node
 
-        # Rank by trust_useful descending
-        ranked = sorted(all_results.values(), key=lambda n: n.trust_useful, reverse=True)
+        ranked = await self._rank_results(list(all_results.values()), query)
         return ranked[:top_k]
+
+    async def _rank_results(
+        self, nodes: list[ConceptualNode], query: str
+    ) -> list[ConceptualNode]:
+        """Rank retrieved nodes using query match + graph salience signals."""
+        scored: list[tuple[float, ConceptualNode]] = []
+        now = datetime.now(timezone.utc)
+        query_words = {word.lower() for word in query.split() if len(word) >= 3}
+
+        for node in nodes:
+            searchable = f"{node.text} {node.search_text}".lower()
+            keyword_hits = sum(1 for word in query_words if word in searchable)
+            match_score = keyword_hits / max(len(query_words), 1)
+
+            age_days = max(
+                0.0,
+                (now - node.last_accessed).total_seconds() / 86400.0,
+            )
+            recency_score = 1.0 / (1.0 + (age_days / 7.0))
+            source_quality = await self._average_source_reliability(node.id)
+
+            score = (
+                (0.40 * match_score)
+                + (0.25 * node.trust_useful)
+                + (0.10 * node.centrality)
+                + (0.05 * recency_score)
+                + (0.10 * node.salience)
+                + (0.05 * abs(node.emotion_score))
+                + (0.05 * source_quality)
+            )
+            scored.append((score, node))
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [node for _, node in scored]
+
+    async def _average_source_reliability(self, node_id: str) -> float:
+        sources = await self._store.get_node_sources(node_id)
+        if not sources:
+            return 0.5
+        return sum(source.reliability for source in sources) / len(sources)
 
     async def retrieve_neighborhood(
         self, node_id: str, depth: int = 2
