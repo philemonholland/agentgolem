@@ -40,7 +40,6 @@ for %%A in (council_1 council_2 council_3 council_4 council_5 council_6) do (
     del /q "data\%%A\state\runtime_state.json" 2>nul
     del /q "data\%%A\niscalajyoti_reading.json" 2>nul
     del /q "data\%%A\heartbeat.md" 2>nul
-    del /q "data\%%A\settings_overrides.yaml" 2>nul
     del /q "data\%%A\logs\audit.jsonl" 2>nul
     del /q "data\%%A\memory\graph.db" 2>nul
     del /q "data\%%A\memory\graph.db-shm" 2>nul
@@ -75,7 +74,6 @@ for %%A in (council_1 council_2 council_3 council_4 council_5 council_6) do (
     del /q "data\%%A\state\runtime_state.json" 2>nul
     del /q "data\%%A\niscalajyoti_reading.json" 2>nul
     del /q "data\%%A\heartbeat.md" 2>nul
-    del /q "data\%%A\settings_overrides.yaml" 2>nul
     del /q "data\%%A\logs\audit.jsonl" 2>nul
     for %%F in ("data\%%A\soul_versions\*") do if not "%%~nxF"==".gitkeep" del /q "%%F" 2>nul
     for %%F in ("data\%%A\heartbeat_history\*") do if not "%%~nxF"==".gitkeep" del /q "%%F" 2>nul

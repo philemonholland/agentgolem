@@ -1,4 +1,4 @@
-"""Shared LLM rate limiter — serialises requests across all agents."""
+"""Shared LLM rate limiter — spaces requests across all agents."""
 from __future__ import annotations
 
 import asyncio
@@ -13,47 +13,34 @@ T = TypeVar("T", bound=BaseModel)
 
 
 class LLMRateLimiter:
-    """FIFO lock with a cooldown between completions.
+    """Throttle that spaces LLM request *starts* by ``delay`` seconds.
 
-    All agents share one instance so only one LLM request flies at a time.
-    After a request completes the limiter waits ``delay`` seconds before
-    the next caller may proceed.  asyncio.Lock is FIFO in CPython, so
-    the agent that just finished naturally goes to the back of the queue.
+    Requests may overlap (one can still be streaming while the next begins),
+    but no two requests will *start* closer than ``delay`` seconds apart.
     """
 
     def __init__(self, delay: float = 3.0) -> None:
         self._delay = delay
         self._lock: asyncio.Lock | None = None
-        self._last_complete: float = 0.0
+        self._last_start: float = 0.0
 
     def _ensure_lock(self) -> asyncio.Lock:
-        # Create the lock lazily inside the running event loop
         if self._lock is None:
             self._lock = asyncio.Lock()
         return self._lock
 
-    async def acquire(self) -> None:
-        await self._ensure_lock().acquire()
-        now = time.monotonic()
-        wait = self._delay - (now - self._last_complete)
-        if wait > 0:
-            await asyncio.sleep(wait)
-
-    def release(self) -> None:
-        self._last_complete = time.monotonic()
-        if self._lock is not None and self._lock.locked():
-            self._lock.release()
-
-    async def __aenter__(self) -> "LLMRateLimiter":
-        await self.acquire()
-        return self
-
-    async def __aexit__(self, *args: Any) -> None:
-        self.release()
+    async def throttle(self) -> None:
+        """Wait until at least ``delay`` seconds since the last request started."""
+        async with self._ensure_lock():
+            now = time.monotonic()
+            wait = self._delay - (now - self._last_start)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last_start = time.monotonic()
 
 
 class RateLimitedLLM:
-    """Transparent wrapper that queues LLM calls through a shared limiter.
+    """Transparent wrapper that throttles LLM call starts through a shared limiter.
 
     Implements the same interface as ``OpenAIClient`` so it's a drop-in
     replacement — all existing ``self._llm.complete()`` and
@@ -65,14 +52,14 @@ class RateLimitedLLM:
         self._limiter = limiter
 
     async def complete(self, messages: list[Message], **kwargs: Any) -> str:
-        async with self._limiter:
-            return await self._inner.complete(messages, **kwargs)
+        await self._limiter.throttle()
+        return await self._inner.complete(messages, **kwargs)
 
     async def complete_structured(
         self, messages: list[Message], schema: type[T], **kwargs: Any
     ) -> T:
-        async with self._limiter:
-            return await self._inner.complete_structured(messages, schema, **kwargs)
+        await self._limiter.throttle()
+        return await self._inner.complete_structured(messages, schema, **kwargs)
 
     async def close(self) -> None:
         await self._inner.close()

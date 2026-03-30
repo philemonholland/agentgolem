@@ -49,12 +49,12 @@ def test_settings_from_yaml(mock_settings_yaml: Path) -> None:
 def test_settings_defaults_when_no_yaml(tmp_path: Path) -> None:
     settings = load_settings(tmp_path / "nonexistent.yaml")
     assert settings.data_dir == Path("data")
-    assert settings.awake_duration_minutes == 15.0
-    assert settings.sleep_duration_minutes == 60.0
-    assert settings.wind_down_minutes == 1.0
-    assert settings.llm_model == "gpt-5-mini"
+    assert settings.awake_duration_minutes == 10.0
+    assert settings.sleep_duration_minutes == 5.0
+    assert settings.wind_down_minutes == 2.0
+    assert settings.llm_model == "gpt-5"
     assert settings.log_level == "INFO"
-    assert settings.dry_run_mode is True
+    assert settings.dry_run_mode is False
     assert settings.approval_required_actions == ["email_send", "moltbook_send"]
 
 
