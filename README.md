@@ -15,10 +15,11 @@ and gradually evolve their own code through unanimous, Vow-aligned consensus.
 - **Ethical Council** — Six agents with distinct vectors (alleviating woe, graceful power, kindness, unwavering integrity, evolution, integration & balance)
 - **Chapter-by-Chapter Reading** — Agents read Niscalajyoti.org sequentially, discuss after each chapter, then revisit freely once done
 - **Evolving Identity** — Per-agent `soul.md` that changes only through evidenced, versioned updates
-- **Graph Memory** — EKG-inspired multi-view memory graphs with richer claims, typed edges, search projections, and clusters in SQLite per agent
+- **Graph Memory** — EKG-inspired multi-view memory graphs with richer claims, typed edges, search projections, clusters, and read-only cross-agent overlays
 - **Bayesian Trust Model** — Odds-space updates with independence discount; per-source reliability
 - **Sleep / Default-Mode** — Continuous dream-like graph walks with emotion-weighted seed selection during sleep cycles
 - **Memory-Informed Decisions** — Agents recall relevant past memories when thinking, deciding, and discussing
+- **Read-Only Mycelium** — Agents can surface entangled peer memories through owner-written exports while keeping foreign memories explicitly separate
 - **Self-Optimisation** — Agents tune their own settings (sleep/wake duration is protected)
 - **Self-Evolution** — Agents may modify their own source code with unanimous Vow-aligned consensus
 - **Web Exploration** — After completing Niscalajyoti, agents browse the web following their own interests
@@ -140,6 +141,10 @@ dashboard/   — FastAPI app, REST API, audit replay, templates
 The launcher (`run_golem.py`) orchestrates all six agents, the interactive
 console, the dashboard, and the shared message bus.
 
+Cross-agent memory sharing lives under `data\shared_memory\`:
+`exports\<agent>.sqlite` contains owner-written read-only projections, and
+`mycelium.db` stores entanglement links between `(agent_id, node_id)` refs.
+
 For detailed architecture, see **[docs/architecture.md](docs/architecture.md)**.
 
 ---
@@ -158,6 +163,7 @@ Opens <http://127.0.0.1:7777> with:
 - Interactive force-directed graph (D3.js)
 - Filter by node type, status, text search
 - Click any node for full details, edges, sources, clusters
+- Optional `🍄 Mycelium` overlay that adds read-only peer ghost nodes and dashed cross-agent entanglement links
 
 ---
 
@@ -184,7 +190,7 @@ pytest --cov=agentgolem          # With coverage
 pytest -m "not integration"      # Skip integration tests
 ```
 
-The test suite contains 539 tests across 32+ test files.
+The test suite covers the full runtime, memory, trust, sleep, and tooling stack.
 
 ---
 

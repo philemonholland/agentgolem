@@ -38,6 +38,12 @@ All agents share the same wake/sleep schedule (`agent_offset_minutes: 0`),
 each has its own graph memory (SQLite), soul, and heartbeat. They communicate
 via a shared message bus and periodically check in with peers.
 
+Cross-agent memory sharing stays read-only. Each agent owns its own
+`graph.db`, publishes a compact export snapshot under
+`data/shared_memory/exports/`, and participates in a separate
+`data/shared_memory/mycelium.db` overlay that stores entanglement links between
+memory references.
+
 The launcher (`run_golem.py`) orchestrates:
 - Agent lifecycle (wake/sleep/shutdown)
 - Interactive console (`golem>` prompt with `/speak`, `/continue`, `@Name`)
@@ -156,9 +162,11 @@ The launcher (`run_golem.py`) orchestrates:
 4. Trusted nodes are stored in the **memory graph** (SQLite, WAL mode)
 5. The **retrieval** system queries the graph for relevant context using
    full-text claims plus compact `search_text` projections
-6. The **LLM** reasons over retrieved context to produce responses, decisions, and proposals
-7. Proposals for outbound actions pass through **approval gates**
-8. Identity documents (**soul**, **heartbeat**) are updated through constrained processes
+6. Cross-agent recall optionally searches owner-written exports and follows
+   mycelium entanglements without touching foreign primary stores
+7. The **LLM** reasons over retrieved context to produce responses, decisions, and proposals
+8. Proposals for outbound actions pass through **approval gates**
+9. Identity documents (**soul**, **heartbeat**) are updated through constrained processes
 
 ---
 
@@ -240,6 +248,20 @@ Tables: `nodes`, `edges`, `sources`, `node_sources` (junction), `clusters`,
 All `datetime` values are stored as ISO 8601 strings. The `canonical` boolean
 is stored as `INTEGER` (0/1).
 
+### Cross-Agent Mycelium
+
+Agent memories are **federated**, not merged.
+
+- `data/shared_memory/exports/<agent>.sqlite` contains owner-written read-only
+  projections of active memories
+- `data/shared_memory/mycelium.db` stores entanglement links between
+  `(agent_id, node_id)` references rather than copying foreign nodes
+- waking recall can hydrate entangled peer memories, but only as a separate,
+  labeled prompt block
+
+This preserves ownership and provenance while still letting the council behave
+like an interconnected memory fabric.
+
 ---
 
 ## Trust Model
@@ -313,7 +335,8 @@ trust_useful = base_usefulness × trustworthiness
 
 ## Sleep / Default-Mode
 
-When in `ASLEEP` mode, the agent runs periodic consolidation cycles.
+When in `ASLEEP` mode, the agent runs periodic consolidation cycles roughly
+every 10 seconds.
 
 ### Graph Walker
 
@@ -327,7 +350,10 @@ The `GraphWalker` performs **spreading-activation walks** over the memory graph:
    - `sleep_max_time_ms` (default: 5000 ms)
 3. **Edge reinforcement** — Frequently-traversed edges have their weight
    increased (up to 5.0). Rarely-used edges are weakened (down to 0.01).
-4. **Interrupt check** — The walker checks for operator interrupts at each step
+4. **Mycelium entanglement** — The scheduler may derive a bounded query
+   signature from the walked local nodes, search peer export snapshots, and
+   reinforce overlay links in `mycelium.db`
+5. **Interrupt check** — The walker checks for operator interrupts at each step
    and can abort mid-walk.
 
 **Output:** `WalkResult` containing visited nodes, edge activations, proposed
@@ -352,11 +378,13 @@ during the next heartbeat cycle.
 The `SleepScheduler` orchestrates timing:
 
 ```
-should_run(mode) → True if mode == ASLEEP and time since last cycle ≥ sleep_cycle_minutes
-run_cycle(walker, engine, interrupt_check) → CycleResult
+should_run(mode) → True if mode == ASLEEP and time since last cycle ≥ ~10 seconds
+run_cycle(walker, engine, interrupt_check, post_walk_callback) → CycleResult
 ```
 
-State is persisted in `data/state/sleep_state.json`.
+It applies local walker actions, optionally runs a post-walk callback for
+cross-agent entanglement updates, and persists state in
+`data/state/sleep_state.json`.
 
 ---
 

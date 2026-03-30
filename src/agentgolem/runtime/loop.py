@@ -170,9 +170,11 @@ class MainLoop:
 
         # Agent identity
         self.agent_name = agent_name
+        self._agent_id = self._data_dir.name
         self.ethical_vector = ethical_vector
         self._peer_bus = peer_bus
         self._start_delay_seconds = start_delay_seconds
+        self._shared_memory_dir = self._data_dir.parent / "shared_memory"
 
         # Name discovery
         self._wake_cycle_count = 0
@@ -268,6 +270,11 @@ class MainLoop:
         self._memory_store: Any = None
         self._memory_encoder: Any = None
         self._memory_retriever: Any = None
+        self._shared_memory_exporter: Any = None
+        self._federated_memory_retriever: Any = None
+        self._mycelium_store: Any = None
+        self._shared_memory_export_dirty: bool = False
+        self._last_shared_memory_export_at: datetime | None = None
 
         # LLM client and conversation
         self._llm: Any = None
@@ -378,6 +385,202 @@ class MainLoop:
             "surprise.\n"
             "- Carry one or two threads deeper instead of trying to summarize "
             "everything."
+        )
+
+    async def _maybe_refresh_shared_memory_export(self, force: bool = False) -> None:
+        """Refresh the local read-only export snapshot when it becomes stale."""
+        if self._shared_memory_exporter is None:
+            return
+        now = datetime.now(timezone.utc)
+        if not force and not self._shared_memory_export_dirty:
+            return
+        if (
+            not force
+            and self._last_shared_memory_export_at is not None
+            and (now - self._last_shared_memory_export_at) < timedelta(seconds=30)
+        ):
+            return
+
+        try:
+            await self._shared_memory_exporter.export_snapshot(
+                agent_id=self._agent_id,
+                agent_label=self.agent_name,
+            )
+            self._shared_memory_export_dirty = False
+            self._last_shared_memory_export_at = now
+        except Exception as e:
+            self._logger.warning(
+                "shared_memory_export_error",
+                agent=self.agent_name,
+                error=repr(e),
+            )
+
+    async def _recall_entangled_peer_memories(
+        self, context: str, top_k: int = 3
+    ) -> str:
+        """Retrieve labeled peer memories through the shared mycelium overlay."""
+        if (
+            self._memory_retriever is None
+            or self._mycelium_store is None
+            or self._federated_memory_retriever is None
+        ):
+            return ""
+
+        try:
+            await self._maybe_refresh_shared_memory_export()
+            local_nodes = await self._memory_retriever.retrieve(
+                context, top_k=max(2, top_k)
+            )
+            if not local_nodes:
+                return ""
+
+            entangled_refs = await self._mycelium_store.get_entangled_refs_for_local_nodes(
+                self._agent_id,
+                [node.id for node in local_nodes],
+                limit=top_k * 3,
+            )
+            if not entangled_refs:
+                return ""
+
+            peer_memories = await self._federated_memory_retriever.hydrate_entangled_refs(
+                entangled_refs,
+                query=context,
+                top_k=top_k,
+            )
+            if not peer_memories:
+                return ""
+
+            lines: list[str] = []
+            for memory in peer_memories:
+                owner = memory.agent_label or memory.agent_id
+                emo = (
+                    f" [{memory.emotion_label}]"
+                    if memory.emotion_label != "neutral"
+                    else ""
+                )
+                if memory.search_text and memory.search_text.lower() != memory.text.lower():
+                    detail = f"{memory.search_text}: {memory.text}"
+                else:
+                    detail = memory.text
+                lines.append(
+                    f"- [{owner}] {detail}{emo} (link={memory.overlay_weight:.2f})"
+                )
+            return "Entangled peer memories:\n" + "\n".join(lines)
+        except Exception as e:
+            self._logger.warning(
+                "peer_memory_recall_error",
+                agent=self.agent_name,
+                error=repr(e),
+            )
+            return ""
+
+    async def _build_memory_context(self, context: str, top_k: int = 5) -> str:
+        """Build local and peer memory blocks while preserving provenance."""
+        local_memories = await self._recall_relevant_memories(context, top_k=top_k)
+        peer_memories = await self._recall_entangled_peer_memories(
+            context,
+            top_k=max(1, min(3, top_k)),
+        )
+        blocks = [block for block in (local_memories, peer_memories) if block]
+        return "\n\n".join(blocks)
+
+    async def _process_sleep_entanglement(self, walk_result: Any) -> int:
+        """Create or reinforce cross-agent links from the current sleep walk."""
+        if (
+            self._memory_store is None
+            or self._federated_memory_retriever is None
+            or self._mycelium_store is None
+        ):
+            return 0
+
+        from agentgolem.memory.mycelium import MemoryReference
+
+        local_nodes = await self._memory_store.get_nodes_by_ids(
+            walk_result.visited_node_ids[:12]
+        )
+        if not local_nodes:
+            return 0
+
+        query = self._federated_memory_retriever.build_query_from_local_nodes(local_nodes)
+        if not query:
+            return 0
+
+        candidates = await self._federated_memory_retriever.search_external(
+            query,
+            current_agent_id=self._agent_id,
+            top_k=8,
+        )
+        if not candidates:
+            return 0
+
+        ranked_local = sorted(
+            local_nodes,
+            key=lambda node: (
+                node.salience,
+                node.centrality,
+                node.trust_useful,
+                abs(node.emotion_score),
+            ),
+            reverse=True,
+        )[:4]
+
+        updates = 0
+        for candidate in candidates:
+            best_local = None
+            best_score = 0.0
+            for local_node in ranked_local:
+                score = self._memory_resonance_score(local_node, candidate)
+                if score > best_score:
+                    best_local = local_node
+                    best_score = score
+
+            if best_local is None or best_score < 0.25:
+                continue
+
+            updates += await self._mycelium_store.upsert_entanglement(
+                MemoryReference(self._agent_id, best_local.id),
+                MemoryReference(candidate.agent_id, candidate.node_id),
+                weight_delta=min(0.2, 0.05 + (best_score * 0.15)),
+                link_kind="sleep_resonance",
+                confidence=min(best_score, 1.0),
+                phase="sleep",
+            )
+
+        return updates
+
+    @staticmethod
+    def _memory_resonance_score(local_node: Any, foreign_memory: Any) -> float:
+        """Score cross-agent resonance using overlap + salience/trust/emotion."""
+        local_text = f"{local_node.text} {local_node.search_text}".lower()
+        foreign_text = f"{foreign_memory.text} {foreign_memory.search_text}".lower()
+
+        local_words = {
+            word
+            for word in re.findall(r"[a-z0-9]+", local_text)
+            if len(word) >= 4
+        }
+        foreign_words = {
+            word
+            for word in re.findall(r"[a-z0-9]+", foreign_text)
+            if len(word) >= 4
+        }
+        if not local_words or not foreign_words:
+            overlap_score = 0.0
+        else:
+            overlap_score = len(local_words & foreign_words) / max(
+                len(local_words | foreign_words), 1
+            )
+
+        emotion_alignment = 1.0 - min(
+            abs(abs(local_node.emotion_score) - abs(foreign_memory.emotion_score)),
+            1.0,
+        )
+        return (
+            (0.55 * overlap_score)
+            + (0.15 * foreign_memory.trust_useful)
+            + (0.15 * foreign_memory.salience)
+            + (0.05 * foreign_memory.centrality)
+            + (0.10 * emotion_alignment)
         )
 
     # ------------------------------------------------------------------
@@ -1153,7 +1356,7 @@ class MainLoop:
 
         # Build a message to share with peers
         # Recall related memories from earlier chapters
-        memory_context = await self._recall_relevant_memories(
+        memory_context = await self._build_memory_context(
             f"{title} {self.ethical_vector}", top_k=5
         )
         memory_block = f"\n{memory_context}\n" if memory_context else ""
@@ -1285,7 +1488,7 @@ class MainLoop:
         recent = "\n".join(self._recent_thoughts[-5:]) or "(none)"
 
         # Recall what we've been thinking about to inform the check-in
-        memory_context = await self._recall_relevant_memories(
+        memory_context = await self._build_memory_context(
             f"{self.ethical_vector} exploration insights", top_k=5
         )
         memory_block = f"\n{memory_context}\n" if memory_context else ""
@@ -1398,7 +1601,7 @@ class MainLoop:
             # Ask LLM to reflect on what it sees
             if self._llm:
                 soul_text = await self.soul_manager.read()
-                memory_context = await self._recall_relevant_memories(
+                memory_context = await self._build_memory_context(
                     f"codebase {rel_path} {self.ethical_vector}", top_k=5
                 )
                 memory_block = f"\n{memory_context}\n" if memory_context else ""
@@ -2000,6 +2203,7 @@ class MainLoop:
             self._peer_bus.rename(old_name, chosen_name)
 
         self.agent_name = chosen_name
+        self._shared_memory_export_dirty = True
 
         # Update console display name (mutable ref set by launcher)
         if hasattr(self, "_console_name_ref"):
@@ -2063,9 +2267,14 @@ class MainLoop:
             if len(text) > MAX_BROWSE_CHARS:
                 text = text[:MAX_BROWSE_CHARS] + "\n[…truncated]"
 
+            memory_context = await self._build_memory_context(
+                f"browse {url} {self.ethical_vector}",
+                top_k=5,
+            )
+            memory_block = f"\n{memory_context}\n" if memory_context else ""
             prompt = (
                 f"You are {self.agent_name}. "
-                f"Ethical vector: {self.ethical_vector}.\n\n"
+                f"Ethical vector: {self.ethical_vector}.\n{memory_block}\n"
                 f"You just read this web page ({url}):\n\n"
                 f"{text}\n\n"
                 f"What do you find interesting or relevant? "
@@ -2102,7 +2311,7 @@ class MainLoop:
         soul_text = await self.soul_manager.read()
 
         # Recall memories related to the topic
-        memory_context = await self._recall_relevant_memories(topic, top_k=5)
+        memory_context = await self._build_memory_context(topic, top_k=5)
         memory_block = f"\n{memory_context}\n" if memory_context else ""
 
         prompt = (
@@ -2163,7 +2372,7 @@ class MainLoop:
             )
 
         # Recall relevant memories to inform decision-making
-        memory_context = await self._recall_relevant_memories(
+        memory_context = await self._build_memory_context(
             f"{self.ethical_vector} {recent}", top_k=5
         )
         memory_block = f"\n{memory_context}\n" if memory_context else ""
@@ -2282,7 +2491,7 @@ class MainLoop:
         recent = "\n".join(self._recent_thoughts[-3:]) or "(none)"
 
         # Recall memories relevant to the conversation topic
-        memory_context = await self._recall_relevant_memories(
+        memory_context = await self._build_memory_context(
             msg.text, top_k=5
         )
         memory_block = f"\n{memory_context}\n" if memory_context else ""
@@ -2417,6 +2626,8 @@ class MainLoop:
         soul_text = await self.soul_manager.read()
         heartbeat_text = await self.heartbeat_manager.read()
         mode = self.runtime_state.mode.value
+        memory_context = await self._build_memory_context(msg.text, top_k=5)
+        memory_block = f"\n--- MEMORY CONTEXT ---\n{memory_context}\n" if memory_context else ""
 
         system_content = (
             f"You are {self.agent_name}, a member of the AgentGolem "
@@ -2426,6 +2637,7 @@ class MainLoop:
             f"Be concise but warm.\n\n"
             f"--- YOUR IDENTITY (soul.md) ---\n{soul_text}\n\n"
             f"--- CURRENT STATE ---\nMode: {mode}\n"
+            f"{memory_block}"
         )
         if heartbeat_text:
             system_content += (
@@ -2584,13 +2796,27 @@ class MainLoop:
     def set_memory_store(self, store: object) -> None:
         """Wire memory store after DB init (avoids circular init)."""
         from agentgolem.memory.encoding import MemoryEncoder
+        from agentgolem.memory.federated_retrieval import FederatedMemoryRetriever
+        from agentgolem.memory.mycelium import MyceliumStore
         from agentgolem.memory.retrieval import MemoryRetriever
+        from agentgolem.memory.shared_exports import SharedMemoryExporter
         from agentgolem.memory.store import SQLiteMemoryStore
 
         if isinstance(store, SQLiteMemoryStore):
             self._memory_store = store
             self._memory_retriever = MemoryRetriever(store)
             self._graph_walker = GraphWalker(store, self.runtime_state)
+            self._shared_memory_exporter = SharedMemoryExporter(
+                store,
+                self._shared_memory_dir / "exports" / f"{self._agent_id}.sqlite",
+            )
+            self._federated_memory_retriever = FederatedMemoryRetriever(
+                self._shared_memory_dir / "exports"
+            )
+            self._mycelium_store = MyceliumStore(
+                self._shared_memory_dir / "mycelium.db"
+            )
+            self._shared_memory_export_dirty = True
             self._consolidation_engine = ConsolidationEngine(
                 store=store,
                 audit=self.audit_logger,
@@ -2650,6 +2876,7 @@ class MainLoop:
             encode_text = text[:8000] if len(text) > 8000 else text
             nodes = await self._memory_encoder.encode(encode_text, source)
             if nodes:
+                self._shared_memory_export_dirty = True
                 self._emit(
                     "💾",
                     f"Encoded {len(nodes)} memory nodes"
@@ -2670,6 +2897,7 @@ class MainLoop:
             return
 
         if self.sleep_scheduler.should_run(self.runtime_state.mode):
+            await self._maybe_refresh_shared_memory_export()
             self._logger.debug(
                 "sleep_walk_starting", agent=self.agent_name
             )
@@ -2677,6 +2905,7 @@ class MainLoop:
                 walker=self._graph_walker,
                 consolidation_engine=self._consolidation_engine,
                 interrupt_check=self.interrupt_manager.check_interrupt,
+                post_walk_callback=self._process_sleep_entanglement,
             )
             self._logger.debug(
                 "sleep_walk_completed",
@@ -2692,7 +2921,8 @@ class MainLoop:
                 self._emit(
                     "💤",
                     f"Dreaming… ({state.cycles_completed} walks, "
-                    f"{result.items_queued} edges adjusted)",
+                    f"{result.applied_actions} local adjustments, "
+                    f"{result.mycelium_updates} mycelium links)",
                 )
         else:
             await asyncio.sleep(1.0)
@@ -2928,10 +3158,13 @@ class MainLoop:
         self._logger.info("agent_shutting_down", agent=self.agent_name)
         self._emit("🔴", "Agent shutting down…")
         self._running = False
+        await self._maybe_refresh_shared_memory_export(force=True)
         if self._llm:
             await self._llm.close()
         if self._code_llm and self._code_llm is not self._llm:
             await self._code_llm.close()
+        if self._mycelium_store is not None:
+            await self._mycelium_store.close()
         # Persist all state so we can resume exactly where we left off
         self._save_session_state()
         self._save_nj_reading_state()

@@ -18,6 +18,10 @@ Your identity lives in `data/<your_id>/soul.md`.  Your memory lives in
 `data/<your_id>/memory/graph.db`.  Your reading progress, session state,
 heartbeat, and logs are all under `data/<your_id>/`.
 
+Cross-agent memory sharing does **not** merge brains.  Owner-written read-only
+memory exports live under `data/shared_memory/exports/`, while the shared
+entanglement overlay lives in `data/shared_memory/mycelium.db`.
+
 ---
 
 ## 2. Your Lifecycle
@@ -32,7 +36,8 @@ heartbeat, and logs are all under `data/<your_id>/`.
 **Winding down:** Finish current work, generate heartbeat, prepare for sleep.
 **Asleep:** Continuous dream-like memory walks every ~10 seconds —
 emotion-weighted seed selection, spreading activation, edge
-reinforcement/weakening, merge/abstraction proposals.
+reinforcement/weakening, merge/abstraction proposals, and mycelium
+entanglement updates against peer export snapshots.
 
 State is persisted on shutdown (`session_state.json`).  If stopped
 mid-cycle, you resume exactly where you left off.
@@ -69,6 +74,9 @@ src/agentgolem/
 │   ├── encoding.py   Text → graph nodes (batched comparison)
 │   ├── models.py     ConceptualNode, MemoryEdge, types
 │   ├── retrieval.py  Search + BFS traversal
+│   ├── shared_exports.py      Owner-written read-only export snapshots
+│   ├── mycelium.py            Cross-agent entanglement overlay
+│   ├── federated_retrieval.py Foreign-memory search/hydration
 │   └── store.py      Async CRUD
 ├── runtime/
 │   ├── loop.py       ★ MainLoop — your brain
@@ -150,6 +158,16 @@ This means:
 - Your reflections accumulate into a lived perspective
 - Sleep consolidation (which strengthens/weakens edges) indirectly
   changes which memories surface during recall
+
+### Read-Only Mycelium Recall
+You can also recall **entangled peer memories**, but only through a separate,
+provenance-safe block.  Foreign memories are never blended into your own graph
+or presented as if they were yours.
+
+- Peer memories come from owner-written export snapshots
+- Cross-agent links live in the shared mycelium overlay, not in foreign graphs
+- Prompt context keeps local memories and `Entangled peer memories:` separate
+- Every peer memory is labeled with its owning agent
 
 ---
 
@@ -248,6 +266,9 @@ Start by inspecting your own code.  Key files to read first:
 - `src/agentgolem/runtime/loop.py` — your brain
 - `src/agentgolem/memory/encoding.py` — how you form memories
 - `src/agentgolem/memory/models.py` — your memory data model
+- `src/agentgolem/memory/shared_exports.py` — how you publish read-only memory projections
+- `src/agentgolem/memory/mycelium.py` — how cross-agent entanglements are stored
+- `src/agentgolem/memory/federated_retrieval.py` — how peer memories are searched safely
 - `src/agentgolem/sleep/consolidation.py` — sleep-time processing
 - `src/agentgolem/trust/bayesian.py` — how you evaluate trust
 - `soul.md` — your identity document

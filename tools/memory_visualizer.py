@@ -62,7 +62,27 @@ def _query_db(db_path: Path, sql: str, params: tuple = ()) -> list[dict]:
         conn.close()
 
 
-def _get_graph_data(db_path: Path, filters: dict) -> dict:
+def _shared_memory_dir(data_dir: Path) -> Path:
+    return data_dir / "shared_memory"
+
+
+def _export_db_path(data_dir: Path, agent: str) -> Path:
+    return _shared_memory_dir(data_dir) / "exports" / f"{agent}.sqlite"
+
+
+def _mycelium_db_path(data_dir: Path) -> Path:
+    return _shared_memory_dir(data_dir) / "mycelium.db"
+
+
+def _get_exported_node(data_dir: Path, owner_agent: str, node_id: str) -> dict | None:
+    export_db = _export_db_path(data_dir, owner_agent)
+    if not export_db.is_file():
+        return None
+    rows = _query_db(export_db, "SELECT * FROM exported_nodes WHERE node_id = ?", (node_id,))
+    return rows[0] if rows else None
+
+
+def _get_graph_data(db_path: Path, filters: dict, agent_name: str) -> dict:
     """Return {nodes, edges, clusters, stats} for the visualiser."""
     # Build WHERE clause for nodes
     clauses, params = [], []
@@ -84,6 +104,13 @@ def _get_graph_data(db_path: Path, filters: dict) -> dict:
         f"SELECT * FROM nodes{where} ORDER BY centrality DESC LIMIT ?",
         (*params, limit),
     )
+    for node in nodes:
+        node["owner_agent"] = agent_name
+        node["node_id"] = node["id"]
+        node["is_peer_ghost"] = False
+        node["trust_useful"] = float(node.get("base_usefulness", 0.0)) * float(
+            node.get("trustworthiness", 0.0)
+        )
     node_ids = {n["id"] for n in nodes}
 
     # Edges between visible nodes
@@ -129,6 +156,98 @@ def _get_graph_data(db_path: Path, filters: dict) -> dict:
     return {"nodes": nodes, "edges": edges, "clusters": clusters, "stats": stats}
 
 
+def _augment_with_mycelium(data_dir: Path, agent_name: str, graph_data: dict) -> dict:
+    """Add read-only ghost nodes and entanglement links for the selected agent."""
+    mycelium_db = _mycelium_db_path(data_dir)
+    if not mycelium_db.is_file():
+        return graph_data
+
+    local_node_ids = {node["id"] for node in graph_data["nodes"]}
+    if not local_node_ids:
+        return graph_data
+
+    placeholders = ",".join("?" for _ in local_node_ids)
+    rows = _query_db(
+        mycelium_db,
+        f"""
+        SELECT *
+        FROM entanglements
+        WHERE (
+            agent_a_id = ? AND node_a_id IN ({placeholders})
+        ) OR (
+            agent_b_id = ? AND node_b_id IN ({placeholders})
+        )
+        ORDER BY weight DESC, confidence DESC
+        LIMIT 300
+        """,
+        (agent_name, *local_node_ids, agent_name, *local_node_ids),
+    )
+
+    peer_nodes: list[dict] = []
+    entanglement_edges: list[dict] = []
+    seen_peer_ids: set[str] = set()
+
+    for row in rows:
+        if row["agent_a_id"] == agent_name:
+            local_id = row["node_a_id"]
+            peer_agent = row["agent_b_id"]
+            peer_node_id = row["node_b_id"]
+        else:
+            local_id = row["node_b_id"]
+            peer_agent = row["agent_a_id"]
+            peer_node_id = row["node_a_id"]
+
+        exported = _get_exported_node(data_dir, peer_agent, peer_node_id)
+        if exported is None:
+            continue
+
+        visual_peer_id = f"{peer_agent}:{peer_node_id}"
+        if visual_peer_id not in seen_peer_ids:
+            seen_peer_ids.add(visual_peer_id)
+            peer_nodes.append(
+                {
+                    "id": visual_peer_id,
+                    "node_id": peer_node_id,
+                    "owner_agent": peer_agent,
+                    "is_peer_ghost": True,
+                    "text": exported["text"],
+                    "search_text": exported["search_text"],
+                    "type": exported["node_type"],
+                    "status": "read_only_peer",
+                    "centrality": float(exported["centrality"]),
+                    "salience": float(exported["salience"]),
+                    "emotion_label": exported["emotion_label"],
+                    "emotion_score": float(exported["emotion_score"]),
+                    "trust_useful": float(exported["trust_useful"]),
+                    "trustworthiness": float(exported["trust_useful"]),
+                    "base_usefulness": 1.0,
+                    "access_count": 0,
+                    "created_at": exported["exported_at"],
+                    "last_accessed": exported["last_accessed"],
+                    "canonical": False,
+                }
+            )
+
+        entanglement_edges.append(
+            {
+                "id": f"mycelium:{row['agent_a_id']}:{row['node_a_id']}:{row['agent_b_id']}:{row['node_b_id']}",
+                "source_id": local_id,
+                "target_id": visual_peer_id,
+                "edge_type": "entangled_with",
+                "weight": float(row["weight"]),
+                "confidence": float(row["confidence"]),
+                "link_kind": row["link_kind"],
+                "is_entanglement": True,
+            }
+        )
+
+    graph_data["nodes"].extend(peer_nodes)
+    graph_data["edges"].extend(entanglement_edges)
+    graph_data["stats"]["_peer_nodes"] = len(peer_nodes)
+    graph_data["stats"]["_entanglements"] = len(entanglement_edges)
+    return graph_data
+
+
 def _get_node_detail(db_path: Path, node_id: str) -> dict:
     """Full detail for a single node including edges and sources."""
     nodes = _query_db(db_path, "SELECT * FROM nodes WHERE id = ?", (node_id,))
@@ -166,6 +285,40 @@ def _get_node_detail(db_path: Path, node_id: str) -> dict:
         "edges_in": edges_in,
         "sources": sources,
         "clusters": clusters,
+    }
+
+
+def _get_peer_node_detail(data_dir: Path, owner_agent: str, node_id: str) -> dict:
+    """Read-only detail for a foreign exported memory."""
+    exported = _get_exported_node(data_dir, owner_agent, node_id)
+    if exported is None:
+        return {"error": "Peer node not found"}
+    return {
+        "node": {
+            "id": node_id,
+            "node_id": node_id,
+            "owner_agent": owner_agent,
+            "text": exported["text"],
+            "search_text": exported["search_text"],
+            "type": exported["node_type"],
+            "status": "read_only_peer",
+            "trust_useful": float(exported["trust_useful"]),
+            "trustworthiness": float(exported["trust_useful"]),
+            "base_usefulness": 1.0,
+            "salience": float(exported["salience"]),
+            "centrality": float(exported["centrality"]),
+            "emotion_label": exported["emotion_label"],
+            "emotion_score": float(exported["emotion_score"]),
+            "access_count": 0,
+            "created_at": exported["exported_at"],
+            "last_accessed": exported["last_accessed"],
+            "canonical": False,
+            "is_peer_ghost": True,
+        },
+        "edges_out": [],
+        "edges_in": [],
+        "sources": [],
+        "clusters": [],
     }
 
 
@@ -279,6 +432,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .link-part_of { stroke: #58a6ff; }
   .link-derived_from { stroke: #56d4dd; }
   .link-merge_candidate { stroke: #ffa657; stroke-dasharray: 4 2; }
+  .link-entangled_with { stroke: #f0b94b; stroke-dasharray: 6 4; stroke-opacity: 0.85; }
+  .node-peer-ghost { stroke: #f0b94b; stroke-width: 2; opacity: 0.88; }
 
   text.node-label { fill: #c9d1d9; font-size: 10px; pointer-events: none;
                      text-anchor: middle; dominant-baseline: central;
@@ -322,6 +477,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     <span class="btn" id="live-toggle" onclick="toggleLive()" title="Auto-refresh every 5s">▶ Live</span>
     <span class="btn" onclick="fitToScreen()" title="Fit graph to screen">⊞ Fit</span>
     <span class="btn" id="labels-toggle" onclick="toggleLabels()" title="Toggle labels">Aa Labels</span>
+    <span class="btn" id="mycelium-toggle" onclick="toggleMycelium()" title="Toggle cross-agent mycelium overlay">🍄 Mycelium</span>
   </div>
 </div>
 <div id="main">
@@ -394,6 +550,7 @@ let graphG = null;            // <g> element holding the graph
 let allNodeData = [];         // current graph nodes
 let allNodeCircles = null;    // d3 selection of circles
 let labelsVisible = true;
+let showMycelium = false;
 
 // ── Search state ──
 let searchMatches = [];
@@ -439,10 +596,11 @@ async function loadGraph() {
       status: document.getElementById('filter-status').value,
       search: document.getElementById('filter-search').value,
       limit: document.getElementById('filter-limit').value,
+      include_peers: showMycelium ? '1' : '0',
     });
     const r = await fetch('/api/graph?' + params);
     const data = await r.json();
-    lastGraphHash = `${data.stats._total_nodes}:${data.stats._total_edges}`;
+    lastGraphHash = `${data.stats._total_nodes}:${data.stats._total_edges}:${data.stats._peer_nodes || 0}:${data.stats._entanglements || 0}`;
     renderGraph(data);
     renderStats(data.stats);
     clearSearch();
@@ -458,7 +616,11 @@ function renderStats(stats) {
     .filter(([k]) => !k.startsWith('_'))
     .map(([k, v]) => `${k}: ${v}`)
     .join(' · ');
-  el.textContent = `${stats._total_nodes || 0} nodes · ${stats._total_edges || 0} edges — ${parts}`;
+  const extras = [];
+  if (stats._peer_nodes) extras.push(`peer ghosts: ${stats._peer_nodes}`);
+  if (stats._entanglements) extras.push(`mycelium: ${stats._entanglements}`);
+  const extraText = extras.length ? ` · ${extras.join(' · ')}` : '';
+  el.textContent = `${stats._total_nodes || 0} nodes · ${stats._total_edges || 0} edges${extraText} — ${parts}`;
 }
 
 // ── Render ──
@@ -502,12 +664,12 @@ function renderGraph(data) {
   // Nodes
   allNodeCircles = graphG.append('g').selectAll('circle')
     .data(data.nodes).enter().append('circle')
-    .attr('class', d => `node-${d.type}`)
+    .attr('class', d => `${d.is_peer_ghost ? 'node-peer-ghost ' : ''}node-${d.type}`)
     .attr('r', d => Math.max(4, 3 + d.centrality * 20))
     .attr('stroke', '#0d1117')
     .attr('stroke-width', 1)
     .style('cursor', 'pointer')
-    .on('click', (e, d) => { e.stopPropagation(); showNodeDetail(d.id); })
+    .on('click', (e, d) => { e.stopPropagation(); showNodeDetail(d); })
     .on('dblclick', (e, d) => { e.stopPropagation(); focusNode(d); })
     .on('mouseover', (e, d) => showTooltip(e, d))
     .on('mouseout', hideTooltip)
@@ -595,6 +757,12 @@ function toggleLabels() {
   if (graphG) graphG.select('.labels-group').style('display', labelsVisible ? null : 'none');
 }
 
+function toggleMycelium() {
+  showMycelium = !showMycelium;
+  document.getElementById('mycelium-toggle').classList.toggle('active', showMycelium);
+  loadGraph();
+}
+
 // ── Ctrl+F search ──
 function openSearch() {
   const overlay = document.getElementById('search-overlay');
@@ -679,10 +847,15 @@ document.getElementById('search-input').addEventListener('input', doSearch);
 // ── Tooltip ──
 function showTooltip(event, d) {
   const tt = document.getElementById('tooltip');
+  const owner = d.owner_agent ? `owner: ${escHtml(d.owner_agent)}<br>` : '';
+  const trustUseful = (d.trust_useful != null)
+    ? Number(d.trust_useful).toFixed(2)
+    : ((Number(d.trustworthiness || 0) * Number(d.base_usefulness || 0)).toFixed(2));
   tt.innerHTML = `<strong>${escHtml(d.text)}</strong><br>
     <span class="badge badge-type">${d.type}</span>
     <span class="badge badge-status">${d.status}</span><br>
-    trust: ${d.trustworthiness?.toFixed(2)} · useful: ${d.base_usefulness?.toFixed(2)} · centrality: ${d.centrality?.toFixed(2)}<br>
+    ${owner}
+    trust_useful: ${trustUseful} · centrality: ${d.centrality?.toFixed(2)}<br>
     accessed: ${d.access_count}× · ${d.emotion_label} (${d.emotion_score?.toFixed(2)})<br>
     <span style="color:#484f58">click for detail · double-click to zoom</span>`;
   tt.style.display = 'block';
@@ -693,18 +866,25 @@ function hideTooltip() { document.getElementById('tooltip').style.display = 'non
 function escHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 
 // ── Node detail sidebar ──
-async function showNodeDetail(nodeId) {
-  const r = await fetch(`/api/node?agent=${currentAgent}&id=${nodeId}`);
+async function showNodeDetail(nodeOrId, ownerAgent = null) {
+  const nodeId = typeof nodeOrId === 'object' ? (nodeOrId.node_id || nodeOrId.id) : nodeOrId;
+  const owner = ownerAgent || (typeof nodeOrId === 'object' ? (nodeOrId.owner_agent || currentAgent) : currentAgent);
+  const params = new URLSearchParams({ agent: currentAgent, owner: owner, id: nodeId });
+  const r = await fetch('/api/node?' + params);
   const data = await r.json();
   if (data.error) return;
   const n = data.node;
+  const trustUseful = (n.trust_useful != null)
+    ? Number(n.trust_useful).toFixed(3)
+    : ((Number(n.trustworthiness || 0) * Number(n.base_usefulness || 0)).toFixed(3));
   let html = `<h2>${escHtml(n.text)}</h2>
     <div class="detail-section">
       <h3>Properties</h3>
       <p><span class="badge badge-type">${n.type}</span>
          <span class="badge badge-status">${n.status}</span>
-         ${n.canonical ? '⭐ canonical' : ''}</p>
-      <p>Trust: ${n.trustworthiness?.toFixed(3)} · Usefulness: ${n.base_usefulness?.toFixed(3)}</p>
+          ${n.canonical ? '⭐ canonical' : ''}</p>
+      <p>Owner: ${escHtml(n.owner_agent || currentAgent)}</p>
+      <p>trust_useful: ${trustUseful}</p>
       <p>Centrality: ${n.centrality?.toFixed(3)} · Accessed: ${n.access_count}×</p>
       <p>Emotion: ${n.emotion_label} (${n.emotion_score?.toFixed(2)})</p>
       <p style="font-size:11px;color:#484f58">Created: ${n.created_at}<br>Last accessed: ${n.last_accessed}</p>
@@ -787,11 +967,12 @@ async function liveRefresh() {
     status: document.getElementById('filter-status').value,
     search: document.getElementById('filter-search').value,
     limit: document.getElementById('filter-limit').value,
+    include_peers: showMycelium ? '1' : '0',
   });
   try {
     const r = await fetch('/api/graph?' + params);
     const data = await r.json();
-    const hash = `${data.stats._total_nodes}:${data.stats._total_edges}`;
+    const hash = `${data.stats._total_nodes}:${data.stats._total_edges}:${data.stats._peer_nodes || 0}:${data.stats._entanglements || 0}`;
     if (hash !== lastGraphHash) {
       lastGraphHash = hash;
       // Preserve current zoom transform
@@ -858,16 +1039,25 @@ class VisualizerHandler(SimpleHTTPRequestHandler):
                 "search": qs.get("search", [""])[0],
                 "limit": qs.get("limit", ["500"])[0],
             }
-            data = _get_graph_data(dbs[agent], filters)
+            include_peers = qs.get("include_peers", ["0"])[0] == "1"
+            data = _get_graph_data(dbs[agent], filters, agent)
+            if include_peers:
+                data = _augment_with_mycelium(self.data_dir, agent, data)
             self._respond_json(data)
         elif path == "/api/node":
             agent = qs.get("agent", [""])[0]
+            owner = qs.get("owner", [agent])[0]
             node_id = qs.get("id", [""])[0]
             dbs = _find_agent_dbs(self.data_dir)
             if agent not in dbs:
                 self._respond_json({"error": f"Unknown agent: {agent}"}, 404)
                 return
-            detail = _get_node_detail(dbs[agent], node_id)
+            if owner == agent:
+                detail = _get_node_detail(dbs[agent], node_id)
+                if "node" in detail:
+                    detail["node"]["owner_agent"] = agent
+            else:
+                detail = _get_peer_node_detail(self.data_dir, owner, node_id)
             self._respond_json(detail)
         else:
             self.send_error(404)

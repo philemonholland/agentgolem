@@ -202,3 +202,29 @@ def test_discussion_style_guidance_discourages_planning(
     assert "curious colleague" in guidance
     assert "project manager" in guidance
     assert "implementation plans" in guidance
+
+
+async def test_build_memory_context_keeps_peer_memories_separate(
+    loop_env: tuple[Settings, Secrets, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, secrets, _ = loop_env
+    loop = MainLoop(settings=settings, secrets=secrets)
+
+    async def fake_local(context: str, top_k: int = 5) -> str:
+        assert context == "naming resonance"
+        return "Relevant memories:\n- Local identity reflection"
+
+    async def fake_peer(context: str, top_k: int = 3) -> str:
+        assert context == "naming resonance"
+        return "Entangled peer memories:\n- [Council-2] A remembered thread of grace"
+
+    monkeypatch.setattr(loop, "_recall_relevant_memories", fake_local)
+    monkeypatch.setattr(loop, "_recall_entangled_peer_memories", fake_peer)
+
+    context = await loop._build_memory_context("naming resonance", top_k=5)
+
+    assert context == (
+        "Relevant memories:\n- Local identity reflection\n\n"
+        "Entangled peer memories:\n- [Council-2] A remembered thread of grace"
+    )

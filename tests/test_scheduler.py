@@ -174,6 +174,50 @@ async def test_run_cycle_interrupt_mid_walk(tmp_path: Path) -> None:
     assert result.walks_completed == 2
 
 
+async def test_run_cycle_tracks_applied_actions_and_mycelium_updates(
+    tmp_path: Path,
+) -> None:
+    """Cycle reports both local action application and post-walk updates."""
+
+    class ActionWalker(MockWalker):
+        async def bounded_walk(self, seed_id, max_steps=50, max_time_ms=5000, interrupt_check=None):
+            self.walk_calls += 1
+            return WalkResult(
+                seed_id=seed_id,
+                visited_node_ids=[seed_id],
+                edge_activations={},
+                proposed_actions=[
+                    {
+                        "kind": "reinforce_edge",
+                        "source_id": seed_id,
+                        "target_id": f"{seed_id}-neighbor",
+                        "delta": 0.1,
+                    }
+                ],
+                steps_taken=1,
+                time_ms=10.0,
+            )
+
+        async def apply_actions(self, actions):
+            return len(actions)
+
+    scheduler = SleepScheduler(state_path=tmp_path)
+
+    async def post_walk_callback(result: WalkResult) -> int:
+        assert len(result.proposed_actions) == 1
+        return 2
+
+    result = await scheduler.run_cycle(
+        ActionWalker(),
+        post_walk_callback=post_walk_callback,
+    )
+
+    assert result.walks_completed == 5
+    assert result.applied_actions == 5
+    assert result.mycelium_updates == 10
+    assert result.items_queued == 15
+
+
 # ---------------------------------------------------------------------------
 # Tests — state persistence
 # ---------------------------------------------------------------------------

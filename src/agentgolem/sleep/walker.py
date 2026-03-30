@@ -191,6 +191,23 @@ class GraphWalker:
         new_weight = max(row["weight"] - amount, 0.01)
         await self._store.update_edge(edge_id, new_weight)
 
+    async def apply_actions(self, actions: list[dict[str, Any]]) -> int:
+        """Apply reinforce/weaken actions produced by the sleep walk."""
+        applied = 0
+        for action in actions:
+            action_type = action.get("type")
+            edge_id = action.get("edge_id")
+            amount = float(action.get("amount", 0.1))
+            if not edge_id:
+                continue
+            if action_type == "reinforce":
+                await self.reinforce_edge(edge_id, amount=amount)
+                applied += 1
+            elif action_type == "weaken":
+                await self.weaken_edge(edge_id, amount=amount)
+                applied += 1
+        return applied
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------

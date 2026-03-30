@@ -6,7 +6,8 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from agentgolem.runtime.state import AgentMode
 from agentgolem.sleep.walker import GraphWalker, WalkResult
@@ -23,6 +24,8 @@ class CycleResult:
     walks_completed: int
     items_queued: int
     duration_ms: float
+    applied_actions: int = 0
+    mycelium_updates: int = 0
     interrupted: bool = False
 
 
@@ -79,6 +82,7 @@ class SleepScheduler:
         walker: GraphWalker,
         consolidation_engine: Any | None = None,
         interrupt_check: Callable[[], bool] | None = None,
+        post_walk_callback: Callable[[WalkResult], Awaitable[int]] | None = None,
     ) -> CycleResult:
         """Execute one sleep cycle and return its result."""
         start = time.monotonic()
@@ -99,12 +103,15 @@ class SleepScheduler:
         time_per_walk = max(1, self.max_time_ms // num_seeds)
 
         walk_results: list[WalkResult] = []
+        mycelium_updates = 0
         for seed in seeds:
             if interrupt_check and interrupt_check():
                 return CycleResult(
                     walks_completed=len(walk_results),
                     items_queued=0,
                     duration_ms=_elapsed_ms(start),
+                    applied_actions=0,
+                    mycelium_updates=mycelium_updates,
                     interrupted=True,
                 )
 
@@ -115,6 +122,8 @@ class SleepScheduler:
                 interrupt_check=interrupt_check,
             )
             walk_results.append(result)
+            if post_walk_callback is not None:
+                mycelium_updates += await post_walk_callback(result)
 
         # Consolidation (pass-through for now)
         proposed_actions: list[dict[str, Any]] = []
@@ -124,16 +133,23 @@ class SleepScheduler:
             for wr in walk_results:
                 proposed_actions.extend(wr.proposed_actions)
 
+        applied_actions = 0
+        if hasattr(walker, "apply_actions"):
+            applied_actions = await walker.apply_actions(proposed_actions)
+        total_changes = applied_actions + mycelium_updates
+
         # Update state
         self._state.last_cycle_time = datetime.now(timezone.utc).isoformat()
         self._state.cycles_completed += 1
-        self._state.items_queued += len(proposed_actions)
+        self._state.items_queued += total_changes
         self._save_state(self._state)
 
         return CycleResult(
             walks_completed=len(walk_results),
-            items_queued=len(proposed_actions),
+            items_queued=total_changes,
             duration_ms=_elapsed_ms(start),
+            applied_actions=applied_actions,
+            mycelium_updates=mycelium_updates,
         )
 
     def get_state(self) -> SleepState:

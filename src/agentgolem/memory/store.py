@@ -160,6 +160,18 @@ class SQLiteMemoryStore:
             rows = await cur.fetchall()
         return [self._row_to_node(r) for r in rows]
 
+    async def get_nodes_by_ids(self, node_ids: list[str]) -> list[ConceptualNode]:
+        """Get multiple nodes by id without bumping access counters."""
+        if not node_ids:
+            return []
+        placeholders = ", ".join("?" for _ in node_ids)
+        async with self._db.execute(
+            f"SELECT * FROM nodes WHERE id IN ({placeholders})",  # noqa: S608
+            tuple(node_ids),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [self._row_to_node(r) for r in rows]
+
     async def search_nodes_by_keywords(
         self, keywords: list[str], limit: int = 10
     ) -> list[ConceptualNode]:
