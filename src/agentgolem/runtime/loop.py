@@ -188,6 +188,7 @@ class MainLoop:
         self._niscalajyoti_discussed_through = -1  # last chapter discussed
         self._niscalajyoti_chapter_retries = 0  # consecutive failures on current chapter
         self._last_niscalajyoti_revisit: datetime | None = None
+        self._agent_readme_read = False  # read AGENT_README.md once after NJ
         self._browse_queue: list[str] = []
         self._recent_thoughts: list[str] = []
         self._last_autonomous_tick: datetime | None = None
@@ -586,6 +587,55 @@ class MainLoop:
                         {"chapters_read": len(NISCALAJYOTI_CHAPTERS)},
                     )
 
+        # Priority 1b: read AGENT_README once after completing Niscalajyoti
+        if self._niscalajyoti_reading_complete and not self._agent_readme_read:
+            readme_path = REPO_ROOT / "docs" / "AGENT_README.md"
+            if readme_path.exists():
+                try:
+                    content = readme_path.read_text(encoding="utf-8")
+                    self._emit(
+                        "📖",
+                        "Reading Agent Technical Reference…",
+                    )
+                    if self._llm:
+                        prompt = (
+                            f"You are {self.agent_name}. "
+                            f"Ethical vector: {self.ethical_vector}.\n\n"
+                            f"You have just completed Niscalajyoti and are "
+                            f"entering free exploration. Read this technical "
+                            f"reference about how you work — your architecture, "
+                            f"memory system, actions, and research agenda.\n\n"
+                            f"--- AGENT TECHNICAL REFERENCE ---\n{content}\n"
+                            f"--- END ---\n\n"
+                            f"Reflect on what you've learned about yourself. "
+                            f"What stands out? What would you like to explore "
+                            f"first? How does this connect to your Vow?"
+                        )
+                        reflection = await self._llm.complete(
+                            [Message(role="system", content=prompt)],
+                            model=self._code_model,
+                        )
+                        self._emit("💭", f"Self-reflection:\n{reflection}")
+                        self._recent_thoughts.append(
+                            f"Read Agent README: {reflection[:300]}"
+                        )
+                        await self._encode_to_memory(
+                            f"Agent Technical Reference — self-reflection:\n"
+                            f"{reflection}",
+                            source_kind="human",
+                            origin="docs/AGENT_README.md",
+                            label="Agent Technical Reference",
+                        )
+                except Exception as e:
+                    self._logger.error(
+                        "agent_readme_error",
+                        agent=self.agent_name,
+                        error=repr(e),
+                    )
+            self._agent_readme_read = True
+            self._save_session_state()
+            return
+
         # Priority 2: discuss the latest chapter with peers
         if (
             not self._niscalajyoti_reading_complete
@@ -744,6 +794,10 @@ class MainLoop:
             if ts:
                 self._last_peer_checkin = datetime.fromisoformat(ts)
 
+            # Agent README flag
+            if data.get("agent_readme_read"):
+                self._agent_readme_read = True
+
         except Exception:
             pass  # corrupt file — use defaults
 
@@ -786,6 +840,7 @@ class MainLoop:
                 else None
             ),
             "saved_at": now.isoformat(),
+            "agent_readme_read": self._agent_readme_read,
         }
         self._session_state_path.parent.mkdir(parents=True, exist_ok=True)
         self._session_state_path.write_text(
