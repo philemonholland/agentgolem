@@ -1,19 +1,20 @@
 @echo off
-title AgentGolem — Reset Agents
+chcp 65001 >nul 2>&1
+title AgentGolem - Reset Agents
 cd /d "%~dp0"
 
 echo.
-echo  ╔══════════════════════════════════════════╗
-echo  ║      AgentGolem — Reset Agents           ║
-echo  ╚══════════════════════════════════════════╝
+echo  +==========================================+
+echo  ^|      AgentGolem - Reset Agents           ^|
+echo  +==========================================+
 echo.
 echo  This will wipe agent state so they start fresh.
 echo  soul.md files are preserved (agent personality).
 echo.
 echo  Choose reset level:
 echo.
-echo    1. Full reset  — clear memory, reading progress, logs, heartbeats
-echo    2. Soft reset  — clear progress ^& logs, KEEP memory graphs
+echo    1. Full reset  - clear memory, reading progress, logs, heartbeats
+echo    2. Soft reset  - clear progress ^& logs, KEEP memory graphs
 echo    3. Cancel
 echo.
 set /p CHOICE="  Your choice [1/2/3]: "
@@ -27,7 +28,7 @@ goto :eof
 
 :full
 echo.
-echo  ⚠  FULL RESET — all agent data will be erased (except soul.md)
+echo  [!] FULL RESET - all agent data will be erased (except soul.md)
 set /p CONFIRM="  Are you sure? [y/N]: "
 if /i not "%CONFIRM%"=="y" goto :cancel
 
@@ -58,14 +59,14 @@ for %%F in ("data\evolution_proposals\*") do if not "%%~nxF"==".gitkeep" del /q 
 for %%F in ("data\memory\snapshots\*") do if not "%%~nxF"==".gitkeep" del /q "%%F" 2>nul
 
 echo.
-echo  ✓ Full reset complete. All 6 agents will start fresh.
+echo  [OK] Full reset complete. All 6 agents will start fresh.
 echo.
 pause
 goto :eof
 
 :soft
 echo.
-echo  Soft reset — keeping memory graphs intact.
+echo  Soft reset - keeping memory graphs intact.
 echo.
 echo  Resetting agents...
 
@@ -89,7 +90,7 @@ del /q "data\logs\activity.jsonl" 2>nul
 for %%F in ("data\evolution_proposals\*") do if not "%%~nxF"==".gitkeep" del /q "%%F" 2>nul
 
 echo.
-echo  ✓ Soft reset complete. Memory graphs preserved, everything else cleared.
+echo  [OK] Soft reset complete. Memory graphs preserved, everything else cleared.
 echo.
 pause
 goto :eof
