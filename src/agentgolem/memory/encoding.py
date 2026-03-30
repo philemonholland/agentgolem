@@ -216,9 +216,11 @@ class MemoryEncoder:
         trust_prior = TYPE_PRIORS.get(node_type, 0.5)
 
         if decision.decision == "keep_exact":
-            # Node already exists, just link source
+            # Node already exists, just link source (verify it exists first)
             if decision.existing_node_id:
-                await self._store.link_node_source(decision.existing_node_id, source.id)
+                existing = await self._store.get_node(decision.existing_node_id)
+                if existing:
+                    await self._store.link_node_source(decision.existing_node_id, source.id)
             return None
 
         # Create new node for: new_node, keep_both, merge_candidate, supersedes, contradicts
@@ -233,20 +235,23 @@ class MemoryEncoder:
 
         # Add relationship edges based on decision
         if decision.existing_node_id:
-            edge_type_map = {
-                "supersedes": EdgeType.SUPERSEDES,
-                "contradicts": EdgeType.CONTRADICTS,
-                "merge_candidate": EdgeType.MERGE_CANDIDATE,
-                "keep_both": EdgeType.RELATED_TO,
-            }
-            edge_type = edge_type_map.get(decision.decision)
-            if edge_type:
-                edge = MemoryEdge(
-                    source_id=node.id,
-                    target_id=decision.existing_node_id,
-                    edge_type=edge_type,
-                )
-                await self._store.add_edge(edge)
+            # Verify the referenced node actually exists (LLM may hallucinate IDs)
+            existing_node = await self._store.get_node(decision.existing_node_id)
+            if existing_node:
+                edge_type_map = {
+                    "supersedes": EdgeType.SUPERSEDES,
+                    "contradicts": EdgeType.CONTRADICTS,
+                    "merge_candidate": EdgeType.MERGE_CANDIDATE,
+                    "keep_both": EdgeType.RELATED_TO,
+                }
+                edge_type = edge_type_map.get(decision.decision)
+                if edge_type:
+                    edge = MemoryEdge(
+                        source_id=node.id,
+                        target_id=decision.existing_node_id,
+                        edge_type=edge_type,
+                    )
+                    await self._store.add_edge(edge)
 
         return node
 

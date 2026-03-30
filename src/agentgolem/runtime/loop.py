@@ -793,7 +793,7 @@ class MainLoop:
                     "chapter_index": idx,
                     "chapter_title": title,
                     "url": url,
-                    "chars_read": len(text),
+                    "digest_chars": len(chapter_digest),
                     "summary": summary,
                 },
             )

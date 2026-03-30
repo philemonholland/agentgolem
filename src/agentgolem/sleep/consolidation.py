@@ -63,6 +63,13 @@ class ConsolidationEngine:
         self._llm = llm
         self._state_path = state_path or Path(".")
 
+    def process(self, walk_results: list[WalkResult]) -> list[dict[str, Any]]:
+        """Synchronous pass-through: collect proposed actions from walk results."""
+        actions: list[dict[str, Any]] = []
+        for wr in walk_results:
+            actions.extend(wr.proposed_actions)
+        return actions
+
     # -------------------------------------------------------------- merges
 
     async def propose_merges(self, walk_result: WalkResult) -> list[MergeProposal]:
