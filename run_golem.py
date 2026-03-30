@@ -287,6 +287,7 @@ PARAM_DEFS: list[tuple[str, str, str, str, str]] = [
     ("name_discovery_cycles", "Name Discovery Deadline", "Wake cycles by which agents must discover a name", "int", "Swarm"),
     ("peer_checkin_interval_minutes", "Peer Check-in Interval (min)", "Minutes between peer check-ins during free exploration", "float", "Swarm"),
     ("peer_message_max_chars", "Peer Message Max Chars", "Maximum characters per peer message (check-in or reply)", "int", "Swarm"),
+    ("llm_code_model", "LLM Code Model", "Model used for codebase inspection and evolution (higher quality)", "str", "LLM"),
 
     # --- Dashboard (launcher-only, stored in launcher_state.json) ---
     ("dashboard_enabled", "Dashboard Enabled", "Start the web dashboard alongside the agent", "bool", "Dashboard"),
@@ -1144,6 +1145,8 @@ class RuntimeConsole:
                 agent._peer_checkin_interval = value
             elif key == "peer_message_max_chars":
                 agent._peer_msg_limit = value
+            elif key == "llm_code_model":
+                agent._code_model = value
 
         if key == "log_level":
             import logging

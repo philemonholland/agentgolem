@@ -202,6 +202,9 @@ class MainLoop:
         )
         self._last_peer_checkin: datetime | None = None
         self._browser: Any = None  # lazy WebBrowser
+        self._code_model: str = getattr(
+            settings, "llm_code_model", "gpt-5"
+        )
 
         # Evolution / self-modification
         self._evolution_restart_requested = False
@@ -1242,7 +1245,8 @@ class MainLoop:
                     f"lens of your Vow."
                 )
                 thought = await self._llm.complete(
-                    [Message(role="system", content=prompt)]
+                    [Message(role="system", content=prompt)],
+                    model=self._code_model,
                 )
                 self._emit("💭", thought)
                 self._recent_thoughts.append(
@@ -1900,8 +1904,12 @@ class MainLoop:
         )
 
         try:
+            # Use stronger model when codebase actions are available
+            extra: dict[str, Any] = {}
+            if self._niscalajyoti_reading_complete:
+                extra["model"] = self._code_model
             response = await self._llm.complete(
-                [Message(role="system", content=prompt)]
+                [Message(role="system", content=prompt)], **extra
             )
             await self._execute_autonomous_action(response.strip())
         except Exception as e:
