@@ -39,6 +39,7 @@ for %%A in (council_1 council_2 council_3 council_4 council_5 council_6) do (
     echo    Resetting %%A...
     del /q "data\%%A\state\runtime_state.json" 2>nul
     del /q "data\%%A\niscalajyoti_reading.json" 2>nul
+    del /q "data\%%A\session_state.json" 2>nul
     del /q "data\%%A\heartbeat.md" 2>nul
     del /q "data\%%A\logs\audit.jsonl" 2>nul
     del /q "data\%%A\memory\graph.db" 2>nul
@@ -56,6 +57,7 @@ del /q "data\state\launcher_state.json" 2>nul
 del /q "data\logs\activity.jsonl" 2>nul
 for %%F in ("data\evolution_proposals\*") do if not "%%~nxF"==".gitkeep" del /q "%%F" 2>nul
 for %%F in ("data\memory\snapshots\*") do if not "%%~nxF"==".gitkeep" del /q "%%F" 2>nul
+for %%F in ("data\nj_chapter_digests\*") do del /q "%%F" 2>nul
 
 echo.
 echo  [OK] Full reset complete. All 6 agents will start fresh.
@@ -73,6 +75,7 @@ for %%A in (council_1 council_2 council_3 council_4 council_5 council_6) do (
     echo    Resetting %%A...
     del /q "data\%%A\state\runtime_state.json" 2>nul
     del /q "data\%%A\niscalajyoti_reading.json" 2>nul
+    del /q "data\%%A\session_state.json" 2>nul
     del /q "data\%%A\heartbeat.md" 2>nul
     del /q "data\%%A\logs\audit.jsonl" 2>nul
     for %%F in ("data\%%A\soul_versions\*") do if not "%%~nxF"==".gitkeep" del /q "%%F" 2>nul

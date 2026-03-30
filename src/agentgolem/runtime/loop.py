@@ -211,6 +211,11 @@ class MainLoop:
         self._nj_state_path = self._data_dir / "niscalajyoti_reading.json"
         self._load_nj_reading_state()
 
+        # Session state persistence (cycle timing, name, thoughts, etc.)
+        self._session_state_path = self._data_dir / "session_state.json"
+        self._initial_agent_name = agent_name  # the original Council-N id
+        self._load_session_state()
+
         # Core subsystems
         self.runtime_state = RuntimeState(self._data_dir)
         self.interrupt_manager = InterruptManager()
@@ -307,14 +312,63 @@ class MainLoop:
         # Generate initial heartbeat if this is a fresh agent
         await self._maybe_generate_initial_heartbeat()
 
-        # Always start in AWAKE mode (ignore persisted state from previous run)
+        # Resume from persisted session state (mode, timing, cycle count)
         now = datetime.now(timezone.utc)
-        if self.runtime_state.mode != AgentMode.AWAKE:
-            await self.runtime_state.transition(AgentMode.AWAKE)
-        self._awoke_at = now
-        self._winding_down = False
+        resumed = False
 
-        self._wake_cycle_count = 1  # first cycle
+        if self._persisted_mode and self._persisted_phase_remaining > 0:
+            # We have a valid persisted state — resume where we left off
+            remaining = timedelta(seconds=self._persisted_phase_remaining)
+
+            if self._persisted_mode == "asleep":
+                await self.runtime_state.transition(AgentMode.ASLEEP)
+                self._fell_asleep_at = now - (self._sleep_duration - remaining)
+                self._awoke_at = None
+                self._winding_down = False
+                resumed = True
+                self._emit(
+                    "💤",
+                    f"Resuming ASLEEP — {remaining.total_seconds():.0f}s left",
+                )
+            elif self._persisted_mode == "awake":
+                if self.runtime_state.mode != AgentMode.AWAKE:
+                    await self.runtime_state.transition(AgentMode.AWAKE)
+                self._awoke_at = now - (self._awake_duration - remaining)
+                self._winding_down = False
+                resumed = True
+                self._emit(
+                    "☀️",
+                    f"Resuming AWAKE — {remaining.total_seconds():.0f}s left "
+                    f"(cycle #{self._wake_cycle_count})",
+                )
+            elif self._persisted_mode == "winding_down":
+                if self.runtime_state.mode != AgentMode.AWAKE:
+                    await self.runtime_state.transition(AgentMode.AWAKE)
+                self._awoke_at = now - self._awake_duration  # past wake limit
+                self._winding_down = True
+                self._wind_down_at = now - (self._wind_down_duration - remaining)
+                resumed = True
+                self._emit(
+                    "🌅",
+                    f"Resuming wind-down — {remaining.total_seconds():.0f}s left",
+                )
+
+        if not resumed:
+            # Fresh start — begin awake
+            if self.runtime_state.mode != AgentMode.AWAKE:
+                await self.runtime_state.transition(AgentMode.AWAKE)
+            self._awoke_at = now
+            self._winding_down = False
+            if self._wake_cycle_count == 0:
+                self._wake_cycle_count = 1
+
+        # Restore discovered name on the peer bus so peers can reach us
+        if self._name_discovered and self._peer_bus:
+            initial = self._initial_agent_name
+            if self.agent_name != initial:
+                self._peer_bus.rename(initial, self.agent_name)
+            if hasattr(self, "_console_name_ref"):
+                self._console_name_ref[0] = self.agent_name  # type: ignore[attr-defined]
 
         self._logger.info(
             "agent_started",
@@ -637,6 +691,96 @@ class MainLoop:
         }
         self._nj_state_path.parent.mkdir(parents=True, exist_ok=True)
         self._nj_state_path.write_text(
+            json.dumps(data, indent=2), encoding="utf-8"
+        )
+
+    # ------------------------------------------------------------------
+    # Session state persistence (survives Ctrl+C / restart)
+    # ------------------------------------------------------------------
+
+    def _load_session_state(self) -> None:
+        """Restore agent session state from disk."""
+        # Defaults for fields that may be loaded
+        self._persisted_mode: str | None = None
+        self._persisted_phase_remaining: float = 0.0
+
+        if not self._session_state_path.exists():
+            return
+        try:
+            data = json.loads(
+                self._session_state_path.read_text(encoding="utf-8")
+            )
+            self._wake_cycle_count = data.get("wake_cycle_count", 0)
+            self._persisted_mode = data.get("mode")  # "awake"/"asleep"/"winding_down"
+            self._persisted_phase_remaining = data.get("phase_remaining_seconds", 0.0)
+
+            # Name discovery
+            if data.get("name_discovered"):
+                self._name_discovered = True
+                saved_name = data.get("agent_name")
+                if saved_name and saved_name != self._initial_agent_name:
+                    self.agent_name = saved_name
+
+            # Recent thoughts (keep last 10)
+            saved_thoughts = data.get("recent_thoughts", [])
+            if saved_thoughts:
+                self._recent_thoughts = saved_thoughts[-10:]
+
+            # Browse queue
+            saved_queue = data.get("browse_queue", [])
+            if saved_queue:
+                self._browse_queue = saved_queue
+
+            # Timing state
+            ts = data.get("last_peer_checkin")
+            if ts:
+                self._last_peer_checkin = datetime.fromisoformat(ts)
+
+        except Exception:
+            pass  # corrupt file — use defaults
+
+    def _save_session_state(self) -> None:
+        """Persist session state to disk for resumption after restart."""
+        now = datetime.now(timezone.utc)
+
+        # Determine current mode and how much time remains in current phase
+        mode = self.runtime_state.mode.value  # "awake" or "asleep"
+        phase_remaining = 0.0
+
+        if self._winding_down and self._wind_down_at:
+            elapsed = (now - self._wind_down_at).total_seconds()
+            phase_remaining = max(
+                0, self._wind_down_duration.total_seconds() - elapsed
+            )
+            mode = "winding_down"
+        elif self.runtime_state.mode == AgentMode.AWAKE and self._awoke_at:
+            elapsed = (now - self._awoke_at).total_seconds()
+            phase_remaining = max(
+                0, self._awake_duration.total_seconds() - elapsed
+            )
+        elif self.runtime_state.mode == AgentMode.ASLEEP and self._fell_asleep_at:
+            elapsed = (now - self._fell_asleep_at).total_seconds()
+            phase_remaining = max(
+                0, self._sleep_duration.total_seconds() - elapsed
+            )
+
+        data = {
+            "mode": mode,
+            "phase_remaining_seconds": round(phase_remaining, 1),
+            "wake_cycle_count": self._wake_cycle_count,
+            "name_discovered": self._name_discovered,
+            "agent_name": self.agent_name,
+            "recent_thoughts": self._recent_thoughts[-10:],
+            "browse_queue": self._browse_queue[:20],
+            "last_peer_checkin": (
+                self._last_peer_checkin.isoformat()
+                if self._last_peer_checkin
+                else None
+            ),
+            "saved_at": now.isoformat(),
+        }
+        self._session_state_path.parent.mkdir(parents=True, exist_ok=True)
+        self._session_state_path.write_text(
             json.dumps(data, indent=2), encoding="utf-8"
         )
 
@@ -2432,12 +2576,15 @@ class MainLoop:
             pass  # don't let a corrupt file block startup
 
     async def _shutdown(self) -> None:
-        """Graceful shutdown."""
+        """Graceful shutdown — persist all state for clean resume."""
         self._logger.info("agent_shutting_down", agent=self.agent_name)
         self._emit("🔴", "Agent shutting down…")
         self._running = False
         if self._llm:
             await self._llm.close()
+        # Persist all state so we can resume exactly where we left off
+        self._save_session_state()
+        self._save_nj_reading_state()
         self.runtime_state._persist()
 
     def stop(self) -> None:
