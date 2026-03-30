@@ -53,6 +53,7 @@ LOCKED_SETTINGS: frozenset[str] = frozenset(
         "agent_count",
         "name_discovery_cycles",
         "llm_request_delay_seconds",
+        "repo_root",
     }
 )
 
@@ -216,8 +217,15 @@ COUNCIL7_ALLOWED_DOMAINS: frozenset[str] = frozenset(
 
 PRIMARY_COUNCIL_IDS: tuple[str, ...] = tuple(f"Council-{idx}" for idx in range(1, 7))
 
-# Repository root for codebase inspection
+# Repository root for codebase inspection (auto-detect fallback)
 REPO_ROOT: Path = Path(__file__).resolve().parents[3]
+
+
+def resolve_repo_root(settings: Settings) -> Path:
+    """Return the configured repo root, falling back to auto-detection."""
+    if settings.repo_root:
+        return Path(settings.repo_root).resolve()
+    return REPO_ROOT
 
 # Paths agents are NOT allowed to modify (security)
 PROTECTED_PATHS: frozenset[str] = frozenset(
@@ -302,6 +310,7 @@ class MainLoop:
         self._settings = settings
         self._secrets = secrets
         self._data_dir = settings.data_dir
+        self._repo_root = resolve_repo_root(settings)
         self._running = False
         self._logger = get_logger("runtime.loop")
         self._llm_rate_limiter = llm_rate_limiter
@@ -426,6 +435,52 @@ class MainLoop:
         self._max_conversation_turns: int = 40
         self._response_callback: Any = None  # set by launcher for console output
         self._activity_callback: Any = None  # set by launcher for lifecycle feed
+
+        # Consciousness kernel — five pillars of self-awareness
+        self._consciousness_tick_counter: int = 0
+        self._init_consciousness_kernel(settings)
+
+    # ------------------------------------------------------------------
+    # Consciousness kernel initialisation
+    # ------------------------------------------------------------------
+
+    def _init_consciousness_kernel(self, settings: Settings) -> None:
+        """Initialise the five pillars of the consciousness kernel."""
+        from agentgolem.consciousness.internal_state import InternalState
+        from agentgolem.consciousness.metacognitive_monitor import MetacognitiveMonitor
+        from agentgolem.consciousness.attention_director import AttentionDirector
+        from agentgolem.consciousness.narrative_synthesizer import NarrativeSynthesizer
+        from agentgolem.consciousness.self_model import SelfModel
+
+        # Pillar 3 — Internal State (updated every tick)
+        state_path = self._data_dir / "internal_state.json"
+        self._internal_state = InternalState.load(state_path)
+        self._internal_state_path = state_path
+
+        # Pillar 1 — Metacognitive Monitor (runs every N ticks)
+        novelty_bias = getattr(settings, "metacognition_novelty_bias", 0.3)
+        self._metacognitive_monitor = MetacognitiveMonitor(novelty_bias=novelty_bias)
+        self._metacognition_interval: int = getattr(settings, "metacognition_interval", 3)
+
+        # Pillar 4 — Attention Director (computed every tick from state + observation)
+        influence = getattr(settings, "attention_influence_weight", 0.7)
+        self._attention_director = AttentionDirector(influence_weight=influence)
+
+        # Pillar 2 — Narrative Synthesizer (runs every N ticks)
+        self._narrative_synthesizer = NarrativeSynthesizer(self._data_dir)
+        self._narrative_interval: int = getattr(settings, "narrative_synthesis_interval", 15)
+        self._narrative_last_tick: int = 0
+
+        # Pillar 5 — Self-Model (rebuilt every N ticks)
+        model_path = self._data_dir / "self_model.json"
+        self._self_model = SelfModel.load(model_path)
+        self._self_model_path = model_path
+        self._self_model_interval: int = getattr(settings, "self_model_rebuild_interval", 10)
+
+        # Sharing flag
+        self._consciousness_mycelium_share: bool = getattr(
+            settings, "internal_state_mycelium_share", True,
+        )
 
     # ------------------------------------------------------------------
     # Activity feed
@@ -1341,6 +1396,10 @@ class MainLoop:
                 return
         self._last_autonomous_tick = now
 
+        # ── Consciousness kernel tick ──────────────────────────────────
+        self._consciousness_tick_counter += 1
+        await self._consciousness_tick()
+
         # Priority 1: read the next source in this agent's formative corpus
         if self._is_seventh_council():
             if not self._council7_foundation_complete:
@@ -1395,7 +1454,7 @@ class MainLoop:
 
         # Priority 1b: read AGENT_README once after completing initial formation
         if self._has_completed_foundational_reading() and not self._agent_readme_read:
-            readme_path = REPO_ROOT / "docs" / "AGENT_README.md"
+            readme_path = self._repo_root / "docs" / "AGENT_README.md"
             if readme_path.exists():
                 try:
                     content = readme_path.read_text(encoding="utf-8")
@@ -2290,8 +2349,8 @@ class MainLoop:
         """Validate and resolve a path within the repo. Returns None if unsafe."""
         try:
             clean = rel_path.replace("\\", "/").strip("/")
-            resolved = (REPO_ROOT / clean).resolve()
-            if not str(resolved).startswith(str(REPO_ROOT)):
+            resolved = (self._repo_root / clean).resolve()
+            if not str(resolved).startswith(str(self._repo_root)):
                 return None  # path traversal attempt
             for protected in PROTECTED_PATHS:
                 if clean == protected or clean.startswith(protected + "/"):
@@ -2328,7 +2387,7 @@ class MainLoop:
             entries = sorted(resolved.iterdir())
             listing = []
             for entry in entries[:100]:
-                rel = entry.relative_to(REPO_ROOT)
+                rel = entry.relative_to(self._repo_root)
                 kind = "📁" if entry.is_dir() else "📄"
                 listing.append(f"  {kind} {rel}")
             output = f"Directory: {rel_path}\n" + "\n".join(listing)
@@ -3227,6 +3286,22 @@ class MainLoop:
         toolbox_summary = self._toolbox_summary()
         enrichment_guidance = self._toolbox_enrichment_guidance()
 
+        # Consciousness kernel: compute attention directive
+        attention_preamble = ""
+        try:
+            directive = self._attention_director.compute(
+                self._internal_state,
+                self._metacognitive_monitor.last_observation,
+            )
+            attention_preamble = directive.to_prompt_preamble()
+        except Exception:
+            pass  # non-critical; action selection works without it
+
+        # Build consciousness context for action selection
+        consciousness_ctx = ""
+        if attention_preamble:
+            consciousness_ctx = f"\nInternal state:\n{attention_preamble}\n"
+
         try:
             choice = await self._llm.complete_structured(
                 [
@@ -3236,7 +3311,8 @@ class MainLoop:
                             f"You are {self.agent_name}, ethical vector: "
                             f"{self.ethical_vector}.{name_status}{reading_ctx}\n\n"
                             f"Peers: {peers}\n"
-                            f"Recent:\n{recent}\n{memory_block}\n"
+                            f"Recent:\n{recent}\n{memory_block}"
+                            f"{consciousness_ctx}\n"
                             f"Available capabilities:\n{toolbox_summary}\n\n"
                             f"Choose exactly one capability that best satisfies your "
                             f"current curiosity, relationship obligations, or inner "
@@ -3745,6 +3821,184 @@ class MainLoop:
                 "initial_heartbeat_error",
                 agent=self.agent_name,
                 error=repr(e),
+            )
+
+    # ------------------------------------------------------------------
+    # Consciousness kernel — periodic self-awareness passes
+    # ------------------------------------------------------------------
+
+    async def _consciousness_tick(self) -> None:
+        """Run the consciousness kernel for this tick.
+
+        Called at the start of every autonomous tick.  Handles:
+        - Internal state update (every tick)
+        - Metacognitive reflection (every ``metacognition_interval`` ticks)
+        - Narrative synthesis (every ``narrative_interval`` ticks)
+        - Self-model rebuild (every ``self_model_interval`` ticks)
+
+        All passes are lightweight and non-blocking; failures are logged
+        and silently skipped so they never block the agent's main work.
+        """
+        tick = self._consciousness_tick_counter
+
+        # ── Pillar 3: Internal state update (every tick) ───────────────
+        await self._update_internal_state(tick)
+
+        # ── Pillar 1: Metacognitive reflection (periodic) ─────────────
+        if tick % self._metacognition_interval == 0:
+            await self._run_metacognitive_reflection(tick)
+
+        # ── Pillar 2: Narrative synthesis (periodic) ───────────────────
+        if tick > 0 and tick % self._narrative_interval == 0:
+            await self._run_narrative_synthesis(tick)
+
+        # ── Pillar 5: Self-model rebuild (periodic) ───────────────────
+        if tick > 0 and tick % self._self_model_interval == 0:
+            await self._run_self_model_rebuild(tick)
+
+    async def _update_internal_state(self, tick: int) -> None:
+        """Pillar 3 — fast LLM reflection to update the felt-sense state."""
+        from agentgolem.consciousness.internal_state import (
+            INTERNAL_STATE_REFLECTION_PROMPT,
+            parse_internal_state_update,
+        )
+
+        try:
+            recent_thoughts = "\n".join(self._recent_thoughts[-5:]) or "(none)"
+            recent_actions = ", ".join(
+                self._recent_thoughts[-3:]
+            ) or "(none)"
+            prompt = INTERNAL_STATE_REFLECTION_PROMPT.format(
+                agent_name=self.agent_name,
+                recent_thoughts=recent_thoughts,
+                recent_actions=recent_actions,
+                current_state=self._internal_state.summary(),
+            )
+            raw = await self._complete_discussion(
+                [Message(role="system", content=prompt)],
+            )
+            self._internal_state = parse_internal_state_update(
+                raw, self._internal_state,
+            )
+            self._internal_state.last_updated_tick = tick
+            self._internal_state.save(self._internal_state_path)
+        except Exception as exc:
+            self._logger.warning(
+                "consciousness_internal_state_error",
+                agent=self.agent_name,
+                error=repr(exc),
+            )
+
+    async def _run_metacognitive_reflection(self, tick: int) -> None:
+        """Pillar 1 — detect patterns, biases, and avoidance."""
+        from agentgolem.consciousness.metacognitive_monitor import find_neglected_topics
+
+        try:
+            neglected: list[str] = []
+            if self._memory_store:
+                try:
+                    neglected = await find_neglected_topics(self._memory_store)
+                except Exception:
+                    pass
+
+            prompt = self._metacognitive_monitor.build_reflection_prompt(
+                agent_name=self.agent_name,
+                recent_thoughts=self._recent_thoughts[-8:],
+                recent_actions=self._recent_thoughts[-5:],
+                focus_depth=self._internal_state.focus_depth,
+                neglected_topics=neglected,
+            )
+            raw = await self._complete_discussion(
+                [Message(role="system", content=prompt)],
+            )
+            obs = self._metacognitive_monitor.parse_response(raw)
+            if obs.pattern_detected or obs.avoidance_signal:
+                self._emit("🧠", f"Metacognition: {obs.summary()}")
+        except Exception as exc:
+            self._logger.warning(
+                "consciousness_metacognition_error",
+                agent=self.agent_name,
+                error=repr(exc),
+            )
+
+    async def _run_narrative_synthesis(self, tick: int) -> None:
+        """Pillar 2 — weave recent experience into a narrative chapter."""
+        from agentgolem.consciousness.narrative_synthesizer import persist_chapter_to_graph
+
+        try:
+            prompt = self._narrative_synthesizer.build_synthesis_prompt(
+                agent_name=self.agent_name,
+                recent_thoughts=self._recent_thoughts[-12:],
+                recent_actions=self._recent_thoughts[-8:],
+                recent_peer_messages=[],  # TODO: wire peer message log
+                current_tick=tick,
+                growth_vector=self._internal_state.growth_vector,
+            )
+            raw = await self._complete_discussion(
+                [Message(role="system", content=prompt)],
+            )
+            chapter = self._narrative_synthesizer.parse_and_store(
+                raw, self._narrative_last_tick, tick,
+            )
+            if chapter:
+                self._narrative_last_tick = tick
+                self._emit(
+                    "📖",
+                    f"Narrative ch.{chapter.chapter_number}: "
+                    f"{chapter.summary[:120]}…",
+                )
+                # Persist to EKG graph
+                if self._memory_store:
+                    try:
+                        await persist_chapter_to_graph(
+                            chapter, self._memory_store, self.agent_name,
+                        )
+                    except Exception:
+                        pass  # JSON fallback already saved
+        except Exception as exc:
+            self._logger.warning(
+                "consciousness_narrative_error",
+                agent=self.agent_name,
+                error=repr(exc),
+            )
+
+    async def _run_self_model_rebuild(self, tick: int) -> None:
+        """Pillar 5 — reconstruct the agent's explicit self-model."""
+        from agentgolem.consciousness.self_model import (
+            SELF_MODEL_REBUILD_PROMPT,
+            build_graph_context_for_self_model,
+            parse_self_model_update,
+        )
+
+        try:
+            graph_ctx = "No graph context available yet."
+            if self._memory_store:
+                try:
+                    graph_ctx = await build_graph_context_for_self_model(
+                        self._memory_store,
+                    )
+                except Exception:
+                    pass
+
+            prompt = SELF_MODEL_REBUILD_PROMPT.format(
+                agent_name=self.agent_name,
+                ethical_vector=self.ethical_vector,
+                narrative_context=self._narrative_synthesizer.recent_narrative_context(),
+                metacognitive_summary=self._metacognitive_monitor.last_observation.summary(),
+                internal_state_summary=self._internal_state.summary(),
+                peer_context=graph_ctx,
+            )
+            raw = await self._complete_discussion(
+                [Message(role="system", content=prompt)],
+            )
+            self._self_model = parse_self_model_update(raw, self._self_model, tick)
+            self._self_model.save(self._self_model_path)
+            self._emit("🪞", f"Self-model: {self._self_model.summary()[:120]}…")
+        except Exception as exc:
+            self._logger.warning(
+                "consciousness_self_model_error",
+                agent=self.agent_name,
+                error=repr(exc),
             )
 
     # ------------------------------------------------------------------

@@ -49,3 +49,12 @@ name_discovery_cycles: 4
 peer_checkin_interval_minutes: 30.0
 peer_message_max_chars: 3000
 llm_code_model: gpt-5.4        # model used for codebase inspection & evolution (higher quality)
+repo_root: ""                  # workspace boundary (empty = auto-detect from install location)
+
+# Consciousness kernel
+metacognition_interval: 3            # ticks between metacognitive reflection passes
+narrative_synthesis_interval: 15     # ticks between narrative chapter synthesis
+self_model_rebuild_interval: 10      # ticks between self-model reconstruction
+attention_influence_weight: 0.7      # how strongly attention directive biases action (0-1)
+internal_state_mycelium_share: true  # share internal state read-only via mycelium
+metacognition_novelty_bias: 0.3      # how much "stuck" detection pushes toward novelty

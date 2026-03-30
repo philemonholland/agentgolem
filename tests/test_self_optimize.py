@@ -72,6 +72,7 @@ class TestLockedSettings:
             "agent_count",
             "name_discovery_cycles",
             "llm_request_delay_seconds",
+            "repo_root",
         }
         assert LOCKED_SETTINGS == expected
 

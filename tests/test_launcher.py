@@ -423,6 +423,7 @@ class TestParamDefs:
             "Retention",
             "Quarantine",
             "Browser",
+            "Consciousness",
             "Dashboard",
             "Secrets",
             "Swarm",

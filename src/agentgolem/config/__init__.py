@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from agentgolem.config.secrets import Secrets
-from agentgolem.config.settings import Settings, load_settings
+from agentgolem.config.settings import Settings, load_settings, migrate_settings
 
 _settings: Settings | None = None
 _secrets: Secrets | None = None
@@ -41,4 +41,5 @@ __all__ = [
     "get_secrets",
     "reset_config",
     "load_settings",
+    "migrate_settings",
 ]

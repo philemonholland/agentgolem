@@ -59,6 +59,17 @@ class Settings(BaseModel):
     peer_message_max_chars: int = 3000
     llm_code_model: str = "gpt-5.4"
 
+    # Workspace boundary (empty = auto-detect from module location)
+    repo_root: str = ""
+
+    # Consciousness kernel
+    metacognition_interval: int = 3
+    narrative_synthesis_interval: int = 15
+    self_model_rebuild_interval: int = 10
+    attention_influence_weight: float = 0.7
+    internal_state_mycelium_share: bool = True
+    metacognition_novelty_bias: float = 0.3
+
 
 def load_settings(config_path: Path = Path("config/settings.yaml")) -> Settings:
     """Load settings from YAML file, falling back to defaults."""
@@ -67,3 +78,39 @@ def load_settings(config_path: Path = Path("config/settings.yaml")) -> Settings:
             data = yaml.safe_load(f) or {}
         return Settings(**data)
     return Settings()
+
+
+def migrate_settings(config_path: Path = Path("config/settings.yaml")) -> list[str]:
+    """Ensure settings.yaml contains all keys from the Settings model.
+
+    Compares the on-disk YAML against ``Settings.model_fields``. Any key
+    present in the model but missing from the file is inserted with its
+    default value.  Existing values are never overwritten.
+
+    Returns the list of newly added key names (empty if nothing changed).
+    """
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if config_path.exists():
+        with open(config_path, encoding="utf-8") as f:
+            data: dict = yaml.safe_load(f) or {}
+    else:
+        data = {}
+
+    defaults = Settings()
+    added: list[str] = []
+
+    for field_name in Settings.model_fields:
+        if field_name not in data:
+            value = getattr(defaults, field_name)
+            # Convert Path to string for YAML serialisation
+            if isinstance(value, Path):
+                value = str(value)
+            data[field_name] = value
+            added.append(field_name)
+
+    if added:
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+    return added

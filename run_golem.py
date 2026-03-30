@@ -280,6 +280,13 @@ PARAM_DEFS: list[ParamDef] = [
     # --- Identity ---
     param("data_dir", "Data Directory", "Root directory for all runtime data", "str", "Identity"),
     param(
+        "repo_root",
+        "Repository Root",
+        "Workspace boundary for agents (empty = auto-detect)",
+        "str",
+        "Identity",
+    ),
+    param(
         "awake_duration_minutes",
         "Awake Duration (minutes)",
         "How long the agent stays awake before sleeping",
@@ -588,6 +595,49 @@ PARAM_DEFS: list[ParamDef] = [
         "Maximum characters per peer message (check-in or reply)",
         "int",
         "Swarm",
+    ),
+    # --- Consciousness Kernel ---
+    param(
+        "metacognition_interval",
+        "Metacognition Interval (ticks)",
+        "Ticks between metacognitive self-reflection passes",
+        "int",
+        "Consciousness",
+    ),
+    param(
+        "narrative_synthesis_interval",
+        "Narrative Interval (ticks)",
+        "Ticks between narrative chapter synthesis",
+        "int",
+        "Consciousness",
+    ),
+    param(
+        "self_model_rebuild_interval",
+        "Self-Model Interval (ticks)",
+        "Ticks between self-model reconstruction",
+        "int",
+        "Consciousness",
+    ),
+    param(
+        "attention_influence_weight",
+        "Attention Influence (0-1)",
+        "How strongly the attention directive biases action selection",
+        "float",
+        "Consciousness",
+    ),
+    param(
+        "internal_state_mycelium_share",
+        "Share Internal State",
+        "Whether internal state is shared read-only via mycelium",
+        "bool",
+        "Consciousness",
+    ),
+    param(
+        "metacognition_novelty_bias",
+        "Novelty Bias (0-1)",
+        "How much 'stuck' detection pushes toward novelty",
+        "float",
+        "Consciousness",
     ),
     # --- Dashboard (launcher-only, stored in launcher_state.json) ---
     param(
@@ -2065,6 +2115,15 @@ def main() -> None:
     args = parser.parse_args()
 
     os.chdir(ROOT)  # ensure CWD is repo root
+
+    # Auto-migrate settings: add any new keys with defaults
+    from agentgolem.config.settings import migrate_settings
+
+    added_keys = migrate_settings(SETTINGS_PATH)
+    if added_keys:
+        cprint(f"  ⚙️  Settings migrated — added {len(added_keys)} new key(s): "
+               f"{', '.join(added_keys)}\n", C.CYAN)
+
     store = ParamStore()
 
     if not args.auto:

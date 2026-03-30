@@ -14,6 +14,7 @@ from agentgolem.config import (
     get_secrets,
     get_settings,
     load_settings,
+    migrate_settings,
     reset_config,
 )
 
@@ -177,3 +178,83 @@ def test_reset_config_clears_singletons(mock_settings_yaml: Path, tmp_env_file: 
 
     assert settings_a is not settings_b
     assert secrets_a is not secrets_b
+
+
+# ── 8. migrate_settings adds missing keys ───────────────────────────────
+
+
+def test_migrate_settings_adds_missing_keys(tmp_path: Path) -> None:
+    """migrate_settings inserts missing keys with defaults."""
+    yaml_path = tmp_path / "settings.yaml"
+    yaml_path.write_text("data_dir: mydata\nawake_duration_minutes: 5.0\n")
+
+    added = migrate_settings(yaml_path)
+
+    assert len(added) > 0
+    assert "data_dir" not in added  # already existed
+    assert "awake_duration_minutes" not in added  # already existed
+    assert "agent_count" in added  # was missing
+
+    # Verify the file was updated and existing values preserved
+    reloaded = load_settings(yaml_path)
+    assert str(reloaded.data_dir) == "mydata"  # preserved
+    assert reloaded.awake_duration_minutes == 5.0  # preserved
+    assert reloaded.agent_count == 7  # added with default
+
+
+def test_migrate_settings_idempotent(tmp_path: Path) -> None:
+    """Running migrate_settings twice produces no new additions the second time."""
+    yaml_path = tmp_path / "settings.yaml"
+    yaml_path.write_text("data_dir: data\n")
+
+    first_added = migrate_settings(yaml_path)
+    assert len(first_added) > 0
+
+    second_added = migrate_settings(yaml_path)
+    assert second_added == []
+
+
+def test_migrate_settings_creates_file(tmp_path: Path) -> None:
+    """migrate_settings creates the file if it doesn't exist."""
+    yaml_path = tmp_path / "config" / "settings.yaml"
+    assert not yaml_path.exists()
+
+    added = migrate_settings(yaml_path)
+
+    assert yaml_path.exists()
+    assert len(added) == len(Settings.model_fields)
+    reloaded = load_settings(yaml_path)
+    assert reloaded.agent_count == 7
+
+
+# ── 9. repo_root setting ────────────────────────────────────────────────
+
+
+def test_repo_root_default_empty() -> None:
+    """repo_root defaults to empty string (auto-detect)."""
+    s = Settings()
+    assert s.repo_root == ""
+
+
+def test_repo_root_configurable(tmp_path: Path) -> None:
+    """repo_root can be set to a specific path."""
+    yaml_path = tmp_path / "settings.yaml"
+    yaml_path.write_text(f"repo_root: {tmp_path}\n")
+    s = load_settings(yaml_path)
+    assert s.repo_root == str(tmp_path)
+
+
+def test_resolve_repo_root_auto_detect() -> None:
+    """resolve_repo_root returns auto-detect when repo_root is empty."""
+    from agentgolem.runtime.loop import REPO_ROOT, resolve_repo_root
+
+    s = Settings()
+    assert resolve_repo_root(s) == REPO_ROOT
+
+
+def test_resolve_repo_root_configured(tmp_path: Path) -> None:
+    """resolve_repo_root uses the configured path when set."""
+    from agentgolem.runtime.loop import resolve_repo_root
+
+    s = Settings(repo_root=str(tmp_path))
+    assert resolve_repo_root(s) == tmp_path.resolve()
