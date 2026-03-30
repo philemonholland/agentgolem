@@ -22,6 +22,8 @@ class MockWalker:
     def __init__(self) -> None:
         self.seed_calls = 0
         self.walk_calls = 0
+        self.restored_state: dict | None = None
+        self.last_phase: str | None = None
 
     async def sample_seeds(self, n: int) -> list[str]:
         self.seed_calls += 1
@@ -33,8 +35,10 @@ class MockWalker:
         max_steps: int = 50,
         max_time_ms: int = 5000,
         interrupt_check=None,
+        phase: str = "consolidation",
     ) -> WalkResult:
         self.walk_calls += 1
+        self.last_phase = phase
         return WalkResult(
             seed_id=seed_id,
             visited_node_ids=[seed_id],
@@ -42,7 +46,21 @@ class MockWalker:
             proposed_actions=[],
             steps_taken=1,
             time_ms=10.0,
+            phase=phase,
         )
+
+    def restore_neural_state(self, state: dict | None) -> None:
+        self.restored_state = state
+
+    def export_neural_state(self, *, top_k: int = 128) -> dict:
+        return {
+            "timestep": self.walk_calls,
+            "membrane_potentials": {"seed_0": 0.9},
+            "refractory_counters": {"seed_0": 1},
+            "pending_inputs": {},
+            "recent_spikes": [],
+            "top_k": top_k,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +135,7 @@ async def test_run_cycle_completes(
     assert isinstance(result, CycleResult)
     assert result.walks_completed == 5
     assert result.interrupted is False
+    assert result.phase == "consolidation"
     assert result.duration_ms >= 0
     assert walker.seed_calls == 1
     assert walker.walk_calls == 5
@@ -127,9 +146,24 @@ async def test_run_cycle_respects_budget(tmp_path: Path) -> None:
     recorded_args: list[dict] = []
 
     class RecordingWalker(MockWalker):
-        async def bounded_walk(self, seed_id, max_steps=50, max_time_ms=5000, interrupt_check=None):
-            recorded_args.append({"max_steps": max_steps, "max_time_ms": max_time_ms})
-            return await super().bounded_walk(seed_id, max_steps, max_time_ms, interrupt_check)
+        async def bounded_walk(
+            self,
+            seed_id,
+            max_steps=50,
+            max_time_ms=5000,
+            interrupt_check=None,
+            phase="consolidation",
+        ):
+            recorded_args.append(
+                {"max_steps": max_steps, "max_time_ms": max_time_ms, "phase": phase}
+            )
+            return await super().bounded_walk(
+                seed_id,
+                max_steps,
+                max_time_ms,
+                interrupt_check,
+                phase,
+            )
 
     sched = SleepScheduler(
         max_nodes_per_cycle=100,
@@ -141,6 +175,7 @@ async def test_run_cycle_respects_budget(tmp_path: Path) -> None:
     for args in recorded_args:
         assert args["max_steps"] == 20   # 100 // 5
         assert args["max_time_ms"] == 1000  # 5000 // 5
+        assert args["phase"] == "consolidation"
 
 
 async def test_run_cycle_interrupt(
@@ -162,10 +197,23 @@ async def test_run_cycle_interrupt_mid_walk(tmp_path: Path) -> None:
         return call_count >= 2
 
     class CountingWalker(MockWalker):
-        async def bounded_walk(self, seed_id, max_steps=50, max_time_ms=5000, interrupt_check=None):
+        async def bounded_walk(
+            self,
+            seed_id,
+            max_steps=50,
+            max_time_ms=5000,
+            interrupt_check=None,
+            phase="consolidation",
+        ):
             nonlocal call_count
             call_count += 1
-            return await super().bounded_walk(seed_id, max_steps, max_time_ms, interrupt_check)
+            return await super().bounded_walk(
+                seed_id,
+                max_steps,
+                max_time_ms,
+                interrupt_check,
+                phase,
+            )
 
     sched = SleepScheduler(state_path=tmp_path)
     result = await sched.run_cycle(CountingWalker(), interrupt_check=interrupt_after_two)
@@ -180,7 +228,14 @@ async def test_run_cycle_tracks_applied_actions_and_mycelium_updates(
     """Cycle reports both local action application and post-walk updates."""
 
     class ActionWalker(MockWalker):
-        async def bounded_walk(self, seed_id, max_steps=50, max_time_ms=5000, interrupt_check=None):
+        async def bounded_walk(
+            self,
+            seed_id,
+            max_steps=50,
+            max_time_ms=5000,
+            interrupt_check=None,
+            phase="consolidation",
+        ):
             self.walk_calls += 1
             return WalkResult(
                 seed_id=seed_id,
@@ -196,6 +251,7 @@ async def test_run_cycle_tracks_applied_actions_and_mycelium_updates(
                 ],
                 steps_taken=1,
                 time_ms=10.0,
+                phase=phase,
             )
 
         async def apply_actions(self, actions):
@@ -218,6 +274,40 @@ async def test_run_cycle_tracks_applied_actions_and_mycelium_updates(
     assert result.items_queued == 15
 
 
+async def test_run_cycle_advances_sleep_phase(tmp_path: Path) -> None:
+    """Scheduler alternates between consolidation and dream phases."""
+    scheduler = SleepScheduler(
+        state_path=tmp_path,
+        phase_cycle_length=4,
+        phase_split=0.5,
+    )
+    walker = MockWalker()
+
+    result1 = await scheduler.run_cycle(walker)
+    state1 = scheduler.get_state()
+    assert result1.phase == "consolidation"
+    assert state1.current_phase == "consolidation"
+    assert state1.phase_step == 1
+
+    result2 = await scheduler.run_cycle(walker)
+    state2 = scheduler.get_state()
+    assert result2.phase == "consolidation"
+    assert state2.current_phase == "dream"
+    assert state2.phase_step == 0
+
+    result3 = await scheduler.run_cycle(walker)
+    state3 = scheduler.get_state()
+    assert result3.phase == "dream"
+    assert state3.current_phase == "dream"
+    assert state3.phase_step == 1
+
+    result4 = await scheduler.run_cycle(walker)
+    state4 = scheduler.get_state()
+    assert result4.phase == "dream"
+    assert state4.current_phase == "consolidation"
+    assert state4.phase_step == 0
+
+
 # ---------------------------------------------------------------------------
 # Tests — state persistence
 # ---------------------------------------------------------------------------
@@ -228,12 +318,18 @@ def test_state_persistence(tmp_path: Path) -> None:
         last_cycle_time="2025-01-01T00:00:00+00:00",
         cycles_completed=7,
         items_queued=42,
+        current_phase="dream",
+        phase_step=1,
+        neural_state={"timestep": 11, "membrane_potentials": {"n1": 0.8}},
     )
     state_file = tmp_path / "sleep_state.json"
     state_file.write_text(json.dumps({
         "last_cycle_time": state.last_cycle_time,
         "cycles_completed": state.cycles_completed,
         "items_queued": state.items_queued,
+        "current_phase": state.current_phase,
+        "phase_step": state.phase_step,
+        "neural_state": state.neural_state,
     }))
 
     sched = SleepScheduler(state_path=tmp_path)
@@ -242,6 +338,9 @@ def test_state_persistence(tmp_path: Path) -> None:
     assert loaded.last_cycle_time == state.last_cycle_time
     assert loaded.cycles_completed == state.cycles_completed
     assert loaded.items_queued == state.items_queued
+    assert loaded.current_phase == "dream"
+    assert loaded.phase_step == 1
+    assert loaded.neural_state["timestep"] == 11
 
 
 async def test_cycles_completed_increments(
@@ -269,3 +368,5 @@ async def test_state_persisted_after_cycle(tmp_path: Path, walker: MockWalker) -
     sched2 = SleepScheduler(state_path=tmp_path)
     assert sched2.get_state().cycles_completed == 1
     assert sched2.get_state().last_cycle_time != ""
+    assert sched2.get_state().neural_state["timestep"] == 5
+    assert sched2.get_state().neural_state["top_k"] == 128

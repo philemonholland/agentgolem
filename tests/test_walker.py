@@ -12,7 +12,12 @@ from agentgolem.memory.models import (
 from agentgolem.memory.schema import close_db, init_db
 from agentgolem.memory.store import SQLiteMemoryStore
 from agentgolem.runtime.state import RuntimeState
-from agentgolem.sleep.walker import GraphWalker, WalkResult
+from agentgolem.sleep.walker import (
+    GraphWalker,
+    SleepNeuralState,
+    SleepSpikingConfig,
+    WalkResult,
+)
 
 
 # ------------------------------------------------------------------
@@ -138,6 +143,9 @@ async def test_bounded_walk_visits_nodes(walker: GraphWalker, store: SQLiteMemor
     assert result.steps_taken >= 3
     assert result.time_ms >= 0
     assert not result.interrupted
+    assert result.phase == "consolidation"
+    assert len(result.spike_events) >= 3
+    assert result.peak_potentials[node_a.id] > 0
 
 
 async def test_bounded_walk_respects_max_steps(
@@ -195,8 +203,8 @@ async def test_bounded_walk_interrupt_check(
     )
 
     assert result.interrupted
-    # Interrupt is checked at step 10, so we should have exactly 10 steps
-    assert result.steps_taken == 10
+    # Interrupt is checked every 5 timesteps in the spiking walker.
+    assert result.steps_taken == 5
 
 
 async def test_reinforce_edge_increases_weight(
@@ -282,3 +290,52 @@ async def test_activation_propagation(
     assert act_ab > act_bc
     assert act_ab > 0
     assert act_bc > 0
+
+
+async def test_dream_phase_lowers_threshold_and_records_phase(
+    store: SQLiteMemoryStore,
+    runtime_state: RuntimeState,
+):
+    """Dream phase should record dream spikes and still traverse the graph."""
+    walker = GraphWalker(
+        store,
+        runtime_state,
+        config=SleepSpikingConfig(
+            consolidation_threshold=1.1,
+            dream_threshold=0.65,
+            dream_noise=0.2,
+        ),
+    )
+    node_a, node_b, node_c, *_ = await create_test_graph(store)
+
+    result = await walker.bounded_walk(node_a.id, phase="dream")
+
+    assert result.phase == "dream"
+    assert node_a.id in result.visited_node_ids
+    assert node_b.id in result.visited_node_ids
+    assert node_c.id in result.visited_node_ids
+    assert all(event.phase == "dream" for event in result.spike_events)
+
+
+def test_export_and_restore_neural_state() -> None:
+    """Transient neural state should round-trip through persistence snapshots."""
+    original = SleepNeuralState.from_dict(
+        {
+            "timestep": 7,
+            "membrane_potentials": {"a": 0.9, "b": 0.2},
+            "refractory_counters": {"a": 2},
+            "pending_inputs": {"c": 0.4},
+            "recent_spikes": [
+                {"node_id": "a", "step": 6, "potential": 1.1, "phase": "dream"},
+            ],
+        }
+    )
+
+    payload = original.to_dict(top_k=16)
+    restored = SleepNeuralState.from_dict(payload)
+
+    assert restored.timestep == 7
+    assert restored.membrane_potentials["a"] == pytest.approx(0.9)
+    assert restored.refractory_counters["a"] == 2
+    assert restored.pending_inputs["c"] == pytest.approx(0.4)
+    assert restored.recent_spikes[0].phase == "dream"

@@ -101,9 +101,19 @@ wind_down_minutes: 2.0                 # Grace period before sleeping
 soul_update_min_confidence: 0.7        # Minimum confidence to accept a soul change
 
 # --- Sleep / Default-Mode ---
-sleep_cycle_minutes: 5.0               # Minutes between consolidation cycles
+sleep_cycle_minutes: 5.0               # Upper bound on cooldown between dream walks (default runtime cadence is ~10s)
 sleep_max_nodes_per_cycle: 1000        # Node budget per cycle
 sleep_max_time_ms: 5000                # Wall-clock budget per cycle (ms)
+sleep_phase_cycle_length: 6            # Repeating consolidation/dream macro-cycle length
+sleep_phase_split: 0.67                # Fraction of the macro-cycle spent in consolidation
+sleep_state_top_k: 128                 # Persisted top active neural states between cycles
+sleep_membrane_decay: 0.82             # Base membrane leak per timestep
+sleep_consolidation_threshold: 0.95    # Spike threshold in consolidation phase
+sleep_dream_threshold: 0.75            # Lower threshold in associative dream phase
+sleep_refractory_steps: 2              # Timesteps a node stays refractory after spiking
+sleep_stdp_window_steps: 3             # Timing window for plasticity updates
+sleep_stdp_strength: 0.08              # Strength of STDP-like edge updates
+sleep_dream_noise: 0.18                # Associative noise injected during dream phase
 
 # --- LLM ---
 llm_provider: "openai"                 # LLM backend (currently only openai)

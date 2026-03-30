@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from collections.abc import Awaitable, Callable
 from typing import Any
 
 from agentgolem.runtime.state import AgentMode
@@ -16,6 +16,7 @@ from agentgolem.sleep.walker import GraphWalker, WalkResult
 # ---------------------------------------------------------------------------
 # Data models
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class CycleResult:
@@ -27,6 +28,7 @@ class CycleResult:
     applied_actions: int = 0
     mycelium_updates: int = 0
     interrupted: bool = False
+    phase: str = "consolidation"
 
 
 @dataclass
@@ -36,11 +38,15 @@ class SleepState:
     last_cycle_time: str = ""  # ISO timestamp
     cycles_completed: int = 0
     items_queued: int = 0
+    current_phase: str = "consolidation"
+    phase_step: int = 0
+    neural_state: dict[str, Any] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
 # Scheduler
 # ---------------------------------------------------------------------------
+
 
 class SleepScheduler:
     """Orchestrates periodic sleep-cycle walks over the memory graph."""
@@ -51,31 +57,33 @@ class SleepScheduler:
         max_nodes_per_cycle: int = 100,
         max_time_ms: int = 5000,
         state_path: Path | None = None,
+        phase_cycle_length: int = 6,
+        phase_split: float = 0.67,
+        persist_top_k: int = 128,
     ) -> None:
         self.cycle_minutes = cycle_minutes
         self.max_nodes_per_cycle = max_nodes_per_cycle
         self.max_time_ms = max_time_ms
+        self.phase_cycle_length = max(2, int(phase_cycle_length))
+        self.phase_split = min(max(float(phase_split), 0.1), 0.9)
+        self.persist_top_k = max(8, int(persist_top_k))
         self._state_path = state_path
         self._state: SleepState = self._load_state()
 
     # -- public API ---------------------------------------------------------
 
     def should_run(self, mode: AgentMode) -> bool:
-        """Return True when a sleep walk is due.
-
-        Walks run continuously throughout sleep with a short cooldown
-        between cycles (10 seconds) to avoid busy-looping.
-        """
+        """Return True when a sleep walk is due."""
         if mode != AgentMode.ASLEEP:
             return False
 
         if not self._state.last_cycle_time:
-            return True  # first run
+            return True
 
         last = datetime.fromisoformat(self._state.last_cycle_time)
         elapsed = datetime.now(timezone.utc) - last
-        # Short cooldown between dream walks (10s) rather than full cycle gap
-        return elapsed >= timedelta(seconds=10)
+        cooldown_seconds = max(1.0, min(self.cycle_minutes * 60.0, 10.0))
+        return elapsed >= timedelta(seconds=cooldown_seconds)
 
     async def run_cycle(
         self,
@@ -86,19 +94,22 @@ class SleepScheduler:
     ) -> CycleResult:
         """Execute one sleep cycle and return its result."""
         start = time.monotonic()
+        phase = self._state.current_phase or "consolidation"
 
-        # Early interrupt check
+        if hasattr(walker, "restore_neural_state"):
+            walker.restore_neural_state(self._state.neural_state)
+
         if interrupt_check and interrupt_check():
             return CycleResult(
                 walks_completed=0,
                 items_queued=0,
                 duration_ms=_elapsed_ms(start),
                 interrupted=True,
+                phase=phase,
             )
 
         num_seeds = 5
         seeds = await walker.sample_seeds(num_seeds)
-
         steps_per_walk = max(1, self.max_nodes_per_cycle // num_seeds)
         time_per_walk = max(1, self.max_time_ms // num_seeds)
 
@@ -113,6 +124,7 @@ class SleepScheduler:
                     applied_actions=0,
                     mycelium_updates=mycelium_updates,
                     interrupted=True,
+                    phase=phase,
                 )
 
             result = await walker.bounded_walk(
@@ -120,28 +132,31 @@ class SleepScheduler:
                 max_steps=steps_per_walk,
                 max_time_ms=time_per_walk,
                 interrupt_check=interrupt_check,
+                phase=phase,
             )
             walk_results.append(result)
             if post_walk_callback is not None:
                 mycelium_updates += await post_walk_callback(result)
 
-        # Consolidation (pass-through for now)
         proposed_actions: list[dict[str, Any]] = []
         if consolidation_engine is not None:
             proposed_actions = consolidation_engine.process(walk_results)
         else:
-            for wr in walk_results:
-                proposed_actions.extend(wr.proposed_actions)
+            for walk_result in walk_results:
+                proposed_actions.extend(walk_result.proposed_actions)
 
         applied_actions = 0
         if hasattr(walker, "apply_actions"):
             applied_actions = await walker.apply_actions(proposed_actions)
         total_changes = applied_actions + mycelium_updates
 
-        # Update state
+        if hasattr(walker, "export_neural_state"):
+            self._state.neural_state = walker.export_neural_state(top_k=self.persist_top_k)
+
         self._state.last_cycle_time = datetime.now(timezone.utc).isoformat()
         self._state.cycles_completed += 1
         self._state.items_queued += total_changes
+        self._advance_phase()
         self._save_state(self._state)
 
         return CycleResult(
@@ -150,6 +165,8 @@ class SleepScheduler:
             duration_ms=_elapsed_ms(start),
             applied_actions=applied_actions,
             mycelium_updates=mycelium_updates,
+            interrupted=False,
+            phase=phase,
         )
 
     def get_state(self) -> SleepState:
@@ -172,8 +189,15 @@ class SleepScheduler:
             return SleepState()
         try:
             data = json.loads(state_file.read_text())
-            return SleepState(**data)
-        except (json.JSONDecodeError, TypeError):
+            return SleepState(
+                last_cycle_time=str(data.get("last_cycle_time", "")),
+                cycles_completed=int(data.get("cycles_completed", 0)),
+                items_queued=int(data.get("items_queued", 0)),
+                current_phase=str(data.get("current_phase", "consolidation")),
+                phase_step=int(data.get("phase_step", 0)),
+                neural_state=dict(data.get("neural_state", {})),
+            )
+        except (json.JSONDecodeError, TypeError, ValueError):
             return SleepState()
 
     def _save_state(self, state: SleepState) -> None:
@@ -183,10 +207,32 @@ class SleepScheduler:
         state_file.parent.mkdir(parents=True, exist_ok=True)
         state_file.write_text(json.dumps(asdict(state), indent=2))
 
+    def _advance_phase(self) -> None:
+        consolidation_cycles = max(
+            1,
+            min(
+                self.phase_cycle_length - 1,
+                round(self.phase_cycle_length * self.phase_split),
+            ),
+        )
+        dream_cycles = max(1, self.phase_cycle_length - consolidation_cycles)
+
+        self._state.phase_step += 1
+        if self._state.current_phase == "dream":
+            if self._state.phase_step >= dream_cycles:
+                self._state.current_phase = "consolidation"
+                self._state.phase_step = 0
+            return
+
+        if self._state.phase_step >= consolidation_cycles:
+            self._state.current_phase = "dream"
+            self._state.phase_step = 0
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _elapsed_ms(start: float) -> float:
     return (time.monotonic() - start) * 1000.0

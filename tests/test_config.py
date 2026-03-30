@@ -37,6 +37,16 @@ def test_settings_from_yaml(mock_settings_yaml: Path) -> None:
     assert settings.sleep_duration_minutes == 2.0
     assert settings.wind_down_minutes == 0.5
     assert settings.sleep_cycle_minutes == 1.0
+    assert settings.sleep_phase_cycle_length == 4
+    assert settings.sleep_phase_split == 0.5
+    assert settings.sleep_state_top_k == 64
+    assert settings.sleep_membrane_decay == 0.75
+    assert settings.sleep_consolidation_threshold == 1.1
+    assert settings.sleep_dream_threshold == 0.7
+    assert settings.sleep_refractory_steps == 3
+    assert settings.sleep_stdp_window_steps == 4
+    assert settings.sleep_stdp_strength == 0.12
+    assert settings.sleep_dream_noise == 0.25
     assert settings.log_level == "DEBUG"
     assert settings.llm_model == "gpt-4o-mini"
     assert settings.llm_discussion_model == "deepseek-reasoner"
@@ -54,6 +64,16 @@ def test_settings_defaults_when_no_yaml(tmp_path: Path) -> None:
     assert settings.awake_duration_minutes == 10.0
     assert settings.sleep_duration_minutes == 5.0
     assert settings.wind_down_minutes == 2.0
+    assert settings.sleep_phase_cycle_length == 6
+    assert settings.sleep_phase_split == 0.67
+    assert settings.sleep_state_top_k == 128
+    assert settings.sleep_membrane_decay == 0.82
+    assert settings.sleep_consolidation_threshold == 0.95
+    assert settings.sleep_dream_threshold == 0.75
+    assert settings.sleep_refractory_steps == 2
+    assert settings.sleep_stdp_window_steps == 3
+    assert settings.sleep_stdp_strength == 0.08
+    assert settings.sleep_dream_noise == 0.18
     assert settings.llm_model == "gpt-5"
     assert settings.llm_discussion_model == "deepseek-reasoner"
     assert settings.llm_code_model == "gpt-5.4"

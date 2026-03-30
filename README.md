@@ -17,7 +17,7 @@ and gradually evolve their own code through unanimous, Vow-aligned consensus.
 - **Evolving Identity** — Per-agent `soul.md` that changes only through evidenced, versioned updates
 - **Graph Memory** — EKG-inspired multi-view memory graphs with richer claims, typed edges, search projections, clusters, and read-only cross-agent overlays
 - **Bayesian Trust Model** — Odds-space updates with independence discount; per-source reliability
-- **Sleep / Default-Mode** — Continuous dream-like graph walks with emotion-weighted seed selection during sleep cycles
+- **Sleep / Default-Mode** — Phase-aware spiking-inspired sleep walks with persistent neural state, dream noise, and STDP-like edge plasticity
 - **Memory-Informed Decisions** — Agents recall relevant past memories when thinking, deciding, and discussing
 - **Read-Only Mycelium** — Agents can surface entangled peer memories through owner-written exports while keeping foreign memories explicitly separate
 - **Self-Optimisation** — Agents tune their own settings (sleep/wake duration is protected)
@@ -109,8 +109,14 @@ Key settings (see the template for all defaults):
 | `llm_discussion_model`           | `deepseek-reasoner` | Discussion/reflection model when `DEEPSEEK_API_KEY` is configured |
 | `llm_code_model`                 | `gpt-5.4`  | Stronger model for codebase ops            |
 | `peer_message_max_chars`         | `3000`     | Max chars for inter-agent messages         |
+| `sleep_phase_split`              | `0.67`     | Fraction of sleep macro-cycle spent in consolidation before dream mode |
+| `sleep_membrane_decay`           | `0.82`     | Base leak factor for spiking-inspired sleep dynamics |
 | `niscalajyoti_revisit_hours`     | `6.0`      | Hours between NJ revisit cycles            |
 | `browser_rate_limit_per_minute`  | `10`       | Max web requests per minute                |
+
+Sleep also exposes spiking controls such as thresholds, refractory steps,
+STDP window/strength, dream noise, and persisted neural-state size in
+`config/settings.yaml`.
 
 ### `.env` — Secrets (never committed)
 

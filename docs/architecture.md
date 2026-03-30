@@ -340,24 +340,30 @@ every 10 seconds.
 
 ### Graph Walker
 
-The `GraphWalker` performs **spreading-activation walks** over the memory graph:
+The `GraphWalker` now performs a **phase-aware spiking heuristic** over the
+memory graph:
 
 1. **Seed selection** — Sample seed nodes weighted by
    `centrality × recency × emotion × salience`
-2. **Bounded walk** — Starting from the seed, traverse edges probabilistically
-   weighted by edge `weight`. Respect budget constraints:
-   - `sleep_max_nodes_per_cycle` (default: 100 nodes)
-   - `sleep_max_time_ms` (default: 5000 ms)
-3. **Edge reinforcement** — Frequently-traversed edges have their weight
-   increased (up to 5.0). Rarely-used edges are weakened (down to 0.01).
-4. **Mycelium entanglement** — The scheduler may derive a bounded query
+2. **Transient neural state** — Maintain membrane potentials, pending synaptic
+   inputs, refractory counters, and a recent spike window across sleep cycles
+3. **Timestep simulation** — Inject current into the seed, apply leak
+   (`sleep_membrane_decay`), integrate pending input, and spike when the node
+   crosses the current phase threshold
+4. **Phase-aware replay** — Alternate between:
+   - **consolidation** — stricter threshold, more local replay
+   - **dream** — lower threshold plus associative noise for looser combinations
+5. **STDP-like plasticity** — Edge proposals are derived from spike timing
+   rather than only raw activation strength
+6. **Mycelium entanglement** — The scheduler may derive a bounded query
    signature from the walked local nodes, search peer export snapshots, and
    reinforce overlay links in `mycelium.db`
-5. **Interrupt check** — The walker checks for operator interrupts at each step
-   and can abort mid-walk.
+7. **Interrupt check** — The walker checks for operator interrupts at regular
+   timestep intervals and can abort mid-walk.
 
-**Output:** `WalkResult` containing visited nodes, edge activations, proposed
-actions, step count, timing, and interrupt status.
+**Output:** `WalkResult` containing visited nodes, edge activations,
+timing-aware proposed actions, phase, spike events, peak potentials, step
+count, timing, and interrupt status.
 
 ### Consolidation Engine
 
@@ -382,9 +388,15 @@ should_run(mode) → True if mode == ASLEEP and time since last cycle ≥ ~10 se
 run_cycle(walker, engine, interrupt_check, post_walk_callback) → CycleResult
 ```
 
-It applies local walker actions, optionally runs a post-walk callback for
-cross-agent entanglement updates, and persists state in
-`data/state/sleep_state.json`.
+It also:
+
+- persists current sleep phase (`consolidation` or `dream`)
+- alternates phases according to `sleep_phase_cycle_length` and
+  `sleep_phase_split`
+- snapshots top membrane potentials, refractory counters, pending inputs, and
+  recent spikes into `data/state/sleep_state.json`
+- applies local walker actions
+- optionally runs a post-walk callback for cross-agent entanglement updates
 
 ---
 

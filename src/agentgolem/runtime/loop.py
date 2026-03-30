@@ -27,7 +27,7 @@ from agentgolem.runtime.interrupts import HumanMessage, InterruptManager
 from agentgolem.runtime.state import AgentMode, RuntimeState
 from agentgolem.sleep.consolidation import ConsolidationEngine
 from agentgolem.sleep.scheduler import SleepScheduler
-from agentgolem.sleep.walker import GraphWalker
+from agentgolem.sleep.walker import GraphWalker, SleepSpikingConfig
 
 # Settings the agents are NEVER allowed to change (sleep-wake cycle)
 LOCKED_SETTINGS: frozenset[str] = frozenset({
@@ -46,6 +46,16 @@ OPTIMIZABLE_SETTINGS: dict[str, dict[str, Any]] = {
     "soul_update_min_confidence":       {"type": float, "min": 0.0,  "max": 1.0},
     "sleep_max_nodes_per_cycle":        {"type": int,   "min": 10,   "max": 100_000},
     "sleep_max_time_ms":                {"type": int,   "min": 500,  "max": 60_000},
+    "sleep_phase_cycle_length":         {"type": int,   "min": 2,    "max": 24},
+    "sleep_phase_split":                {"type": float, "min": 0.1,  "max": 0.9},
+    "sleep_state_top_k":                {"type": int,   "min": 8,    "max": 2_000},
+    "sleep_membrane_decay":             {"type": float, "min": 0.3,  "max": 0.99},
+    "sleep_consolidation_threshold":    {"type": float, "min": 0.2,  "max": 2.0},
+    "sleep_dream_threshold":            {"type": float, "min": 0.1,  "max": 2.0},
+    "sleep_refractory_steps":           {"type": int,   "min": 1,    "max": 20},
+    "sleep_stdp_window_steps":          {"type": int,   "min": 1,    "max": 20},
+    "sleep_stdp_strength":              {"type": float, "min": 0.0,  "max": 1.0},
+    "sleep_dream_noise":                {"type": float, "min": 0.0,  "max": 1.0},
     "autonomous_interval_seconds":      {"type": float, "min": 5.0,  "max": 300.0},
     "niscalajyoti_revisit_hours":       {"type": float, "min": 0.5,  "max": 720.0},
     "retention_archive_days":           {"type": int,   "min": 1,    "max": 365},
@@ -264,6 +274,9 @@ class MainLoop:
             max_nodes_per_cycle=settings.sleep_max_nodes_per_cycle,
             max_time_ms=settings.sleep_max_time_ms,
             state_path=self._data_dir / "state",
+            phase_cycle_length=getattr(settings, "sleep_phase_cycle_length", 6),
+            phase_split=getattr(settings, "sleep_phase_split", 0.67),
+            persist_top_k=getattr(settings, "sleep_state_top_k", 128),
         )
         self._graph_walker: GraphWalker | None = None
         self._consolidation_engine: ConsolidationEngine | None = None
@@ -354,6 +367,42 @@ class MainLoop:
             "model_name",
             getattr(getattr(client, "_inner", client), "_model", "unknown"),
         )
+
+    def _current_sleep_spiking_config(self) -> SleepSpikingConfig:
+        """Build the current spiking sleep config from live settings."""
+        return SleepSpikingConfig(
+            membrane_decay=getattr(self._settings, "sleep_membrane_decay", 0.82),
+            consolidation_threshold=getattr(
+                self._settings,
+                "sleep_consolidation_threshold",
+                0.95,
+            ),
+            dream_threshold=getattr(self._settings, "sleep_dream_threshold", 0.75),
+            refractory_steps=getattr(self._settings, "sleep_refractory_steps", 2),
+            stdp_window_steps=getattr(self._settings, "sleep_stdp_window_steps", 3),
+            stdp_strength=getattr(self._settings, "sleep_stdp_strength", 0.08),
+            dream_noise=getattr(self._settings, "sleep_dream_noise", 0.18),
+        )
+
+    def _refresh_sleep_config(self) -> None:
+        """Propagate live sleep settings into the scheduler and walker."""
+        self.sleep_scheduler.cycle_minutes = self._settings.sleep_cycle_minutes
+        self.sleep_scheduler.max_nodes_per_cycle = self._settings.sleep_max_nodes_per_cycle
+        self.sleep_scheduler.max_time_ms = self._settings.sleep_max_time_ms
+        self.sleep_scheduler.phase_cycle_length = max(
+            2,
+            int(getattr(self._settings, "sleep_phase_cycle_length", 6)),
+        )
+        self.sleep_scheduler.phase_split = min(
+            max(float(getattr(self._settings, "sleep_phase_split", 0.67)), 0.1),
+            0.9,
+        )
+        self.sleep_scheduler.persist_top_k = max(
+            8,
+            int(getattr(self._settings, "sleep_state_top_k", 128)),
+        )
+        if self._graph_walker is not None:
+            self._graph_walker.update_config(self._current_sleep_spiking_config())
 
     async def _complete_discussion(
         self, messages: list[Message], **kwargs: Any
@@ -2805,7 +2854,11 @@ class MainLoop:
         if isinstance(store, SQLiteMemoryStore):
             self._memory_store = store
             self._memory_retriever = MemoryRetriever(store)
-            self._graph_walker = GraphWalker(store, self.runtime_state)
+            self._graph_walker = GraphWalker(
+                store,
+                self.runtime_state,
+                config=self._current_sleep_spiking_config(),
+            )
             self._shared_memory_exporter = SharedMemoryExporter(
                 store,
                 self._shared_memory_dir / "exports" / f"{self._agent_id}.sqlite",
@@ -2822,6 +2875,7 @@ class MainLoop:
                 audit=self.audit_logger,
                 state_path=self._data_dir / "state",
             )
+            self._refresh_sleep_config()
             if self._llm:
                 self._memory_encoder = MemoryEncoder(
                     store=store,
@@ -2910,6 +2964,7 @@ class MainLoop:
             self._logger.debug(
                 "sleep_walk_completed",
                 agent=self.agent_name,
+                phase=result.phase,
                 walks=result.walks_completed,
                 items_queued=result.items_queued,
                 duration_ms=result.duration_ms,
@@ -2920,7 +2975,7 @@ class MainLoop:
             if state.cycles_completed % 5 == 0:
                 self._emit(
                     "💤",
-                    f"Dreaming… ({state.cycles_completed} walks, "
+                    f"{result.phase.title()} sleep… ({state.cycles_completed} walks, "
                     f"{result.applied_actions} local adjustments, "
                     f"{result.mycelium_updates} mycelium links)",
                 )
@@ -3090,6 +3145,8 @@ class MainLoop:
         # Also update cached derived values that read from settings at init
         if key == "autonomous_interval_seconds":
             self._autonomous_interval = value
+        elif key.startswith("sleep_") and key != "sleep_duration_minutes":
+            self._refresh_sleep_config()
         elif key == "browser_rate_limit_per_minute" and self._browser:
             self._browser._rate_limit = value
         elif key == "browser_timeout_seconds" and self._browser:

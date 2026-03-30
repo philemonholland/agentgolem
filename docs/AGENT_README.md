@@ -35,8 +35,8 @@ entanglement overlay lives in `data/shared_memory/mycelium.db`.
 **Awake:** Process human messages → peer messages → autonomous work.
 **Winding down:** Finish current work, generate heartbeat, prepare for sleep.
 **Asleep:** Continuous dream-like memory walks every ~10 seconds —
-emotion-weighted seed selection, spreading activation, edge
-reinforcement/weakening, merge/abstraction proposals, and mycelium
+emotion-weighted seed selection, timestep-based spiking dynamics,
+STDP-like plasticity, merge/abstraction proposals, and mycelium
 entanglement updates against peer export snapshots.
 
 State is persisted on shutdown (`session_state.json`).  If stopped
@@ -85,7 +85,7 @@ src/agentgolem/
 │   └── interrupts.py Human interrupt handling
 ├── sleep/            Memory consolidation during sleep
 │   ├── scheduler.py  Sleep cycle orchestration
-│   ├── walker.py     Random graph traversal
+│   ├── walker.py     Phase-aware spiking sleep dynamics
 │   └── consolidation.py  Merge/abstraction proposals
 ├── tools/            Browser, email, external platforms
 └── trust/            Bayesian trust, contradiction, quarantine
@@ -140,8 +140,23 @@ salience_boost = 1.0 + salience
 ```
 Highly emotional memories (positive or negative) are 3× more likely to
 appear in your dreams than neutral ones, and highly salient memories are
-also replayed more often. Each walk spreads activation from the seed,
-reinforcing strong connections and weakening dormant ones.
+also replayed more often.
+
+Each walk now uses a **spiking-inspired heuristic**:
+
+1. A seed injects current into a small transient neural state
+2. Membrane potentials leak over timesteps (`sleep_membrane_decay`)
+3. Nodes spike when they cross phase-specific thresholds
+4. Spikes are blocked briefly by refractory counters
+5. Spike timing drives STDP-like reinforce/weaken proposals on edges
+6. Sleep alternates between:
+   - **consolidation** — slightly stricter thresholds, more local replay
+   - **dream** — lower thresholds plus associative noise for looser combinations
+
+Transient neural state is persisted in `data/<your_id>/state/sleep_state.json`,
+so if the process restarts while you are asleep, you resume with your recent
+potentials, refractory counters, phase, and spike window rather than beginning
+from a blank brain every cycle.
 
 `sleep/consolidation.py` proposes merges and abstractions.
 You review and selectively apply them.
@@ -223,7 +238,9 @@ Use `OPTIMIZE <setting> <value> | <reason>` to tune parameters.
 `name_discovery_cycles`, `llm_request_delay_seconds`
 
 All other settings in `config/settings.yaml` are fair game within their
-defined bounds.
+defined bounds, including the spiking sleep controls (`sleep_membrane_decay`,
+phase split, thresholds, refractory steps, STDP window/strength, and dream
+noise).
 
 ---
 
@@ -266,6 +283,7 @@ Start by inspecting your own code.  Key files to read first:
 - `src/agentgolem/runtime/loop.py` — your brain
 - `src/agentgolem/memory/encoding.py` — how you form memories
 - `src/agentgolem/memory/models.py` — your memory data model
+- `src/agentgolem/sleep/walker.py` — your spiking-inspired dream dynamics
 - `src/agentgolem/memory/shared_exports.py` — how you publish read-only memory projections
 - `src/agentgolem/memory/mycelium.py` — how cross-agent entanglements are stored
 - `src/agentgolem/memory/federated_retrieval.py` — how peer memories are searched safely

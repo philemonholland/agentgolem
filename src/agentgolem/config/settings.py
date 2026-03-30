@@ -16,6 +16,16 @@ class Settings(BaseModel):
     sleep_cycle_minutes: float = 5.0
     sleep_max_nodes_per_cycle: int = 1000
     sleep_max_time_ms: int = 5000
+    sleep_phase_cycle_length: int = 6
+    sleep_phase_split: float = 0.67
+    sleep_state_top_k: int = 128
+    sleep_membrane_decay: float = 0.82
+    sleep_consolidation_threshold: float = 0.95
+    sleep_dream_threshold: float = 0.75
+    sleep_refractory_steps: int = 2
+    sleep_stdp_window_steps: int = 3
+    sleep_stdp_strength: float = 0.08
+    sleep_dream_noise: float = 0.18
     llm_provider: str = "openai"
     llm_model: str = "gpt-5"
     llm_discussion_model: str = "deepseek-reasoner"

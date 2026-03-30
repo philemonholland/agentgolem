@@ -244,6 +244,16 @@ PARAM_DEFS: list[tuple[str, str, str, str, str]] = [
     ("sleep_cycle_minutes", "Sleep Cycle Interval (minutes)", "Minutes between sleep/consolidation cycles", "float", "Sleep"),
     ("sleep_max_nodes_per_cycle", "Sleep Max Nodes Per Cycle", "Max nodes to visit in one sleep cycle", "int", "Sleep"),
     ("sleep_max_time_ms", "Sleep Max Time (ms)", "Max wall-clock time per sleep cycle", "int", "Sleep"),
+    ("sleep_phase_cycle_length", "Sleep Phase Cycle Length", "Number of dream walks in one repeating consolidation/dream macro-cycle", "int", "Sleep"),
+    ("sleep_phase_split", "Sleep Phase Split", "Fraction of the macro-cycle spent in consolidation before switching to dream mode", "float", "Sleep"),
+    ("sleep_state_top_k", "Sleep State Top-K", "How many active neuron states to persist between sleep cycles", "int", "Sleep"),
+    ("sleep_membrane_decay", "Sleep Membrane Decay", "Leak/decay factor applied to membrane potential each timestep", "float", "Sleep"),
+    ("sleep_consolidation_threshold", "Consolidation Threshold", "Spike threshold during consolidation-heavy sleep", "float", "Sleep"),
+    ("sleep_dream_threshold", "Dream Threshold", "Lower spike threshold during associative dream sleep", "float", "Sleep"),
+    ("sleep_refractory_steps", "Sleep Refractory Steps", "Timesteps a node stays refractory after a spike", "int", "Sleep"),
+    ("sleep_stdp_window_steps", "Sleep STDP Window", "Spike-timing window for plasticity updates", "int", "Sleep"),
+    ("sleep_stdp_strength", "Sleep STDP Strength", "Strength of timing-aware reinforce/weaken edge updates", "float", "Sleep"),
+    ("sleep_dream_noise", "Sleep Dream Noise", "Associative noise injected during dream-phase walks", "float", "Sleep"),
 
     # --- LLM ---
     ("llm_provider", "LLM Provider", "LLM provider backend (openai)", "str", "LLM"),
@@ -1143,12 +1153,22 @@ class RuntimeConsole:
                 agent._wind_down_duration = timedelta(minutes=value)
             elif key == "soul_update_min_confidence":
                 agent.soul_manager._min_confidence = value
-            elif key == "sleep_cycle_minutes":
-                agent.sleep_scheduler.cycle_minutes = value
-            elif key == "sleep_max_nodes_per_cycle":
-                agent.sleep_scheduler.max_nodes_per_cycle = value
-            elif key == "sleep_max_time_ms":
-                agent.sleep_scheduler.max_time_ms = value
+            elif key in {
+                "sleep_cycle_minutes",
+                "sleep_max_nodes_per_cycle",
+                "sleep_max_time_ms",
+                "sleep_phase_cycle_length",
+                "sleep_phase_split",
+                "sleep_state_top_k",
+                "sleep_membrane_decay",
+                "sleep_consolidation_threshold",
+                "sleep_dream_threshold",
+                "sleep_refractory_steps",
+                "sleep_stdp_window_steps",
+                "sleep_stdp_strength",
+                "sleep_dream_noise",
+            }:
+                agent._refresh_sleep_config()
             elif key == "autonomous_interval_seconds":
                 agent._autonomous_interval = value
             elif key == "peer_checkin_interval_minutes":
@@ -1177,8 +1197,21 @@ class RuntimeConsole:
             cprint(f"    → Dry-run mode {'enabled' if value else 'disabled'}", C.DIM)
         elif key in ("awake_duration_minutes", "sleep_duration_minutes",
                       "wind_down_minutes", "soul_update_min_confidence",
-                      "sleep_cycle_minutes", "sleep_max_nodes_per_cycle",
-                      "sleep_max_time_ms", "autonomous_interval_seconds"):
+                      "autonomous_interval_seconds") or key in {
+                          "sleep_cycle_minutes",
+                          "sleep_max_nodes_per_cycle",
+                          "sleep_max_time_ms",
+                          "sleep_phase_cycle_length",
+                          "sleep_phase_split",
+                          "sleep_state_top_k",
+                          "sleep_membrane_decay",
+                          "sleep_consolidation_threshold",
+                          "sleep_dream_threshold",
+                          "sleep_refractory_steps",
+                          "sleep_stdp_window_steps",
+                          "sleep_stdp_strength",
+                          "sleep_dream_noise",
+                      }:
             cprint(f"    → {key} updated live for all agents", C.DIM)
 
 

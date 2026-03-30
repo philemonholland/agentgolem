@@ -10,6 +10,16 @@ soul_update_min_confidence: 0.7
 sleep_cycle_minutes: 5.0
 sleep_max_nodes_per_cycle: 1000
 sleep_max_time_ms: 5000
+sleep_phase_cycle_length: 6           # Sleep macro-cycle length in dream walks
+sleep_phase_split: 0.67               # Fraction of the macro-cycle spent in consolidation
+sleep_state_top_k: 128                # Persisted top active nodes for resuming mid-sleep
+sleep_membrane_decay: 0.82            # Base membrane leak/decay per timestep
+sleep_consolidation_threshold: 0.95   # Spike threshold during consolidation phase
+sleep_dream_threshold: 0.75           # Lower spike threshold during associative dream phase
+sleep_refractory_steps: 2             # Timesteps a node stays refractory after spiking
+sleep_stdp_window_steps: 3            # Timestep window for timing-aware plasticity
+sleep_stdp_strength: 0.08             # Strength of STDP-like reinforce/weaken updates
+sleep_dream_noise: 0.18               # Associative noise injected during dream phase
 llm_provider: openai
 llm_model: gpt-5
 llm_discussion_model: deepseek-reasoner   # regular discussion model when DEEPSEEK_API_KEY is set
