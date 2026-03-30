@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from pydantic import BaseModel
@@ -34,6 +35,22 @@ TYPE_PRIORS: dict[NodeType, float] = {
     NodeType.PROCEDURE: 0.6,
 }
 
+# Short words to skip when building keyword searches
+_STOP_WORDS = frozenset(
+    "a an the is are was were be been being have has had do does did "
+    "will would shall should may might can could of in to for on with "
+    "at by from as into through during before after above below and or "
+    "but not no nor so yet both each every all any few more most other "
+    "some such than too very it its this that these those i me my we "
+    "our they them their he she him her who what which where when how".split()
+)
+
+
+def _extract_keywords(text: str, max_words: int = 5) -> list[str]:
+    """Extract significant keywords from text for graph search."""
+    words = re.findall(r"[a-zA-Z]{3,}", text.lower())
+    return [w for w in words if w not in _STOP_WORDS][:max_words]
+
 
 class DecomposedConcept(BaseModel):
     text: str
@@ -62,7 +79,7 @@ class MemoryEncoder:
         self._audit = audit_logger
 
     async def encode(self, input_text: str, source: Source) -> list[ConceptualNode]:
-        """Full encoding pipeline: decompose → classify → compare → store."""
+        """Full encoding pipeline: decompose → classify → compare → store → link."""
         # Step 1-2: Decompose and classify
         concepts = await self._decompose(input_text)
 
@@ -75,12 +92,10 @@ class MemoryEncoder:
             # Step 3: Map type
             node_type = self._map_type(concept.type)
 
-            # Step 4: Find related existing nodes
-            existing = await self._store.query_nodes(
-                NodeFilter(
-                    text_contains=concept.text.split()[0] if concept.text else None,
-                    limit=5,
-                )
+            # Step 4: Find related existing nodes via multi-keyword search
+            keywords = _extract_keywords(concept.text)
+            existing = await self._store.search_nodes_by_keywords(
+                keywords, limit=10
             )
 
             # Step 5: Decide action
@@ -91,7 +106,10 @@ class MemoryEncoder:
             if node:
                 created_nodes.append(node)
 
-        # Step 7: Build cluster if multiple nodes
+        # Step 7: Link nodes from this batch to each other (RELATED_TO)
+        await self._link_batch(created_nodes)
+
+        # Step 8: Build cluster if multiple nodes
         if len(created_nodes) > 1:
             cluster = MemoryCluster(
                 label=input_text[:60],
@@ -191,27 +209,36 @@ class MemoryEncoder:
         await self._store.add_node(node)
         await self._store.link_node_source(node.id, source.id)
 
-        # Add relationship edges for non-new decisions
-        if decision.decision == "supersedes" and decision.existing_node_id:
-            edge = MemoryEdge(
-                source_id=node.id,
-                target_id=decision.existing_node_id,
-                edge_type=EdgeType.SUPERSEDES,
-            )
-            await self._store.add_edge(edge)
-        elif decision.decision == "contradicts" and decision.existing_node_id:
-            edge = MemoryEdge(
-                source_id=node.id,
-                target_id=decision.existing_node_id,
-                edge_type=EdgeType.CONTRADICTS,
-            )
-            await self._store.add_edge(edge)
-        elif decision.decision == "merge_candidate" and decision.existing_node_id:
-            edge = MemoryEdge(
-                source_id=node.id,
-                target_id=decision.existing_node_id,
-                edge_type=EdgeType.MERGE_CANDIDATE,
-            )
-            await self._store.add_edge(edge)
+        # Add relationship edges based on decision
+        if decision.existing_node_id:
+            edge_type_map = {
+                "supersedes": EdgeType.SUPERSEDES,
+                "contradicts": EdgeType.CONTRADICTS,
+                "merge_candidate": EdgeType.MERGE_CANDIDATE,
+                "keep_both": EdgeType.RELATED_TO,
+            }
+            edge_type = edge_type_map.get(decision.decision)
+            if edge_type:
+                edge = MemoryEdge(
+                    source_id=node.id,
+                    target_id=decision.existing_node_id,
+                    edge_type=edge_type,
+                )
+                await self._store.add_edge(edge)
 
         return node
+
+    async def _link_batch(self, nodes: list[ConceptualNode]) -> None:
+        """Connect nodes from the same encoding batch with RELATED_TO edges.
+
+        Uses a lightweight sequential chain (A→B→C→D) rather than a full mesh
+        to keep edge count linear while ensuring the batch is fully connected.
+        """
+        for i in range(len(nodes) - 1):
+            edge = MemoryEdge(
+                source_id=nodes[i].id,
+                target_id=nodes[i + 1].id,
+                edge_type=EdgeType.RELATED_TO,
+                weight=0.5,
+            )
+            await self._store.add_edge(edge)

@@ -154,6 +154,23 @@ class SQLiteMemoryStore:
             rows = await cur.fetchall()
         return [self._row_to_node(r) for r in rows]
 
+    async def search_nodes_by_keywords(
+        self, keywords: list[str], limit: int = 10
+    ) -> list[ConceptualNode]:
+        """Search active nodes matching ANY of the given keywords."""
+        if not keywords:
+            return []
+        clauses = " OR ".join("text LIKE ?" for _ in keywords)
+        params: list[Any] = [f"%{kw}%" for kw in keywords]
+        params.append(limit)
+        sql = (
+            f"SELECT * FROM nodes WHERE status = 'active'"  # noqa: S608
+            f" AND ({clauses}) LIMIT ?"
+        )
+        async with self._db.execute(sql, params) as cur:
+            rows = await cur.fetchall()
+        return [self._row_to_node(r) for r in rows]
+
     # ------------------------------------------------------------------
     # Edges
     # ------------------------------------------------------------------
