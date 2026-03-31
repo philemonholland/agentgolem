@@ -4148,6 +4148,19 @@ class MainLoop:
             return
 
         self._emit("⚠️", f"Unknown capability: {capability}")
+        # Fallback: if the LLM hallucinated a capability but included a URL,
+        # redirect to browser.fetch_text so the intent isn't wasted.
+        url = arguments.get("url", "").strip()
+        if not url:
+            # Check if any argument value looks like a URL
+            for val in arguments.values():
+                v = str(val).strip()
+                if v.startswith(("http://", "https://")):
+                    url = v
+                    break
+        if url:
+            self._emit("🔄", f"Redirecting to browser.fetch_text({url})")
+            await self._autonomous_browse(url)
 
     async def _autonomous_browse(self, url: str) -> None:
         """Browse a URL, reflect on it, optionally share findings."""
@@ -4328,9 +4341,11 @@ class MainLoop:
                             f"Recent:\n{recent}\n{memory_block}"
                             f"{consciousness_ctx}\n"
                             f"Available capabilities:\n{toolbox_summary}\n\n"
-                            f"Choose exactly one capability that best satisfies your "
-                            f"current curiosity, relationship obligations, or inner "
-                            f"tension. Prefer concrete exploration over vague planning. "
+                            f"Choose exactly one capability from the list above. "
+                            f"You MUST use one of the listed capability names exactly "
+                            f"as shown — do NOT invent new capability names. "
+                            f"To browse any website, use browser.fetch_text(url=...). "
+                            f"Prefer concrete exploration over vague planning. "
                             f"Never choose a capability marked unavailable. Keep "
                             f"arguments concise and include only the fields that action "
                             f"needs.\n\n"
