@@ -60,6 +60,7 @@ class Settings(BaseModel):
     )
     niscalajyoti_revisit_hours: float = 6.0
     calibration_interval_hours: float = 24.0
+    calibration_heartbeat_cadence: int = 3  # run calibration every N heartbeats
     retention_archive_hours: int = 120
     retention_purge_hours: int = 720
     retention_min_trust_useful: float = 0.1

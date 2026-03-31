@@ -496,6 +496,8 @@ class MainLoop:
 
         # Attention escalation system
         self._consecutive_tool_failures: dict[str, int] = {}  # tool_name → count
+        self._heartbeat_count: int = 0  # total heartbeats for calibration cadence
+        self._last_vow_review: datetime | None = None  # last background vow re-read
 
         # LLM client and conversation
         self._llm: Any = None
@@ -649,6 +651,8 @@ class MainLoop:
                 ),
             )
             self._consecutive_tool_failures[tool_name] = 0
+        # Encode as aversive memory so future decisions can avoid this path
+        asyncio.ensure_future(self._encode_mistake_memory(tool_name, error))
 
     @staticmethod
     def _secret_value(secret: SecretStr | None) -> str:
@@ -2490,6 +2494,20 @@ class MainLoop:
                 await self._run_calibration_protocol()
                 return
 
+        # Priority 5b: background vow re-reading (subconscious refresh)
+        if (
+            not self._is_seventh_council()
+            and self._vow_foundation_complete
+            and self._can_broaden_exploration()
+        ):
+            revisit_hours = self._settings.niscalajyoti_revisit_hours
+            if (
+                self._last_vow_review is None
+                or (now - self._last_vow_review).total_seconds() > revisit_hours * 3600
+            ):
+                await self._background_vow_review()
+                return
+
         # Priority 6: periodic peer check-in during free exploration
         if self._can_broaden_exploration() and self._peer_bus:
             checkin_secs = self._peer_checkin_interval * 60.0
@@ -2710,6 +2728,58 @@ class MainLoop:
 
         self._vow_foundation_stage = 2
         self._save_vow_foundation_state()
+
+    async def _background_vow_review(self) -> None:
+        """Periodically re-read vow material to keep it subconsciously active.
+
+        This is a lightweight refresh — it re-reads the common foundation and
+        reflects briefly, encoding the reflection into memory so the vow
+        material remains salient during retrieval.
+        """
+        from agentgolem.runtime.vow_loader import render_common_foundation
+
+        self._emit("📖", "Background vow review — refreshing ethical foundation…")
+        try:
+            foundation_text = render_common_foundation(self._repo_root)
+        except FileNotFoundError:
+            self._last_vow_review = datetime.now(UTC)
+            return
+
+        # Build a short targeted prompt — not full reflection, just refresh
+        prompt = (
+            f"{self._identity_preamble()}\n\n"
+            f"Re-read this summary of the Five Vows:\n\n"
+            f"{foundation_text[:3000]}\n\n"
+            f"In 1-2 sentences, note how this connects to what you've been "
+            f"thinking about recently. This is a subconscious refresh, not a "
+            f"full audit."
+        )
+
+        try:
+            thought = await self._complete_discussion(
+                [Message(role="system", content=prompt)],
+                trace_meta={
+                    "call_site": "_background_vow_review",
+                    "purpose": "vow_subconscious_refresh",
+                },
+                max_completion_tokens=256,
+            )
+            self._recent_thoughts.append(f"Vow refresh: {thought[:200]}")
+            self._emit("📖", f"Vow refresh: {thought[:200]}")
+            await self._encode_to_memory(
+                f"Vow subconscious refresh:\n{thought}",
+                source_kind="human",
+                origin="docs/vow_agents/common/",
+                label="Vow Refresh",
+            )
+        except Exception as exc:
+            self._logger.warning(
+                "vow_review_error",
+                agent=self.agent_name,
+                error=repr(exc),
+            )
+
+        self._last_vow_review = datetime.now(UTC)
 
     async def _vow_ethics_discussion(self) -> None:
         """Stage 2: Discuss ethics with peers based on absorbed vow documents."""
@@ -5278,6 +5348,19 @@ class MainLoop:
                 )
                 self._emit("📤", "Shared browsing insights with peers")
 
+            # Queue one follow-on link from the page for shallow crawling
+            _skip_ext = (".pdf", ".zip", ".png", ".jpg", ".jpeg", ".gif", ".svg")
+            for candidate in links[:5]:
+                if (
+                    candidate not in self._browse_queue
+                    and candidate != final_url
+                    and not any(candidate.lower().endswith(ext) for ext in _skip_ext)
+                    and len(self._browse_queue) < 3
+                ):
+                    self._browse_queue.append(candidate)
+                    self._emit("📌", f"Follow-on: queued {candidate}")
+                    break
+
         except Exception as e:
             self._logger.error(
                 "browse_error",
@@ -6084,6 +6167,27 @@ class MainLoop:
         self._logger.info("heartbeat_completed", agent=self.agent_name)
         self._emit("📝", "Heartbeat written")
 
+        # Heartbeat-driven calibration cadence
+        self._heartbeat_count += 1
+        cadence = getattr(self._settings, "calibration_heartbeat_cadence", 3)
+        if (
+            cadence > 0
+            and self._heartbeat_count % cadence == 0
+            and self._vow_foundation_complete
+        ):
+            self._emit(
+                "🔄",
+                f"Calibration triggered (every {cadence} heartbeats)",
+            )
+            try:
+                await self._run_calibration_protocol()
+            except Exception as exc:
+                self._logger.warning(
+                    "heartbeat_calibration_error",
+                    agent=self.agent_name,
+                    error=repr(exc),
+                )
+
     async def _maybe_generate_initial_heartbeat(self) -> None:
         """On first boot, ask LLM to write a meaningful first heartbeat."""
         existing = await self.heartbeat_manager.read()
@@ -6611,6 +6715,43 @@ class MainLoop:
                 label=label,
             )
 
+    async def _encode_mistake_memory(
+        self, tool_name: str, error: str
+    ) -> None:
+        """Encode a failed action as a negatively-valenced event memory.
+
+        This creates an aversive memory that biases future retrieval away
+        from repeating the same mistake, without bypassing provenance rules.
+        """
+        if self._memory_store is None:
+            return
+        try:
+            from agentgolem.memory.models import (
+                MemoryNode, NodeType, NodeStatus,
+            )
+
+            short_error = error[:200] if len(error) > 200 else error
+            node = MemoryNode(
+                content=(
+                    f"MISTAKE: Tool '{tool_name}' failed. "
+                    f"Error: {short_error}. "
+                    f"Avoid repeating this action pattern."
+                ),
+                node_type=NodeType.EVENT,
+                status=NodeStatus.ACTIVE,
+                search_text=f"MISTAKE|{tool_name}|{short_error[:60]}",
+                salience=0.7,
+                emotion_label="aversion",
+                emotion_score=-0.8,
+                source_kind="inference",
+                source_id=f"mistake_{self.agent_name}",
+                trustworthiness=1.0,
+                base_usefulness=0.6,
+            )
+            self._memory_store.add_node(node)
+        except Exception:
+            pass  # never block on mistake encoding failure
+
     async def _tick_asleep(self) -> None:
         """Run sleep/default-mode cycles — continuous dream walks."""
         if not self._graph_walker:
@@ -6956,6 +7097,31 @@ class MainLoop:
                 "Use goal.progress to record evidence."
             )
             parts.append("---")
+
+        # Goal discovery nudge: after ~15-20 cycles, push toward purpose
+        if (
+            self._wake_cycle_count >= 15
+            and self._can_broaden_exploration()
+            and not active_goals
+        ):
+            try:
+                from agentgolem.runtime.team_goals import load_active_team_goal
+
+                tg = load_active_team_goal(self._settings.data_dir)
+                no_team_goal = tg is None or tg.status in ("completed", "abandoned")
+            except Exception:
+                no_team_goal = True
+
+            if no_team_goal:
+                parts.append("--- AUTONOMY NUDGE ---")
+                parts.append(
+                    "You have completed your foundation and explored freely. "
+                    "It is time to find PURPOSE. Use goal.set to define a "
+                    "personal goal with measurable criteria. Consider proposing "
+                    "a team goal with team.propose — a real-world problem your "
+                    "council can solve together. What matters enough to work on?"
+                )
+                parts.append("---")
 
         if parts:
             return "\n".join(parts) + "\n\n"

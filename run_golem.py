@@ -529,6 +529,13 @@ PARAM_DEFS: list[ParamDef] = [
         "float",
         "Ethical Foundation",
     ),
+    param(
+        "calibration_heartbeat_cadence",
+        "Calibration Heartbeat Cadence",
+        "Run calibration every N heartbeats (0 disables heartbeat-driven calibration)",
+        "int",
+        "Ethical Foundation",
+    ),
     # --- Retention ---
     param(
         "retention_archive_hours",
