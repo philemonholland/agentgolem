@@ -1172,7 +1172,7 @@ class MainLoop:
                 "don't have the text",
                 "do not have the text",
                 "missing the actual text",
-                "missing the text",
+                "missing the text of chapter",
                 "can't responsibly reflect on its specific content yet",
                 "cannot responsibly reflect on its specific content yet",
                 "if you paste the chapter",
@@ -1183,13 +1183,15 @@ class MainLoop:
                 "not included in your message",
                 "don't have direct access to the url",
                 "do not have direct access to the url",
-                "i'm missing the actual text",
-                "i am missing the actual text",
-                "i can do that, but",
-                "i'm happy to do that, but",
+                "i'm missing the actual text of chapter",
+                "i am missing the actual text of chapter",
+                "i can do that, but the chapter text",
+                "i'm happy to do that, but i don't have",
                 "chapter text is not available",
-                "don't have access to the text",
-                "do not have access to the text",
+                "don't have access to the text of",
+                "do not have access to the text of",
+                "please paste the text of",
+                "please paste the chapter",
             )
         )
 
@@ -2738,6 +2740,9 @@ class MainLoop:
                 f"This is chapter {idx + 1} of "
                 f"{len(NISCALAJYOTI_CHAPTERS)}: "
                 f"**{title}** ({url})\n\n"
+                f"IMPORTANT: The complete chapter content is provided below as a "
+                f"digest. You HAVE the text. Do NOT say the text is missing — "
+                f"work directly from this digest.\n\n"
                 f"--- CHAPTER DIGEST ---\n{chapter_digest}\n"
                 f"--- END DIGEST ---\n\n"
             )
@@ -2933,6 +2938,9 @@ class MainLoop:
             f"LessWrong rather than Niscalajyoti.\n\n"
             f"This is source {idx + 1} of {len(COUNCIL7_FOUNDATION_SOURCES)}: "
             f"**{title}** from {source_name} ({url}).\n\n"
+            f"IMPORTANT: The complete source content is provided below as a "
+            f"digest. You HAVE the text. Do NOT say the text is missing — "
+            f"work directly from this digest.\n\n"
             f"--- SOURCE DIGEST ---\n{source_digest}\n--- END DIGEST ---"
             f"{foundation_suffix}"
             f"Do two things:\n"
