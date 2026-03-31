@@ -680,6 +680,45 @@ class TestTemperament:
         tones = {t.communication_tone for t in TEMPERAMENT_SEEDS.values()}
         assert len(tones) >= 4
 
+    def test_temperature_bias_provocative(self) -> None:
+        from agentgolem.consciousness.temperament import Temperament
+        t = Temperament(communication_tone="provocative")
+        assert t.temperature_bias() == 0.15
+
+    def test_temperature_bias_precise(self) -> None:
+        from agentgolem.consciousness.temperament import Temperament
+        t = Temperament(communication_tone="precise")
+        assert t.temperature_bias() == -0.15
+
+    def test_temperature_bias_warm(self) -> None:
+        from agentgolem.consciousness.temperament import Temperament
+        t = Temperament(communication_tone="warm")
+        assert t.temperature_bias() == 0.05
+
+    def test_temperature_bias_grounded(self) -> None:
+        from agentgolem.consciousness.temperament import Temperament
+        t = Temperament(communication_tone="grounded")
+        assert t.temperature_bias() == -0.05
+
+    def test_temperature_bias_default_zero(self) -> None:
+        """Default temperament (grounded) has a small negative bias."""
+        from agentgolem.consciousness.temperament import Temperament
+        t = Temperament()
+        assert t.temperature_bias() == -0.05
+
+    def test_temperature_bias_all_vectors(self) -> None:
+        """Each ethical vector produces a different effective temperature."""
+        from agentgolem.consciousness.temperament import TEMPERAMENT_SEEDS
+        biases = {name: t.temperature_bias() for name, t in TEMPERAMENT_SEEDS.items()}
+        # Provocative tones get positive bias
+        assert biases["evolution"] > 0
+        assert biases["good-faith adversarialism"] > 0
+        # Precise tones get negative bias
+        assert biases["unwavering integrity"] < 0
+        # Warm tones get slight positive bias
+        assert biases["kindness"] > 0
+        assert biases["alleviating woe"] > 0
+
 
 # ===================================================================
 # Emotional Dynamics Tests

@@ -184,6 +184,32 @@ def test_anthropic_model_name() -> None:
     assert client.model_name == "claude-sonnet-4.6"
 
 
+@pytest.mark.asyncio
+@respx.mock
+async def test_anthropic_strips_openai_only_kwargs() -> None:
+    """Anthropic client drops frequency_penalty, presence_penalty, response_format."""
+    route = respx.post("https://api.anthropic.com/v1/messages").mock(
+        return_value=Response(
+            200,
+            json={"content": [{"type": "text", "text": "OK"}]},
+        )
+    )
+    client = AnthropicClient(api_key=SecretStr("key"))
+    await client.complete(
+        [Message(role="user", content="Hi")],
+        temperature=0.8,
+        frequency_penalty=0.5,
+        presence_penalty=0.3,
+        response_format={"type": "json_object"},
+    )
+    body = json.loads(route.calls[0].request.read())
+    assert body["temperature"] == 0.8
+    assert "frequency_penalty" not in body
+    assert "presence_penalty" not in body
+    assert "response_format" not in body
+    await client.close()
+
+
 # --- Bogus reply detection tests ---
 
 

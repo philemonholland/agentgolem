@@ -54,7 +54,7 @@
         id="council-grid"
         hx-get="/dashboard/partials/council{% if selected_agent_name %}?agent={{ selected_agent_name }}{% endif %}"
         hx-trigger="load, every {{ refresh_interval }}s"
-        hx-swap="innerHTML"
+        hx-swap="innerHTML show:none scroll:false"
     >
         {% include "_council_grid.html" %}
     </div>
@@ -65,7 +65,7 @@
         id="dialogue-panel"
         hx-get="/dashboard/partials/dialogue"
         hx-trigger="load, every {{ refresh_interval }}s"
-        hx-swap="innerHTML"
+        hx-swap="innerHTML show:none scroll:false"
     >
         {% include "_dialogue_panel.html" %}
     </div>
@@ -83,6 +83,7 @@
 (() => {
     const STORAGE_KEY = "agentgolem:council-inner-state-open";
 
+    /* ---------- Council-grid details persistence ---------- */
     function readOpenKeys() {
         const raw = window.sessionStorage.getItem(STORAGE_KEY);
         if (raw === null) {
@@ -128,15 +129,31 @@
         writeOpenKeys(document.getElementById("council-grid"));
     }, true);
 
+    /* ---------- Scroll position preservation ---------- */
+    let savedScrollY = 0;
+    let savedDialogueScroll = 0;
+
     document.body.addEventListener("htmx:beforeSwap", (event) => {
         if (event.target && event.target.id === "council-grid") {
             writeOpenKeys(event.target);
+            savedScrollY = window.scrollY;
+        }
+        if (event.target && event.target.id === "dialogue-panel") {
+            const stack = event.target.querySelector(".dialogue-scroll");
+            savedDialogueScroll = stack ? stack.scrollTop : 0;
         }
     });
 
     document.body.addEventListener("htmx:afterSwap", (event) => {
         if (event.target && event.target.id === "council-grid") {
             restoreOpenKeys(event.target);
+            window.scrollTo({ top: savedScrollY, behavior: "instant" });
+        }
+        if (event.target && event.target.id === "dialogue-panel") {
+            const stack = event.target.querySelector(".dialogue-scroll");
+            if (stack) {
+                stack.scrollTop = stack.scrollHeight;
+            }
         }
     });
 

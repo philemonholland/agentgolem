@@ -76,6 +76,21 @@ class Temperament:
             f"Socially, you are {self.social_orientation}."
         )
 
+    def temperature_bias(self) -> float:
+        """Return a temperature offset derived from communication tone.
+
+        Provocative/poetic tones push temperature up (more creative).
+        Precise/grounded tones pull temperature down (more deterministic).
+        """
+        bias_map: dict[str, float] = {
+            "provocative": 0.15,
+            "poetic": 0.10,
+            "warm": 0.05,
+            "grounded": -0.05,
+            "precise": -0.15,
+        }
+        return bias_map.get(self.communication_tone, 0.0)
+
     def short_label(self) -> str:
         """Compact label for dashboard display."""
         return (

@@ -272,7 +272,7 @@ def _legacy_agent(st: DashboardState) -> Any | None:
 
 def _get_agents(st: DashboardState) -> list[Any]:
     if st.agents:
-        return list(st.agents)
+        return sorted(st.agents, key=lambda a: getattr(a, "agent_name", ""))
     legacy = _legacy_agent(st)
     return [legacy] if legacy is not None else []
 
@@ -674,7 +674,7 @@ def _build_agent_snapshot(st: DashboardState, agent: Any) -> dict[str, Any]:
         "self_model_summary": (
             self_model.summary() if self_model is not None else "Self-model not yet formed."
         ),
-        "latest_narrative": latest_chapter.to_dict() if latest_chapter is not None else None,
+        "latest_narrative": latest_chapter.to_dict() if latest_chapter is not None else {},
         "narrative_summary": latest_chapter.summary if latest_chapter is not None else "No narrative chapter yet.",
         "desires": _build_desires(internal_state, self_model),
         "temperament": temperament.to_dict() if temperament is not None else {},

@@ -589,10 +589,63 @@ PARAM_DEFS: list[ParamDef] = [
     ),
     param(
         "discussion_max_completion_tokens",
-        "Discussion Max Completion Tokens",
+        "Discussion Max Tokens",
         "Token budget for discussion, reflection, and peer dialogue completions",
         "int",
         "LLM",
+    ),
+    param(
+        "reflection_max_tokens",
+        "Reflection Max Tokens",
+        "Token budget for heartbeat reflections and internal state updates",
+        "int",
+        "LLM",
+    ),
+    param(
+        "encoding_max_tokens",
+        "Encoding Max Tokens",
+        "Token budget for memory encoding and decomposition operations",
+        "int",
+        "LLM",
+    ),
+    param(
+        "discussion_target_paragraphs",
+        "Discussion Target Paragraphs",
+        "Target number of paragraphs for discussion responses (adjusts prompt guidance)",
+        "int",
+        "LLM",
+    ),
+    param(
+        "llm_temperature",
+        "Temperature",
+        "LLM sampling temperature (0.0=deterministic, 2.0=very creative). "
+        "Per-agent bias applied from temperament (provocative +0.15, precise -0.15)",
+        "float",
+        "LLM Inference",
+    ),
+    param(
+        "llm_top_p",
+        "Top P (nucleus sampling)",
+        "Cumulative probability cutoff for token sampling (1.0=no cutoff). "
+        "Lower values make output more focused",
+        "float",
+        "LLM Inference",
+    ),
+    param(
+        "llm_frequency_penalty",
+        "Frequency Penalty",
+        "Penalizes tokens based on frequency in text so far (0.0-2.0). "
+        "Higher values reduce repetition",
+        "float",
+        "LLM Inference",
+    ),
+    param(
+        "llm_presence_penalty",
+        "Presence Penalty",
+        "Penalizes tokens that have appeared at all (0.0-2.0). "
+        "Higher values encourage topic diversity",
+        "float",
+        "LLM Inference",
     ),
     # --- Multi-Agent Swarm ---
     param("agent_count", "Agent Count", "Number of agents in the ethical council", "int", "Swarm"),
@@ -1343,6 +1396,20 @@ def _hot_reload_live_setting(
             agent._peer_msg_limit = value
         elif key == "discussion_max_completion_tokens":
             agent._discussion_max_completion_tokens = value
+        elif key == "reflection_max_tokens":
+            agent._reflection_max_tokens = value
+        elif key == "encoding_max_tokens":
+            agent._encoding_max_tokens = value
+        elif key == "discussion_target_paragraphs":
+            agent._discussion_target_paragraphs = value
+        elif key == "llm_temperature":
+            agent._llm_temperature = value
+        elif key == "llm_top_p":
+            agent._llm_top_p = value
+        elif key == "llm_frequency_penalty":
+            agent._llm_frequency_penalty = value
+        elif key == "llm_presence_penalty":
+            agent._llm_presence_penalty = value
         elif key == "metacognition_interval":
             agent._metacognition_interval = value
         elif key == "narrative_synthesis_interval":

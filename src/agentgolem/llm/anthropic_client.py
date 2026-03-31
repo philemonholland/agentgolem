@@ -71,6 +71,8 @@ class AnthropicClient:
 
         # Drop OpenAI-specific kwargs Anthropic doesn't understand
         kwargs.pop("response_format", None)
+        kwargs.pop("frequency_penalty", None)
+        kwargs.pop("presence_penalty", None)
 
         payload: dict[str, Any] = {
             "model": kwargs.pop("model", self._model),

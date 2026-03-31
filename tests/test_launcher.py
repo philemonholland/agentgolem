@@ -520,8 +520,37 @@ class TestParamDefs:
             "Secrets",
             "Swarm",
             "Ethical Foundation",
+            "LLM Inference",
         }
         assert groups == expected
+
+    def test_llm_inference_params_exist(self):
+        """New LLM inference parameters must all be in PARAM_DEFS."""
+        keys = {key for key, _, _, _, _ in run_golem.PARAM_DEFS}
+        expected_llm = {
+            "llm_temperature",
+            "llm_top_p",
+            "llm_frequency_penalty",
+            "llm_presence_penalty",
+            "discussion_target_paragraphs",
+            "reflection_max_tokens",
+            "encoding_max_tokens",
+        }
+        missing = expected_llm - keys
+        assert missing == set(), f"Missing LLM params: {missing}"
+
+    def test_new_settings_have_defaults(self):
+        """All new LLM inference settings should have defaults in Settings."""
+        from agentgolem.config.settings import Settings
+        s = Settings()
+        assert s.llm_temperature == 0.7
+        assert s.llm_top_p == 1.0
+        assert s.llm_frequency_penalty == 0.0
+        assert s.llm_presence_penalty == 0.0
+        assert s.discussion_target_paragraphs == 5
+        assert s.reflection_max_tokens == 1024
+        assert s.encoding_max_tokens == 16384
+        assert s.discussion_max_completion_tokens == 2048
 
     def test_help_text_documents_all_slash_commands(self):
         """The HELP_TEXT constant must mention every /command."""

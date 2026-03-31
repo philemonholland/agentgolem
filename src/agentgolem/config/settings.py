@@ -58,9 +58,18 @@ class Settings(BaseModel):
     name_discovery_cycles: int = 4
     peer_checkin_interval_minutes: float = 30.0
     peer_message_max_chars: int = 3000
-    discussion_max_completion_tokens: int = 1024
+    discussion_max_completion_tokens: int = 2048
+    reflection_max_tokens: int = 1024
+    encoding_max_tokens: int = 16384
+    discussion_target_paragraphs: int = 5
     discussion_transcript_max_entries: int = 30
     llm_code_model: str = "gpt-5.4"
+
+    # LLM inference parameters
+    llm_temperature: float = 0.7
+    llm_top_p: float = 1.0
+    llm_frequency_penalty: float = 0.0
+    llm_presence_penalty: float = 0.0
 
     # Workspace boundary (empty = auto-detect from module location)
     repo_root: str = ""

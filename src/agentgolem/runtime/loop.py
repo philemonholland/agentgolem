@@ -87,7 +87,14 @@ OPTIMIZABLE_SETTINGS: dict[str, dict[str, Any]] = {
     "browser_timeout_seconds": {"type": int, "min": 5, "max": 120},
     "peer_checkin_interval_minutes": {"type": float, "min": 1.0, "max": 120.0},
     "peer_message_max_chars": {"type": int, "min": 500, "max": 10000},
-    "discussion_max_completion_tokens": {"type": int, "min": 128, "max": 8192},
+    "discussion_max_completion_tokens": {"type": int, "min": 128, "max": 16384},
+    "reflection_max_tokens": {"type": int, "min": 128, "max": 8192},
+    "encoding_max_tokens": {"type": int, "min": 1024, "max": 32768},
+    "discussion_target_paragraphs": {"type": int, "min": 2, "max": 10},
+    "llm_temperature": {"type": float, "min": 0.0, "max": 2.0},
+    "llm_top_p": {"type": float, "min": 0.0, "max": 1.0},
+    "llm_frequency_penalty": {"type": float, "min": 0.0, "max": 2.0},
+    "llm_presence_penalty": {"type": float, "min": 0.0, "max": 2.0},
     "log_level": {"type": str, "choices": ["DEBUG", "INFO", "WARNING", "ERROR"]},
     "dry_run_mode": {"type": bool},
 }
@@ -364,8 +371,22 @@ class MainLoop:
         self._peer_checkin_interval = getattr(settings, "peer_checkin_interval_minutes", 30.0)
         self._peer_msg_limit: int = getattr(settings, "peer_message_max_chars", 3000)
         self._discussion_max_completion_tokens: int = getattr(
-            settings, "discussion_max_completion_tokens", 1024,
+            settings, "discussion_max_completion_tokens", 2048,
         )
+        self._reflection_max_tokens: int = getattr(
+            settings, "reflection_max_tokens", 1024,
+        )
+        self._encoding_max_tokens: int = getattr(
+            settings, "encoding_max_tokens", 16384,
+        )
+        self._discussion_target_paragraphs: int = getattr(
+            settings, "discussion_target_paragraphs", 5,
+        )
+        # LLM inference parameters
+        self._llm_temperature: float = getattr(settings, "llm_temperature", 0.7)
+        self._llm_top_p: float = getattr(settings, "llm_top_p", 1.0)
+        self._llm_frequency_penalty: float = getattr(settings, "llm_frequency_penalty", 0.0)
+        self._llm_presence_penalty: float = getattr(settings, "llm_presence_penalty", 0.0)
         self._last_peer_checkin: datetime | None = None
         self._browser: Any = None  # lazy WebBrowser
         self._discussion_model: str = getattr(settings, "llm_discussion_model", settings.llm_model)
@@ -1127,7 +1148,9 @@ class MainLoop:
         """Run a discussion-oriented completion.
 
         Defaults ``max_completion_tokens`` to the configured discussion token
-        budget unless the caller explicitly overrides it.
+        budget unless the caller explicitly overrides it.  Also injects
+        temperature (with per-agent temperament bias), top_p, frequency_penalty,
+        and presence_penalty from settings.
         """
         if self._llm is None:
             raise RuntimeError("Discussion LLM is not configured.")
@@ -1135,6 +1158,15 @@ class MainLoop:
             await self._suspend_for_llm_failure()
             raise RuntimeError("LLM requests are suspended.")
         kwargs.setdefault("max_completion_tokens", self._discussion_max_completion_tokens)
+        # LLM inference parameters — temperature biased by personality
+        temp_bias = self._temperament.temperature_bias() if self._temperament else 0.0
+        effective_temp = max(0.0, min(2.0, self._llm_temperature + temp_bias))
+        kwargs.setdefault("temperature", effective_temp)
+        kwargs.setdefault("top_p", self._llm_top_p)
+        if self._llm_frequency_penalty:
+            kwargs.setdefault("frequency_penalty", self._llm_frequency_penalty)
+        if self._llm_presence_penalty:
+            kwargs.setdefault("presence_penalty", self._llm_presence_penalty)
         try:
             return await self._llm.complete(messages, **kwargs)
         except httpx.HTTPError as exc:
@@ -1203,6 +1235,9 @@ class MainLoop:
         if self._llm_requests_suspended_active():
             await self._suspend_for_llm_failure()
             raise RuntimeError("LLM requests are suspended.")
+        # Code completions use base temperature (no personality bias)
+        kwargs.setdefault("temperature", self._llm_temperature)
+        kwargs.setdefault("top_p", self._llm_top_p)
         try:
             return await client.complete(messages, **kwargs)
         except httpx.HTTPError as exc:
@@ -1256,9 +1291,10 @@ class MainLoop:
 
     def _discussion_style_guidance(self) -> str:
         """Shared guidance for more natural peer-to-peer discussions."""
+        para = self._discussion_target_paragraphs
         return (
             "Discussion style:\n"
-            "- Be concise. Aim for 2-4 short paragraphs MAX.\n"
+            f"- Be thoughtful. Aim for {para - 2}-{para} rich paragraphs.\n"
             "- Speak like a curious colleague, not a project manager.\n"
             "- Expand ideas through implications, analogies, tensions, "
             "and unanswered questions.\n"
@@ -4798,11 +4834,11 @@ class MainLoop:
                     + "\n".join(f"- {a}" for a in recent_actions[-5:])
                     + "\n\nWrite a brief heartbeat reflection: "
                     "what you've been thinking about, your current "
-                    "priorities, and what you want to explore next. "
-                    "2 paragraphs max."
+                    "priorities, and what you want to explore next."
                 )
                 reflection = await self._complete_discussion(
-                    [Message(role="system", content=prompt)]
+                    [Message(role="system", content=prompt)],
+                    max_completion_tokens=self._reflection_max_tokens,
                 )
                 changing.append(reflection)
             except Exception as e:

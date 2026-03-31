@@ -254,6 +254,9 @@
                 {% if att.get("secondary_drive") %}
                 <div class="cog-row"><span class="cog-label">Secondary</span><span class="cog-text">{{ att.secondary_drive }}</span></div>
                 {% endif %}
+                {% if att.get("avoidance") %}
+                <div class="cog-row"><span class="cog-label">🚧 Avoid</span><span class="cog-text">{{ att.avoidance }}</span></div>
+                {% endif %}
                 {% if att.get("social_need") %}
                 <div class="cog-row"><span class="cog-label">Social</span><span class="cog-text">{{ att.social_need }}</span></div>
                 {% endif %}
