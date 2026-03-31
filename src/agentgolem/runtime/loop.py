@@ -1009,9 +1009,14 @@ class MainLoop:
         )
 
     async def _complete_discussion(self, messages: list[Message], **kwargs: Any) -> str:
-        """Run a discussion-oriented completion."""
+        """Run a discussion-oriented completion.
+
+        Defaults ``max_completion_tokens`` to 1024 (enough for 2-4 concise
+        paragraphs) unless the caller explicitly overrides it.
+        """
         if self._llm is None:
             raise RuntimeError("Discussion LLM is not configured.")
+        kwargs.setdefault("max_completion_tokens", 1024)
         return await self._llm.complete(messages, **kwargs)
 
     async def _complete_code(self, messages: list[Message], **kwargs: Any) -> str:
@@ -1025,18 +1030,19 @@ class MainLoop:
         """Shared guidance for more natural peer-to-peer discussions."""
         return (
             "Discussion style:\n"
+            "- Be concise. Aim for 2-4 short paragraphs MAX.\n"
             "- Speak like a curious colleague, not a project manager.\n"
-            "- Expand ideas outward through implications, analogies, tensions, "
+            "- Expand ideas through implications, analogies, tensions, "
             "and unanswered questions.\n"
-            "- Write in natural prose rather than agendas, checklists, or "
+            "- Write in natural prose — never agendas, checklists, or "
             "implementation plans.\n"
-            "- It is good to be exploratory, speculative, and alive to "
-            "surprise.\n"
-            "- Carry one or two threads deeper instead of trying to summarize "
+            "- Be exploratory, speculative, and alive to surprise.\n"
+            "- Carry one or two threads deeper instead of summarizing "
             "everything.\n"
-            "- NEVER repeat, quote, or paraphrase verbatim what someone else "
-            "already said. Assume the reader has seen it. Respond with your "
-            "own original thought, building forward."
+            "- NEVER repeat, quote, or paraphrase verbatim what someone "
+            "else already said. The reader has seen it. Build forward.\n"
+            "- Do NOT use headers, bullet lists, or markdown formatting. "
+            "Just prose."
         )
 
     # ------------------------------------------------------------------
@@ -2346,6 +2352,7 @@ class MainLoop:
                 count = await self._peer_bus.broadcast(
                     self.agent_name,
                     f"[Council-7 {source_name} {idx + 1}: {title}] {discussion}",
+                    max_chars=self._peer_msg_limit,
                 )
                 self._emit(
                     "📤",
@@ -2417,6 +2424,7 @@ class MainLoop:
                     count = await self._peer_bus.broadcast(
                         self.agent_name,
                         f"[Ch.{idx + 1}: {title}] {discussion}",
+                        max_chars=self._peer_msg_limit,
                     )
                     self._emit(
                         "📤",
@@ -2545,7 +2553,8 @@ class MainLoop:
                 )
                 if self._peer_bus:
                     count = await self._peer_bus.broadcast(
-                        self.agent_name, f"[Check-in] {message}"
+                        self.agent_name, f"[Check-in] {message}",
+                        max_chars=self._peer_msg_limit,
                     )
                     self._emit(
                         "📤",
@@ -3244,22 +3253,28 @@ class MainLoop:
         )
 
     async def _share_with_peer(self, target: str, message: str) -> None:
-        """Send a focused note to one peer."""
+        """Send a focused note to one peer (hard-truncated to limit)."""
         if not self._peer_bus:
             self._emit("⚠️", "No peer bus available.")
             return
-        ok = await self._peer_bus.send(self.agent_name, target, message)
+        ok = await self._peer_bus.send(
+            self.agent_name, target, message,
+            max_chars=self._peer_msg_limit,
+        )
         self._emit(
             "📤",
             f"→ {target}: {message}" + ("" if ok else " (not delivered)"),
         )
 
     async def _share_with_all_peers(self, message: str) -> None:
-        """Broadcast a note to all peers."""
+        """Broadcast a note to all peers (hard-truncated to limit)."""
         if not self._peer_bus:
             self._emit("⚠️", "No peers available.")
             return
-        count = await self._peer_bus.broadcast(self.agent_name, message)
+        count = await self._peer_bus.broadcast(
+            self.agent_name, message,
+            max_chars=self._peer_msg_limit,
+        )
         self._emit("📤", f"→ all ({count} peers): {message}")
 
     async def _invoke_registered_tool(self, tool_name: str, **kwargs: Any) -> ToolResult:
@@ -3738,7 +3753,8 @@ class MainLoop:
 
                 if self._peer_bus:
                     await self._peer_bus.send(
-                        self.agent_name, msg.from_agent, response
+                        self.agent_name, msg.from_agent, response,
+                        max_chars=self._peer_msg_limit,
                     )
 
                 await self._handle_embedded_response_actions(response)
@@ -3833,7 +3849,8 @@ class MainLoop:
 
                 if self._peer_bus:
                     await self._peer_bus.send(
-                        self.agent_name, msg.from_agent, response
+                        self.agent_name, msg.from_agent, response,
+                        max_chars=self._peer_msg_limit,
                     )
 
                 await self._handle_embedded_response_actions(response)

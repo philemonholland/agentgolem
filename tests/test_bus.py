@@ -5,8 +5,13 @@ import asyncio
 
 import pytest
 
-from agentgolem.runtime.bus import AgentMessage, InterAgentBus
-
+from agentgolem.runtime.bus import (
+    AgentMessage,
+    InterAgentBus,
+    DISCUSSION_PRIORITY_DEFAULT,
+    DISCUSSION_PRIORITY_INITIATOR,
+    DISCUSSION_PRIORITY_LAST,
+)
 
 # ------------------------------------------------------------------
 # Fixtures
@@ -222,3 +227,116 @@ async def test_hold_floor_yields_transcript(bus: InterAgentBus) -> None:
     async with bus.hold_floor("Bob") as transcript:
         assert len(transcript) == 1
         assert transcript[0].text == "context message"
+
+
+# ------------------------------------------------------------------
+# Discussion priority (speaking order)
+# ------------------------------------------------------------------
+
+
+async def test_register_with_priority() -> None:
+    bus = InterAgentBus()
+    bus.register("Agent-6", discussion_priority=DISCUSSION_PRIORITY_INITIATOR)
+    bus.register("Agent-1", discussion_priority=DISCUSSION_PRIORITY_DEFAULT)
+    bus.register("Agent-7", discussion_priority=DISCUSSION_PRIORITY_LAST)
+    assert bus.get_priority("Agent-6") == DISCUSSION_PRIORITY_INITIATOR
+    assert bus.get_priority("Agent-1") == DISCUSSION_PRIORITY_DEFAULT
+    assert bus.get_priority("Agent-7") == DISCUSSION_PRIORITY_LAST
+
+
+async def test_priority_default_when_unset() -> None:
+    bus = InterAgentBus()
+    bus.register("Nobody")
+    assert bus.get_priority("Nobody") == DISCUSSION_PRIORITY_DEFAULT
+
+
+async def test_rename_preserves_priority() -> None:
+    bus = InterAgentBus()
+    bus.register("Council-6", discussion_priority=DISCUSSION_PRIORITY_INITIATOR)
+    bus.rename("Council-6", "Harmony")
+    assert bus.get_priority("Harmony") == DISCUSSION_PRIORITY_INITIATOR
+    assert bus.get_priority("Council-6") == DISCUSSION_PRIORITY_DEFAULT  # old name gone
+
+
+async def test_priority_floor_ordering() -> None:
+    """Highest-priority (lowest number) agent should get the floor first."""
+    bus = InterAgentBus()
+    bus.register("Low", discussion_priority=99)
+    bus.register("Mid", discussion_priority=50)
+    bus.register("High", discussion_priority=0)
+
+    # High grabs the floor first
+    await bus.acquire_floor("High")
+
+    order: list[str] = []
+
+    async def wait_and_record(name: str) -> None:
+        await bus.acquire_floor(name)
+        order.append(name)
+        bus.release_floor()
+
+    # Mid and Low both want the floor while High holds it
+    t_mid = asyncio.create_task(wait_and_record("Mid"))
+    t_low = asyncio.create_task(wait_and_record("Low"))
+    await asyncio.sleep(0.05)  # let both tasks register in wait queue
+
+    # Release High's floor — priority order should give Mid before Low
+    bus.release_floor()
+    await asyncio.gather(t_mid, t_low)
+
+    assert order == ["Mid", "Low"], f"Expected Mid before Low, got {order}"
+
+
+# ------------------------------------------------------------------
+# Message truncation
+# ------------------------------------------------------------------
+
+
+async def test_send_truncation(bus: InterAgentBus) -> None:
+    long = "a" * 5000
+    ok = await bus.send("Alice", "Bob", long, max_chars=100)
+    assert ok
+    msg = await bus.receive("Bob")
+    assert msg is not None
+    assert len(msg.text) == 101  # 100 chars + "…"
+    assert msg.text.endswith("…")
+
+
+async def test_broadcast_truncation(bus: InterAgentBus) -> None:
+    long = "b" * 5000
+    count = await bus.broadcast("Alice", long, max_chars=200)
+    assert count == 2  # Bob and Carol
+    msg = await bus.receive("Bob")
+    assert msg is not None
+    assert len(msg.text) == 201  # 200 + "…"
+
+
+async def test_default_max_chars_applied() -> None:
+    bus = InterAgentBus(default_max_chars=50)
+    bus.register("X")
+    bus.register("Y")
+    long = "z" * 200
+    await bus.send("X", "Y", long)
+    msg = await bus.receive("Y")
+    assert msg is not None
+    assert len(msg.text) == 51  # 50 + "…"
+
+
+async def test_explicit_max_chars_overrides_default() -> None:
+    bus = InterAgentBus(default_max_chars=50)
+    bus.register("X")
+    bus.register("Y")
+    long = "z" * 200
+    await bus.send("X", "Y", long, max_chars=100)
+    msg = await bus.receive("Y")
+    assert msg is not None
+    assert len(msg.text) == 101  # explicit 100 + "…"
+
+
+async def test_no_truncation_when_under_limit(bus: InterAgentBus) -> None:
+    short = "hello"
+    await bus.send("Alice", "Bob", short, max_chars=100)
+    msg = await bus.receive("Bob")
+    assert msg is not None
+    assert msg.text == "hello"  # no truncation
+

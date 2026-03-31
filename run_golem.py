@@ -1949,8 +1949,9 @@ async def run_agent(store: ParamStore) -> bool | Literal["evolution"]:
     # Use AGENT_DEFS up to agent_count
     defs = AGENT_DEFS[:agent_count]
 
-    # Create shared bus
-    bus = InterAgentBus()
+    # Create shared bus with default message truncation
+    peer_msg_limit = getattr(settings, "peer_message_max_chars", 3000)
+    bus = InterAgentBus(default_max_chars=peer_msg_limit)
 
     # Shared LLM rate limiter — one request at a time, with cooldown
     from agentgolem.llm.rate_limiter import LLMRateLimiter
@@ -2065,8 +2066,19 @@ async def run_agent(store: ParamStore) -> bool | Literal["evolution"]:
         # Wire human-speaking pause event
         loop._human_speaking_event = human_speaking_event
 
-        # Register on bus
-        bus.register(agent_id)
+        # Register on bus with speaking-order priority
+        from agentgolem.runtime.bus import (
+            DISCUSSION_PRIORITY_DEFAULT,
+            DISCUSSION_PRIORITY_INITIATOR,
+            DISCUSSION_PRIORITY_LAST,
+        )
+        if agent_id == "Council-6":
+            disc_priority = DISCUSSION_PRIORITY_INITIATOR
+        elif agent_id == "Council-7":
+            disc_priority = DISCUSSION_PRIORITY_LAST
+        else:
+            disc_priority = DISCUSSION_PRIORITY_DEFAULT
+        bus.register(agent_id, discussion_priority=disc_priority)
 
         agents.append(loop)
 
