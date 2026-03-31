@@ -38,6 +38,7 @@ class Settings(BaseModel):
         default_factory=lambda: ["email_send", "moltbook_send"]
     )
     niscalajyoti_revisit_hours: float = 6.0
+    calibration_interval_hours: float = 24.0
     retention_archive_days: int = 5
     retention_purge_days: int = 30
     retention_min_trust_useful: float = 0.1

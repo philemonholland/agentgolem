@@ -495,9 +495,16 @@ PARAM_DEFS: list[ParamDef] = [
     param(
         "niscalajyoti_revisit_hours",
         "Niscalajyoti Revisit (hours)",
-        "Hours between ethical-anchor recrawls",
+        "Hours between ethical-anchor recrawls (legacy — see calibration_interval_hours)",
         "float",
         "Niscalajyoti",
+    ),
+    param(
+        "calibration_interval_hours",
+        "Calibration Interval (hours)",
+        "Hours between VowOS calibration protocol runs",
+        "float",
+        "Ethical Foundation",
     ),
     # --- Retention ---
     param(

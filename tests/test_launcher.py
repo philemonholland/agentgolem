@@ -519,6 +519,7 @@ class TestParamDefs:
             "Dashboard",
             "Secrets",
             "Swarm",
+            "Ethical Foundation",
         }
         assert groups == expected
 

@@ -41,6 +41,7 @@ def _make_loop(tmp_path: Path, *, reading_complete: bool = False) -> MainLoop:
     )
     if reading_complete:
         loop._niscalajyoti_reading_complete = True
+        loop._vow_foundation_complete = True
     return loop
 
 

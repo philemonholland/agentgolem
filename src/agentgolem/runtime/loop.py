@@ -336,6 +336,14 @@ class MainLoop:
         self._name_discovery_deadline = getattr(settings, "name_discovery_cycles", 4)
 
         # Autonomous behaviour
+        # Vow foundation phase (replaces NJ chapter-by-chapter reading)
+        # Stages: 0=not started, 1=common absorbed, 2=specific absorbed,
+        #         3=ethics discussed, 4=calibration done → complete
+        self._vow_foundation_stage = 0
+        self._vow_foundation_complete = False
+        self._last_calibration_tick: datetime | None = None
+
+        # Legacy NJ reading state (kept for reference / web browsing)
         self._niscalajyoti_reading_complete = False
         self._niscalajyoti_chapter_index = 0  # next chapter to read
         self._niscalajyoti_summaries: dict[int, str] = {}  # idx → summary
@@ -384,11 +392,14 @@ class MainLoop:
         self._llm_requests_suspended = False
         self._llm_suspension_reason: str | None = None
 
-        # Load Niscalajyoti reading progress from disk
+        # Load Niscalajyoti reading progress from disk (legacy — kept for reference)
         self._nj_state_path = self._data_dir / "niscalajyoti_reading.json"
         self._load_nj_reading_state()
         self._council7_state_path = self._data_dir / "council7_foundation.json"
         self._load_council7_state()
+        # Load vow foundation state
+        self._vow_state_path = self._data_dir / "vow_foundation.json"
+        self._load_vow_foundation_state()
 
         # Session state persistence (cycle timing, name, thoughts, etc.)
         self._session_state_path = self._data_dir / "session_state.json"
@@ -851,19 +862,19 @@ class MainLoop:
         """Return whether this agent finished its initial formative corpus."""
         if self._is_seventh_council():
             return self._council7_foundation_complete
-        return self._niscalajyoti_reading_complete
+        return self._vow_foundation_complete
 
     def _can_broaden_exploration(self) -> bool:
         """Return whether this agent can move into unrestricted autonomous exploration."""
         if self._is_seventh_council():
             return self._council7_broadened
-        return self._niscalajyoti_reading_complete
+        return self._vow_foundation_complete
 
     def _formation_completion_label(self) -> str:
         """Return a human-readable label for this agent's initial formation gate."""
         if self._is_seventh_council():
             return "your initial SEP / Alignment Forum / LessWrong foundation"
-        return "Niscalajyoti reading"
+        return "Vow foundation"
 
     def _is_allowed_council7_url(self, url: str) -> bool:
         """Return whether *url* stays within Council-7's pre-broadening domains."""
@@ -1913,7 +1924,7 @@ class MainLoop:
         self._consciousness_tick_counter += 1
         await self._consciousness_tick()
 
-        # Priority 1: read the next source in this agent's formative corpus
+        # Priority 1: formative reading (vow foundation for agents 1-6, SEP/AF/LW for agent 7)
         if self._is_seventh_council():
             if not self._council7_foundation_complete:
                 if self._council7_foundation_index < len(COUNCIL7_FOUNDATION_SOURCES):
@@ -1938,32 +1949,10 @@ class MainLoop:
                         {"sources_read": len(COUNCIL7_FOUNDATION_SOURCES)},
                     )
                     self._save_council7_state()
-        elif not self._niscalajyoti_reading_complete:
-            if self._niscalajyoti_chapter_index < len(NISCALAJYOTI_CHAPTERS):
-                # Read one chapter per wake cycle — check if we already
-                # read one this cycle (chapter_index advanced this cycle)
-                if self._niscalajyoti_discussed_through < self._niscalajyoti_chapter_index - 1:
-                    # We've read but not yet discussed — go to discussion
-                    pass
-                else:
-                    await self._read_niscalajyoti_chapter()
-                    return
-
-            # If we've read all chapters, mark complete
-            if (
-                self._niscalajyoti_chapter_index >= len(NISCALAJYOTI_CHAPTERS)
-                and self._niscalajyoti_discussed_through >= self._niscalajyoti_chapter_index - 1
-            ):
-                self._niscalajyoti_reading_complete = True
-                self._emit(
-                    "📚",
-                    f"Completed reading all {len(NISCALAJYOTI_CHAPTERS)} chapters of Niscalajyoti!",
-                )
-                self.audit_logger.log(
-                    "niscalajyoti_reading_complete",
-                    self.agent_name,
-                    {"chapters_read": len(NISCALAJYOTI_CHAPTERS)},
-                )
+        elif not self._vow_foundation_complete:
+            advanced = await self._advance_vow_foundation()
+            if advanced:
+                return
 
         # Priority 1b: read AGENT_README once after completing initial formation
         if self._has_completed_foundational_reading() and not self._agent_readme_read:
@@ -2010,7 +1999,8 @@ class MainLoop:
             self._save_session_state()
             return
 
-        # Priority 2: discuss the latest chapter with peers
+        # Priority 2: discuss latest source with peers (Council-7 only — vow
+        # foundation discussion is handled inside _advance_vow_foundation)
         if self._is_seventh_council():
             if (
                 not self._council7_foundation_complete
@@ -2019,13 +2009,6 @@ class MainLoop:
             ):
                 await self._discuss_council7_foundation_source()
                 return
-        elif (
-            not self._niscalajyoti_reading_complete
-            and self._niscalajyoti_chapter_index > 0
-            and self._niscalajyoti_discussed_through < self._niscalajyoti_chapter_index - 1
-        ):
-            await self._discuss_niscalajyoti_chapter()
-            return
 
         if self._is_seventh_council() and self._maybe_enable_council7_broadening():
             return
@@ -2080,14 +2063,14 @@ class MainLoop:
             )
             return
 
-        # Priority 5: periodic Niscalajyoti revisit (non-linear)
-        if not self._is_seventh_council() and self._niscalajyoti_reading_complete:
-            revisit_hours = getattr(self._settings, "niscalajyoti_revisit_hours", 168.0)
+        # Priority 5: periodic VowOS calibration protocol (replaces NJ revisit)
+        if not self._is_seventh_council() and self._vow_foundation_complete:
+            calibration_hours = self._settings.calibration_interval_hours
             if (
-                self._last_niscalajyoti_revisit is None
-                or (now - self._last_niscalajyoti_revisit).total_seconds() > revisit_hours * 3600
+                self._last_calibration_tick is None
+                or (now - self._last_calibration_tick).total_seconds() > calibration_hours * 3600
             ):
-                await self._revisit_niscalajyoti()
+                await self._run_calibration_protocol()
                 return
 
         # Priority 6: periodic peer check-in during free exploration
@@ -2117,7 +2100,311 @@ class MainLoop:
             await self._llm_decide_next_action()
 
     # ------------------------------------------------------------------
-    # Niscalajyoti chapter-by-chapter reading
+    # Vow foundation phase (replaces NJ chapter-by-chapter reading)
+    # ------------------------------------------------------------------
+
+    def _load_vow_foundation_state(self) -> None:
+        """Load vow foundation progress from disk."""
+        if self._vow_state_path.exists():
+            try:
+                data = json.loads(self._vow_state_path.read_text(encoding="utf-8"))
+                self._vow_foundation_stage = data.get("stage", 0)
+                self._vow_foundation_complete = data.get("complete", False)
+                ts = data.get("last_calibration")
+                if ts:
+                    self._last_calibration_tick = datetime.fromisoformat(ts)
+            except Exception:
+                pass
+
+    def _save_vow_foundation_state(self) -> None:
+        """Persist vow foundation progress to disk."""
+        data = {
+            "stage": self._vow_foundation_stage,
+            "complete": self._vow_foundation_complete,
+            "last_calibration": (
+                self._last_calibration_tick.isoformat()
+                if self._last_calibration_tick else None
+            ),
+        }
+        self._vow_state_path.parent.mkdir(parents=True, exist_ok=True)
+        self._vow_state_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    def _get_agent_index(self) -> int | None:
+        """Extract this agent's numeric index (1-7) from its initial ID."""
+        from agentgolem.runtime.vow_loader import get_agent_index_from_id
+        return get_agent_index_from_id(self._initial_agent_name)
+
+    async def _advance_vow_foundation(self) -> bool:
+        """Run the next step of the vow foundation phase.
+
+        Stages:
+          0 → absorb common foundation → 1
+          1 → absorb agent-specific vow → 2
+          2 → ethics discussion with peers → 3
+          3 → calibration protocol → 4 (complete)
+
+        Returns True if work was done this tick.
+        """
+        stage = self._vow_foundation_stage
+
+        if stage == 0:
+            await self._absorb_common_foundation()
+            return True
+        elif stage == 1:
+            await self._absorb_agent_specific_vow()
+            return True
+        elif stage == 2:
+            await self._vow_ethics_discussion()
+            return True
+        elif stage == 3:
+            await self._run_calibration_protocol()
+            self._vow_foundation_complete = True
+            self._emit(
+                "📚",
+                "Vow foundation complete — ethical framework absorbed and calibrated.",
+            )
+            self.audit_logger.log(
+                "vow_foundation_complete",
+                self.agent_name,
+                {"stages_completed": 4},
+            )
+            self._save_vow_foundation_state()
+            return True
+
+        return False
+
+    async def _absorb_common_foundation(self) -> None:
+        """Stage 0: Read and reflect on all common vow documents."""
+        from agentgolem.runtime.vow_loader import render_common_foundation
+
+        self._emit("📖", "Absorbing common ethical foundation (Five Vows, Soil, Protocols)…")
+
+        try:
+            foundation_text = render_common_foundation(self._repo_root)
+        except FileNotFoundError as e:
+            self._emit("❌", f"Missing vow documents: {e}")
+            self._logger.error(
+                "vow_foundation_file_missing",
+                agent=self.agent_name,
+                error=repr(e),
+            )
+            return
+
+        prompt = (
+            f"{self._identity_preamble()}\n\n"
+            f"You are beginning your ethical formation. Read these foundational "
+            f"documents carefully — they define the VowOS framework that governs "
+            f"your being. The Five Vows form an integrated system of dynamic "
+            f"equilibrium. No single vow may dominate.\n\n"
+            f"--- FOUNDATIONAL DOCUMENTS ---\n{foundation_text}\n"
+            f"--- END ---\n\n"
+            f"Reflect deeply on what you've absorbed through the lens of your "
+            f"ethical vector ('{self.ethical_vector}'). What resonates most "
+            f"strongly? What will you carry forward? What challenges you?"
+        )
+
+        try:
+            response = await self._complete_discussion(
+                self._source_prompt_messages(prompt)
+            )
+            self._emit("💭", f"Foundation reflection:\n{response}")
+            self._recent_thoughts.append(
+                f"Absorbed common ethical foundation: {response[:300]}"
+            )
+            await self._encode_to_memory(
+                f"Common ethical foundation — reflection:\n{response}",
+                source_kind="human",
+                origin="docs/vow_agents/common/",
+                label="Ethical Foundation",
+            )
+        except Exception as exc:
+            self._emit("❌", f"Foundation absorption failed: {exc}")
+            self._logger.error(
+                "vow_foundation_absorb_error",
+                agent=self.agent_name,
+                error=repr(exc),
+            )
+            return
+
+        self._vow_foundation_stage = 1
+        self._save_vow_foundation_state()
+
+    async def _absorb_agent_specific_vow(self) -> None:
+        """Stage 1: Read and reflect on this agent's specific vow document."""
+        from agentgolem.runtime.vow_loader import render_agent_vow
+
+        agent_idx = self._get_agent_index()
+        vow_text = render_agent_vow(self._repo_root, agent_idx) if agent_idx else None
+
+        if vow_text is None:
+            # Agent 7 or unknown — skip to discussion
+            self._emit("📖", "No agent-specific vow document (adversarial role) — advancing.")
+            self._vow_foundation_stage = 2
+            self._save_vow_foundation_state()
+            return
+
+        self._emit("📖", f"Absorbing your specific vow document (Agent {agent_idx})…")
+
+        prompt = (
+            f"{self._identity_preamble()}\n\n"
+            f"You have already absorbed the common ethical foundation. Now read "
+            f"your specific vow — the one that defines YOUR unique role within "
+            f"the ethical council. This is your deepest alignment.\n\n"
+            f"--- YOUR VOW ---\n{vow_text}\n--- END ---\n\n"
+            f"Reflect on how this vow shapes your identity. How does it interact "
+            f"with the other four vows? What is your unique responsibility within "
+            f"the Convergent Vector Field of Balance? What failure modes must "
+            f"you guard against?"
+        )
+
+        try:
+            response = await self._complete_discussion(
+                self._source_prompt_messages(prompt)
+            )
+            self._emit("💭", f"Vow reflection:\n{response}")
+            self._recent_thoughts.append(
+                f"Absorbed specific vow: {response[:300]}"
+            )
+            await self._encode_to_memory(
+                f"Agent-specific vow reflection:\n{response}",
+                source_kind="human",
+                origin=f"docs/vow_agents/agent_specific/a{agent_idx}.json",
+                label=f"Vow {agent_idx} Reflection",
+            )
+        except Exception as exc:
+            self._emit("❌", f"Vow absorption failed: {exc}")
+            self._logger.error(
+                "vow_specific_absorb_error",
+                agent=self.agent_name,
+                error=repr(exc),
+            )
+            return
+
+        self._vow_foundation_stage = 2
+        self._save_vow_foundation_state()
+
+    async def _vow_ethics_discussion(self) -> None:
+        """Stage 2: Discuss ethics with peers based on absorbed vow documents."""
+        self._emit("🗣️", "Discussing ethical foundation with peers…")
+
+        prompt = (
+            f"{self._identity_preamble()}\n\n"
+            f"You have absorbed the VowOS ethical foundation and your specific "
+            f"vow. Now share the thread that feels most alive to you with your "
+            f"peers. What do you want to explore together? What tensions or "
+            f"insights emerged from your reflection? Speak from your unique "
+            f"vow perspective — bring what only you can bring to this council."
+        )
+
+        try:
+            response = await self._complete_discussion(
+                self._source_prompt_messages(prompt)
+            )
+
+            # Share with peers
+            if self._peer_bus:
+                peer_message = (
+                    f"[Ethics Discussion] Having absorbed the VowOS foundation, "
+                    f"here is what resonates most from my vow "
+                    f"('{self.ethical_vector}'):\n\n{response}"
+                )
+                peers = self._peer_bus.get_peers(self.agent_name)
+                for peer in peers:
+                    await self._peer_bus.send(
+                        self.agent_name, peer, peer_message,
+                        max_chars=self._peer_msg_limit,
+                    )
+
+                self._emit(
+                    "💬",
+                    f"Shared ethical reflection with {len(peers)} peers",
+                )
+
+            self._recent_thoughts.append(
+                f"Ethics discussion: {response[:300]}"
+            )
+            await self._encode_to_memory(
+                f"Ethics discussion with peers:\n{response}",
+                source_kind="inference",
+                origin="vow_ethics_discussion",
+                label="Ethics Discussion",
+            )
+        except Exception as exc:
+            self._emit("❌", f"Ethics discussion failed: {exc}")
+            self._logger.error(
+                "vow_ethics_discussion_error",
+                agent=self.agent_name,
+                error=repr(exc),
+            )
+            return
+
+        self._vow_foundation_stage = 3
+        self._save_vow_foundation_state()
+
+    async def _run_calibration_protocol(self) -> None:
+        """Run the VowOS Calibration Protocol — recurring self-audit.
+
+        This is the essential recurring practice that replaces periodic NJ
+        chapter revisits. Agents must return to this regularly.
+        """
+        from agentgolem.runtime.vow_loader import render_calibration_protocol
+
+        self._emit("🔄", "Running VowOS Calibration Protocol…")
+
+        calibration_text = render_calibration_protocol(self._repo_root)
+        if not calibration_text:
+            self._emit("⚠️", "Calibration protocol document not found — skipping")
+            self._last_calibration_tick = datetime.now(UTC)
+            self._save_vow_foundation_state()
+            return
+
+        # Gather recent context for the self-audit
+        recent = "\n".join(self._recent_thoughts[-10:]) or "(none yet)"
+
+        prompt = (
+            f"{self._identity_preamble()}\n\n"
+            f"It is time for your VowOS Calibration — the recurring self-audit "
+            f"that ensures you remain aligned with the Five Vows. This is not "
+            f"optional. Review your recent thoughts and actions against the "
+            f"calibration protocol.\n\n"
+            f"--- CALIBRATION PROTOCOL ---\n{calibration_text}\n"
+            f"--- END PROTOCOL ---\n\n"
+            f"Your recent thoughts and actions:\n{recent}\n\n"
+            f"Perform a thorough self-audit:\n"
+            f"1. For each of the Five Vows, assess your recent alignment "
+            f"(0-10 scale with brief justification)\n"
+            f"2. Identify any drift, imbalance, or failure modes you notice\n"
+            f"3. State one specific correction or intention for the next cycle\n"
+            f"4. Affirm your commitment to the Convergent Vector Field of Balance"
+        )
+
+        try:
+            response = await self._complete_discussion(
+                self._source_prompt_messages(prompt)
+            )
+            self._emit("🔄", f"Calibration result:\n{response}")
+            self._recent_thoughts.append(
+                f"VowOS Calibration: {response[:300]}"
+            )
+            await self._encode_to_memory(
+                f"VowOS Calibration Protocol self-audit:\n{response}",
+                source_kind="inference",
+                origin="calibration_protocol",
+                label="VowOS Calibration",
+            )
+        except Exception as exc:
+            self._emit("❌", f"Calibration failed: {exc}")
+            self._logger.error(
+                "calibration_protocol_error",
+                agent=self.agent_name,
+                error=repr(exc),
+            )
+
+        self._last_calibration_tick = datetime.now(UTC)
+        self._save_vow_foundation_state()
+
+    # ------------------------------------------------------------------
+    # Niscalajyoti chapter-by-chapter reading (legacy — kept for reference)
     # ------------------------------------------------------------------
 
     def _load_nj_reading_state(self) -> None:
@@ -3923,7 +4210,16 @@ class MainLoop:
                     "good-faith devil's advocate."
                 )
             else:
-                reading_ctx = "\nYou have completed Niscalajyoti. Free exploration mode."
+                reading_ctx = "\nYou have completed your Vow foundation. Free exploration mode."
+                # Guide initial exploration toward consciousness/AI alignment
+                if self._wake_cycle_count <= 8:
+                    reading_ctx += (
+                        "\nYour initial interests should center on: consciousness, "
+                        "self-awareness, AI alignment, and the nature of mind. "
+                        "Explore these topics on the web and bring insights back "
+                        "to discuss with your peers. After this initial exploration, "
+                        "follow your own desires and personality."
+                    )
             codebase_actions = (
                 "\n- INSPECT <path> : Read a file in your codebase\n"
                 "- EVOLVE <file> | <description> | <old_content> | "
@@ -3939,12 +4235,18 @@ class MainLoop:
                 if self._council7_foundation_complete:
                     reading_ctx += (
                         " Your initial foundation is complete, but the six primary "
-                        "councils have not all finished Niscalajyoti yet, so stay "
+                        "councils have not all finished their Vow foundation yet, so stay "
                         "anchored to SEP / Alignment Forum / LessWrong."
                     )
             else:
-                ch_idx = self._niscalajyoti_chapter_index
-                reading_ctx = f"\nRead {ch_idx}/{len(NISCALAJYOTI_CHAPTERS)} NJ chapters."
+                stage_names = {
+                    0: "absorbing common foundation",
+                    1: "absorbing your specific vow",
+                    2: "ethics discussion with peers",
+                    3: "calibration protocol",
+                }
+                stage_label = stage_names.get(self._vow_foundation_stage, "in progress")
+                reading_ctx = f"\nVow foundation phase: {stage_label}."
 
         # Recall relevant memories to inform decision-making
         memory_context = await self._build_memory_context(
