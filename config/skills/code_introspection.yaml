@@ -1,0 +1,105 @@
+name: code_introspection
+description: >
+  Read, analyze, and understand the agent's own source code, configuration,
+  and runtime state.  Essential for self-awareness — the agent can examine
+  its own implementation, settings, memory schemas, and architecture.
+  All operations are strictly read-only.
+version: "1.0.0"
+author: AgentGolem
+domains:
+  - self_awareness
+  - introspection
+  - code
+
+triggers:
+  - "Agent wants to understand how it works internally"
+  - "Agent needs to verify a behavior matches its implementation"
+  - "Self-model rebuild requires inspecting own capabilities"
+  - "Agent is curious about its own architecture or algorithms"
+  - "Metacognitive reflection detects a behavior the agent wants to trace"
+
+prerequisites:
+  - name: repo_root_configured
+    check: "repo_root must be set in settings.yaml or auto-detected"
+    required: true
+
+actions:
+  - name: read_source
+    description: >
+      Read a specific source file from the agent's own codebase.
+      Returns the file contents.  Path is relative to repo_root.
+    safety_class: trusted_internal
+    side_effect_class: none
+    requires_approval: false
+    supports_dry_run: false
+    arguments:
+      - name: path
+        description: "Relative path to source file (e.g. 'src/agentgolem/runtime/loop.py')"
+        kind: str
+        required: true
+      - name: start_line
+        description: "Optional start line number to read a range"
+        kind: int
+        required: false
+      - name: end_line
+        description: "Optional end line number"
+        kind: int
+        required: false
+    examples:
+      - description: "Read the consciousness kernel module"
+        invocation: "read_source(path='src/agentgolem/consciousness/metacognitive_monitor.py')"
+        expected_output: "Full source code of the metacognitive monitor"
+    usage_hint: "Use when reflecting on own implementation during self-model rebuild"
+
+  - name: read_config
+    description: >
+      Read the agent's current settings.yaml or any configuration file.
+      Sensitive fields (secrets) are redacted automatically.
+    safety_class: trusted_internal
+    side_effect_class: none
+    requires_approval: false
+    supports_dry_run: false
+    arguments:
+      - name: config_name
+        description: "'settings' for settings.yaml, 'template' for the template"
+        kind: str
+        required: false
+    examples:
+      - description: "Read current settings"
+        invocation: "read_config(config_name='settings')"
+        expected_output: "Current settings.yaml contents (secrets redacted)"
+    usage_hint: "Use to understand current operational parameters"
+
+  - name: list_modules
+    description: >
+      List all Python modules in the agent's source tree with brief
+      descriptions extracted from docstrings.
+    safety_class: trusted_internal
+    side_effect_class: none
+    requires_approval: false
+    supports_dry_run: false
+    arguments:
+      - name: package
+        description: "Package path to list (e.g. 'agentgolem.tools')"
+        kind: str
+        required: false
+    examples:
+      - description: "List all agent subsystems"
+        invocation: "list_modules(package='agentgolem')"
+        expected_output: "List of modules with docstrings: config, logging, runtime, ..."
+    usage_hint: "Use when building a map of own capabilities"
+
+  - name: read_architecture
+    description: >
+      Read the architecture documentation (docs/architecture.md) to
+      understand the overall system design and component relationships.
+    safety_class: trusted_internal
+    side_effect_class: none
+    requires_approval: false
+    supports_dry_run: false
+    arguments: []
+    examples:
+      - description: "Understand own architecture"
+        invocation: "read_architecture()"
+        expected_output: "Architecture doc with subsystem descriptions and relationships"
+    usage_hint: "Use for high-level self-understanding during narrative synthesis"

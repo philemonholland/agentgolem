@@ -1,0 +1,102 @@
+name: knowledge_synthesis
+description: >
+  Synthesize, cross-reference, and integrate knowledge from multiple
+  sources within the agent's memory graph.  Use for building deeper
+  understanding by connecting disparate facts, finding contradictions,
+  and generating novel insights from existing knowledge.
+version: "1.0.0"
+author: AgentGolem
+domains:
+  - knowledge
+  - reasoning
+  - memory
+
+triggers:
+  - "Agent has accumulated knowledge from multiple sources and needs to integrate it"
+  - "Metacognitive monitor detects unconnected knowledge clusters"
+  - "Agent wants to find contradictions or tensions in its beliefs"
+  - "Narrative synthesis reveals unresolved conceptual tensions"
+  - "Agent is preparing for a peer discussion and wants to deepen understanding"
+
+prerequisites:
+  - name: memory_store
+    check: "Memory graph (EKG) must be initialized with stored nodes"
+    required: true
+
+actions:
+  - name: cross_reference
+    description: >
+      Find connections between nodes from different sources or domains.
+      Returns pairs of nodes that are semantically related but not yet
+      linked in the knowledge graph, along with suggested edge types.
+    safety_class: trusted_internal
+    side_effect_class: none
+    requires_approval: false
+    supports_dry_run: false
+    arguments:
+      - name: domain_a
+        description: "First domain or source to cross-reference (e.g. 'niscalajyoti')"
+        kind: str
+        required: true
+      - name: domain_b
+        description: "Second domain or source (e.g. 'alignment_forum')"
+        kind: str
+        required: true
+      - name: max_pairs
+        description: "Maximum number of cross-reference pairs to return"
+        kind: int
+        required: false
+    examples:
+      - description: "Find connections between ethical framework and alignment research"
+        invocation: "cross_reference(domain_a='niscalajyoti', domain_b='alignment_research')"
+        expected_output: "List of related concept pairs with suggested edge types"
+    usage_hint: "Use when knowledge from different sources needs integration"
+
+  - name: find_contradictions
+    description: >
+      Scan the knowledge graph for nodes that carry contradictory claims
+      or tensions.  Returns pairs of nodes with opposing stances and
+      a suggested resolution approach.
+    safety_class: trusted_internal
+    side_effect_class: none
+    requires_approval: false
+    supports_dry_run: false
+    arguments:
+      - name: topic
+        description: "Topic or concept to check for contradictions"
+        kind: str
+        required: false
+      - name: scope
+        description: "'recent' for last N nodes, 'all' for full graph scan"
+        kind: str
+        required: false
+    examples:
+      - description: "Find contradictions in beliefs about consciousness"
+        invocation: "find_contradictions(topic='consciousness')"
+        expected_output: "Pairs of contradicting nodes with tension descriptions"
+    usage_hint: "Use when epistemic humility is low or self-model detects blind spots"
+
+  - name: generate_insight
+    description: >
+      Given a set of related nodes, synthesize a novel insight that
+      goes beyond what any single node states.  The insight is stored
+      as a new 'interpretation' node in the memory graph with proper
+      provenance linking to source nodes.
+    safety_class: trusted_internal
+    side_effect_class: local_write
+    requires_approval: false
+    supports_dry_run: true
+    arguments:
+      - name: node_ids
+        description: "List of source node IDs to synthesize from"
+        kind: str
+        required: true
+      - name: synthesis_prompt
+        description: "Optional guiding question for the synthesis"
+        kind: str
+        required: false
+    examples:
+      - description: "Synthesize insight from ethics and decision theory nodes"
+        invocation: "generate_insight(node_ids='node-1,node-2,node-3', synthesis_prompt='How do these ideas relate to collective agency?')"
+        expected_output: "New interpretation node with synthesized insight and provenance edges"
+    usage_hint: "Use when multiple related concepts need integration into understanding"

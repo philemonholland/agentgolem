@@ -368,6 +368,11 @@ class MainLoop:
         # Human-speaking pause: when set, autonomous ticks are suspended
         self._human_speaking_event: threading.Event | None = None
 
+        # Conversation-only pause: when set, discussion/peer/autonomous speech
+        # is suspended but consciousness ticks, memory walks, and internal
+        # reflection continue running.  /speak sets this; /continue clears it.
+        self._conversation_paused = False
+
         # Load Niscalajyoti reading progress from disk
         self._nj_state_path = self._data_dir / "niscalajyoti_reading.json"
         self._load_nj_reading_state()
@@ -814,6 +819,39 @@ class MainLoop:
             )
 
         self._tool_registry = registry
+
+        # Declarative skill packs from config/skills/*.yaml
+        self._load_skill_packs(registry)
+
+    def _load_skill_packs(self, registry: ToolRegistry) -> None:
+        """Load YAML skill manifests and register them as tools."""
+        from agentgolem.tools.skill_pack import SkillPackRegistry
+
+        skills_dir = Path(REPO_ROOT) / "config" / "skills"
+        if not skills_dir.is_dir():
+            return
+        skill_registry = SkillPackRegistry(skills_dir)
+        manifests = skill_registry.load()
+        if not manifests:
+            return
+
+        browser = self._get_browser()
+
+        async def _browser_fetch(url: str) -> str:
+            page = await browser.fetch(url)
+            return browser.extract_text(page.content)
+
+        registered = skill_registry.register_all(
+            registry,
+            browser_execute=_browser_fetch,
+            audit_logger=self.audit_logger,
+        )
+        if registered:
+            self._logger.info(
+                "skill_packs_loaded",
+                count=len(registered),
+                skills=registered,
+            )
 
     def _internal_capabilities(self) -> list[ToolActionSpec]:
         """Return prompt-facing internal actions alongside registered tools."""
@@ -1417,25 +1455,59 @@ class MainLoop:
     # ------------------------------------------------------------------
 
     async def _tick_awake(self) -> None:
-        """Process tasks while awake: human msgs → peer msgs → autonomous."""
-        # 1. Human messages (highest priority)
+        """Process tasks while awake: human msgs → peer msgs → autonomous.
+
+        Consciousness ticks (internal state, metacognition, narrative, self-model)
+        always run — even when ``/speak`` has paused conversation.  Only external
+        speech and autonomous discussion are suppressed during conversation pause.
+        """
+        # 1. Human messages (highest priority — always processed)
         msg = await self.interrupt_manager.get_message(timeout=0.05)
         if msg:
             await self._respond_to_message(msg)
             return
 
-        # 2. Peer messages
+        # 2. Peer messages (processed even during conversation pause so
+        #    messages are consumed from the queue; the floor lock handles
+        #    serialisation)
         peer_msg = await self._receive_peer_message()
         if peer_msg:
             await self._respond_to_peer(peer_msg)
             return
 
-        # 3. If human is speaking, suspend autonomous work
-        if self._human_speaking_event is not None and self._human_speaking_event.is_set():
+        # 3. Conversation-pause check: when the human is speaking,
+        #    suppress autonomous discussion but keep consciousness alive.
+        if self._is_conversation_paused():
+            await self._tick_consciousness_only()
             return
 
-        # 4. Autonomous work
+        # 4. Autonomous work (discussion, browsing, reading, etc.)
         await self._tick_autonomous()
+
+    def _is_conversation_paused(self) -> bool:
+        """Return True if conversation is paused (human speaking)."""
+        if self._conversation_paused:
+            return True
+        if self._human_speaking_event is not None and self._human_speaking_event.is_set():
+            return True
+        return False
+
+    async def _tick_consciousness_only(self) -> None:
+        """Run consciousness kernel and internal reflection without speaking.
+
+        Called when ``/speak`` is active — the agent keeps thinking, observing
+        its own cognition, updating internal state, and walking memory, but
+        doesn't initiate any discussion or external action.
+        """
+        now = datetime.now(UTC)
+        if self._last_autonomous_tick:
+            elapsed = (now - self._last_autonomous_tick).total_seconds()
+            if elapsed < self._autonomous_interval:
+                return
+        self._last_autonomous_tick = now
+
+        self._consciousness_tick_counter += 1
+        await self._consciousness_tick()
 
     # ------------------------------------------------------------------
     # Autonomous behaviour engine

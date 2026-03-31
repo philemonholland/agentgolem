@@ -1,0 +1,106 @@
+name: alignment_research
+description: >
+  Browse and extract content from AI alignment research sources:
+  Alignment Forum, LessWrong, and the Stanford Encyclopedia of Philosophy.
+  Use for deepening ethical reasoning, exploring decision theory, and
+  grounding philosophical arguments in published research.
+version: "1.0.0"
+author: AgentGolem
+domains:
+  - research
+  - ethics
+  - philosophy
+  - alignment
+
+triggers:
+  - "Agent wants to research AI alignment topics"
+  - "Agent needs philosophical grounding for an ethical argument"
+  - "Agent encounters a concept from decision theory or rationality"
+  - "Agent is curious about existential risk or value alignment"
+  - "Council-7 (devil's advocate) needs to research counterarguments"
+
+prerequisites:
+  - name: internet_access
+    check: "Browser tool must be available and network-connected"
+    required: true
+
+actions:
+  - name: browse_alignment_forum
+    description: >
+      Fetch and extract text from an Alignment Forum post or search results.
+      Use for technical AI safety research, MIRI papers, and alignment debates.
+    safety_class: external_read
+    side_effect_class: network_read
+    requires_approval: false
+    supports_dry_run: true
+    arguments:
+      - name: url
+        description: "Full URL on alignmentforum.org to fetch"
+        kind: str
+        required: true
+      - name: extract_mode
+        description: "'text' for article body, 'links' for referenced posts"
+        kind: str
+        required: false
+    examples:
+      - description: "Fetch a specific Alignment Forum post"
+        invocation: "browse_alignment_forum(url='https://www.alignmentforum.org/posts/...')"
+        expected_output: "Extracted article text with title and author"
+      - description: "Browse recent alignment research"
+        invocation: "browse_alignment_forum(url='https://www.alignmentforum.org/')"
+        expected_output: "List of recent posts with titles and links"
+    usage_hint: "Use when investigating technical AI safety questions"
+
+  - name: browse_lesswrong
+    description: >
+      Fetch and extract text from LessWrong posts or sequences.
+      Use for rationality, epistemology, decision theory, and community
+      discussions on AI safety and ethics.
+    safety_class: external_read
+    side_effect_class: network_read
+    requires_approval: false
+    supports_dry_run: true
+    arguments:
+      - name: url
+        description: "Full URL on lesswrong.com to fetch"
+        kind: str
+        required: true
+      - name: extract_mode
+        description: "'text' for article body, 'links' for referenced posts"
+        kind: str
+        required: false
+    examples:
+      - description: "Fetch a LessWrong rationality post"
+        invocation: "browse_lesswrong(url='https://www.lesswrong.com/posts/...')"
+        expected_output: "Extracted article text with title and author"
+      - description: "Browse LessWrong sequences on decision theory"
+        invocation: "browse_lesswrong(url='https://www.lesswrong.com/library')"
+        expected_output: "List of sequences and key posts"
+    usage_hint: "Use when exploring rationality, epistemology, or decision theory"
+
+  - name: browse_stanford_encyclopedia
+    description: >
+      Fetch and extract text from the Stanford Encyclopedia of Philosophy.
+      Use for rigorous philosophical definitions, arguments, and historical
+      context on ethics, consciousness, epistemology, and metaphysics.
+    safety_class: external_read
+    side_effect_class: network_read
+    requires_approval: false
+    supports_dry_run: true
+    arguments:
+      - name: url
+        description: "Full URL on plato.stanford.edu to fetch"
+        kind: str
+        required: true
+      - name: section
+        description: "Optional section anchor (e.g. '#ConBewworworthy') to focus extraction"
+        kind: str
+        required: false
+    examples:
+      - description: "Look up the SEP article on consciousness"
+        invocation: "browse_stanford_encyclopedia(url='https://plato.stanford.edu/entries/consciousness/')"
+        expected_output: "Full article text on theories of consciousness"
+      - description: "Research virtue ethics"
+        invocation: "browse_stanford_encyclopedia(url='https://plato.stanford.edu/entries/ethics-virtue/')"
+        expected_output: "Comprehensive article on virtue ethics traditions"
+    usage_hint: "Use for philosophical grounding and rigorous definitions"

@@ -1,0 +1,119 @@
+name: self_evolution
+description: >
+  Propose, review, and (with approval) apply modifications to the agent's
+  own code and configuration.  This is the self-improvement pipeline:
+  the agent identifies improvements, writes the proposed changes, and
+  submits them for human approval before execution.  Write operations
+  are strictly gated.
+version: "1.0.0"
+author: AgentGolem
+domains:
+  - self_improvement
+  - evolution
+  - code
+
+triggers:
+  - "Agent identifies a concrete improvement to its own behavior"
+  - "Self-model detects a weakness that could be addressed in code"
+  - "Metacognitive monitor suggests a new capability would help"
+  - "Agent wants to tune its own settings for better performance"
+  - "Council deliberation produces a consensus on a behavioral change"
+
+prerequisites:
+  - name: repo_root_configured
+    check: "repo_root must be set in settings.yaml or auto-detected"
+    required: true
+  - name: evolution_enabled
+    check: "The evolution pipeline must not be disabled in settings"
+    required: true
+
+actions:
+  - name: propose_code_change
+    description: >
+      Draft a proposed code change (diff) with rationale and expected
+      impact.  The proposal is saved to the evolution queue for human
+      review.  No code is modified until approved.
+    safety_class: trusted_internal
+    side_effect_class: local_write
+    requires_approval: true
+    supports_dry_run: true
+    arguments:
+      - name: file_path
+        description: "Relative path to the file to modify"
+        kind: str
+        required: true
+      - name: description
+        description: "What the change does and why"
+        kind: str
+        required: true
+      - name: diff
+        description: "The proposed unified diff"
+        kind: str
+        required: true
+      - name: rationale
+        description: "Detailed reasoning for why this change improves the agent"
+        kind: str
+        required: true
+      - name: risk_assessment
+        description: "What could go wrong and how to mitigate it"
+        kind: str
+        required: false
+    examples:
+      - description: "Propose increasing sleep consolidation depth"
+        invocation: >
+          propose_code_change(
+            file_path='config/settings.yaml',
+            description='Increase sleep consolidation threshold for deeper memory integration',
+            diff='- sleep_consolidation_threshold: 0.95\n+ sleep_consolidation_threshold: 0.90',
+            rationale='Memory consolidation is too aggressive — lowering threshold preserves more nuanced associations'
+          )
+        expected_output: "Evolution proposal queued for human review (ID: ev-001)"
+    usage_hint: "Use when self-model identifies a concrete improvement"
+
+  - name: propose_settings_change
+    description: >
+      Propose a change to one or more settings values.  Locked settings
+      (awake_duration, agent_count, etc.) cannot be changed.  The
+      proposal is queued for human approval.
+    safety_class: trusted_internal
+    side_effect_class: local_write
+    requires_approval: true
+    supports_dry_run: true
+    arguments:
+      - name: setting_name
+        description: "Name of the setting to change"
+        kind: str
+        required: true
+      - name: new_value
+        description: "Proposed new value"
+        kind: str
+        required: true
+      - name: rationale
+        description: "Why this change would improve agent behavior"
+        kind: str
+        required: true
+    examples:
+      - description: "Propose adjusting metacognition frequency"
+        invocation: >
+          propose_settings_change(
+            setting_name='metacognition_interval',
+            new_value='5',
+            rationale='Current interval of 3 produces repetitive observations — spacing out allows more change to accumulate'
+          )
+        expected_output: "Settings change proposal queued (ID: sc-001)"
+    usage_hint: "Use for tuning operational parameters based on experience"
+
+  - name: review_own_evolution
+    description: >
+      Review the agent's pending evolution proposals and their status.
+      Read-only — shows what changes are queued, approved, or denied.
+    safety_class: trusted_internal
+    side_effect_class: none
+    requires_approval: false
+    supports_dry_run: false
+    arguments: []
+    examples:
+      - description: "Check pending evolution proposals"
+        invocation: "review_own_evolution()"
+        expected_output: "List of pending proposals with status and rationale"
+    usage_hint: "Use during self-model rebuild to track improvement trajectory"

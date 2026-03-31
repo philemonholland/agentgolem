@@ -1461,12 +1461,18 @@ class RuntimeConsole:
                 cprint(f"  ✗ {getattr(agent, 'agent_name', '?')}: {e}", C.RED)
 
     def _cmd_message_all(self, text: str) -> None:
-        """Send a message to every agent. Auto-pauses autonomous work."""
-        # Auto-pause when human speaks
+        """Send a message to every agent.
+
+        If conversation is paused (via ``/speak``), the message is queued
+        and delivered after the current speaker finishes.  Otherwise it is
+        sent immediately (auto-pausing conversation so agents listen first).
+        """
         if not self._human_speaking.is_set():
             self._human_speaking.set()
+            for agent in self._agents:
+                agent._conversation_paused = True
             cprint(
-                "  ⏸  Autonomous work paused while you speak. Type /continue to resume.", C.YELLOW
+                "  ⏸  Conversation paused while you speak. Type /continue to resume.", C.YELLOW
             )
         for agent in self._agents:
             try:
@@ -1481,11 +1487,12 @@ class RuntimeConsole:
 
     def _cmd_message_to(self, target_name: str, text: str) -> None:
         """Send a message to a specific agent by name (or partial match)."""
-        # Auto-pause when human speaks
         if not self._human_speaking.is_set():
             self._human_speaking.set()
+            for agent in self._agents:
+                agent._conversation_paused = True
             cprint(
-                "  ⏸  Autonomous work paused while you speak. Type /continue to resume.", C.YELLOW
+                "  ⏸  Conversation paused while you speak. Type /continue to resume.", C.YELLOW
             )
         target_lower = target_name.lower()
         for agent in self._agents:
@@ -1511,25 +1518,30 @@ class RuntimeConsole:
         self._cmd_message_all(text)
 
     def _cmd_speak(self) -> None:
-        """Pause all autonomous work — the human wants to talk."""
+        """Pause agent *conversation* — consciousness keeps running."""
         if self._human_speaking.is_set():
             cprint("  Already paused — agents are listening.", C.DIM)
             return
         self._human_speaking.set()
+        # Also set the per-agent conversation-paused flag so consciousness
+        # ticks continue while only discussion is suspended.
+        for agent in self._agents:
+            agent._conversation_paused = True
         cprint(
-            "  ⏸  Autonomous work paused. Agents will respond to your "
-            "messages but won't act on their own.",
+            "  ⏸  Conversation paused. Agents keep thinking but won't talk.",
             C.YELLOW,
         )
         cprint("  Type /continue when you're done speaking.", C.DIM)
 
     def _cmd_continue(self) -> None:
-        """Resume autonomous work after speaking."""
+        """Resume autonomous conversation after speaking."""
         if not self._human_speaking.is_set():
             cprint("  Agents are already running autonomously.", C.DIM)
             return
         self._human_speaking.clear()
-        cprint("  ▶  Autonomous work resumed.", C.GREEN)
+        for agent in self._agents:
+            agent._conversation_paused = False
+        cprint("  ▶  Conversation resumed — agents can speak again.", C.GREEN)
 
     def _cmd_heartbeat(self) -> None:
         for agent in self._agents:
