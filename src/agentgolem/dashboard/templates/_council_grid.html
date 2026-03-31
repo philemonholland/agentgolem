@@ -25,7 +25,7 @@
     </article>
 </div>
 
-<div class="card-grid">
+<div class="card-grid card-grid--council">
     {% for agent in overview.agents %}
     <article class="agent-card {% if agent.name == selected_agent_name %}selected-card{% endif %} {% if agent.has_recent_changes %}recent-card{% endif %}">
         <header>
@@ -53,17 +53,223 @@
         <p><strong>Priority:</strong> {{ "%.2f"|format(agent.discussion_priority) if agent.discussion_priority is not none else "—" }}</p>
         <p><strong>Wake cycles:</strong> {{ agent.wake_cycle_count }}</p>
 
-        <details {% if agent.name == selected_agent_name %}open{% endif %}>
+        <details
+            data-persist-key="inner-state:{{ agent.name }}"
+            {% if agent.name == selected_agent_name %}open{% endif %}
+        >
             <summary>Inner state</summary>
-            <p><strong>Internal:</strong> {{ agent.internal_state_summary }}</p>
-            <p><strong>Metacognition:</strong> {{ agent.metacognition_summary }}</p>
-            {% if agent.attention_directive_summary %}
-            <p><strong>Attention:</strong> {{ agent.attention_directive_summary }}</p>
-            {% endif %}
-            <p><strong>Self-model:</strong> {{ agent.self_model_summary }}</p>
-            <p><strong>Narrative:</strong> {{ agent.narrative_summary }}</p>
 
-            <div>
+            {# --- Felt Sense (Internal State) --- #}
+            <div class="cog-section">
+                <div class="cog-section-label">Felt Sense</div>
+                {% if agent.internal_state %}
+
+                {% set mood_emoji = "😊" if agent.internal_state.get("emotional_valence", 0) > 0.2 else ("😔" if agent.internal_state.get("emotional_valence", 0) < -0.2 else "😐") %}
+                {% set mood_color = "green" if agent.internal_state.get("emotional_valence", 0) > 0.2 else ("red" if agent.internal_state.get("emotional_valence", 0) < -0.2 else "blue") %}
+                {% set valence = agent.internal_state.get("emotional_valence", 0) %}
+                {% set valence_pct = ((valence + 1) / 2 * 100) | int %}
+
+                <div class="cog-row">
+                    <span class="cog-label">{{ mood_emoji }} Mood</span>
+                    <div class="cog-bar-track"><div class="cog-bar-fill cog-bar-fill--{{ mood_color }}" style="width:{{ valence_pct }}%"></div></div>
+                    <span class="cog-val">{{ "%+.1f"|format(valence) }}</span>
+                </div>
+
+                {% set eng = agent.internal_state.get("engagement_level", 0.5) %}
+                <div class="cog-row">
+                    <span class="cog-label">⚡ Energy</span>
+                    <div class="cog-bar-track"><div class="cog-bar-fill cog-bar-fill--green" style="width:{{ (eng * 100) | int }}%"></div></div>
+                    <span class="cog-val">{{ "%.0f"|format(eng * 100) }}%</span>
+                </div>
+
+                {% set conf = agent.internal_state.get("confidence_level", 0.5) %}
+                <div class="cog-row">
+                    <span class="cog-label">🎯 Confidence</span>
+                    <div class="cog-bar-track"><div class="cog-bar-fill cog-bar-fill--blue" style="width:{{ (conf * 100) | int }}%"></div></div>
+                    <span class="cog-val">{{ "%.0f"|format(conf * 100) }}%</span>
+                </div>
+
+                {% set load = agent.internal_state.get("cognitive_load", 0.3) %}
+                {% set load_color = "red" if load > 0.7 else ("amber" if load > 0.4 else "green") %}
+                <div class="cog-row">
+                    <span class="cog-label">🧠 Load</span>
+                    <div class="cog-bar-track"><div class="cog-bar-fill cog-bar-fill--{{ load_color }}" style="width:{{ (load * 100) | int }}%"></div></div>
+                    <span class="cog-val">{{ "%.0f"|format(load * 100) }}%</span>
+                </div>
+
+                {% set curiosity = agent.internal_state.get("curiosity_intensity", 0.5) %}
+                <div class="cog-row">
+                    <span class="cog-label">🔍 Curiosity</span>
+                    <div class="cog-bar-track"><div class="cog-bar-fill cog-bar-fill--purple" style="width:{{ (curiosity * 100) | int }}%"></div></div>
+                    <span class="cog-val">{{ "%.0f"|format(curiosity * 100) }}%</span>
+                </div>
+
+                {% set cur_focus = agent.internal_state.get("curiosity_focus", "") %}
+                {% if cur_focus %}
+                <div class="cog-row">
+                    <span class="cog-label"></span>
+                    <span class="cog-text">{{ cur_focus }}</span>
+                </div>
+                {% endif %}
+
+                <div class="cog-row">
+                    <span class="cog-label">Mode</span>
+                    <span class="badge badge-muted">{{ agent.internal_state.get("attention_mode", "exploring") | title }}</span>
+                </div>
+
+                {% set growth = agent.internal_state.get("growth_vector", "") %}
+                {% if growth %}
+                <div class="cog-row">
+                    <span class="cog-label">Growing</span>
+                    <span class="cog-text">{{ growth }}</span>
+                </div>
+                {% endif %}
+
+                {% set iso = agent.internal_state.get("isolation_signal", 0) %}
+                {% if iso > 0.5 %}
+                <div class="cog-row">
+                    <span class="cog-label">⚠️ Social</span>
+                    <span class="cog-text" style="color:#fbbf24;">Seeking connection</span>
+                </div>
+                {% endif %}
+
+                {% else %}
+                <div class="cog-warming">Felt sense warming up…</div>
+                {% endif %}
+            </div>
+
+            {# --- Desires --- #}
+            {% if agent.desires %}
+            <div class="cog-section">
+                <div class="cog-section-label">✦ Desires</div>
+                <ul class="desire-list">
+                    {% for desire in agent.desires %}
+                    <li>{{ desire }}</li>
+                    {% endfor %}
+                </ul>
+            </div>
+            {% endif %}
+
+            {# --- Metacognition --- #}
+            <div class="cog-section">
+                <div class="cog-section-label">Metacognition</div>
+                {% if agent.metacognition %}
+                {% set meta = agent.metacognition %}
+
+                {% if meta.get("pattern_detected") %}
+                <div class="cog-row"><span class="cog-label">🔄 Pattern</span><span class="cog-text">{{ meta.pattern_detected }}</span></div>
+                {% endif %}
+                {% if meta.get("bias_risk") %}
+                <div class="cog-row"><span class="cog-label">⚖️ Bias risk</span><span class="cog-text">{{ meta.bias_risk }}</span></div>
+                {% endif %}
+                {% if meta.get("avoidance_signal") %}
+                <div class="cog-row"><span class="cog-label">🚧 Avoidance</span><span class="cog-text">{{ meta.avoidance_signal }}</span></div>
+                {% endif %}
+                {% set novelty = meta.get("novelty_appetite", 0) %}
+                {% if novelty %}
+                <div class="cog-row">
+                    <span class="cog-label">🌱 Novelty</span>
+                    <div class="cog-bar-track"><div class="cog-bar-fill cog-bar-fill--purple" style="width:{{ (novelty * 100) | int }}%"></div></div>
+                    <span class="cog-val">{{ "%.0f"|format(novelty * 100) }}%</span>
+                </div>
+                {% endif %}
+                {% if meta.get("authenticity_check") %}
+                <div class="cog-row"><span class="cog-label">✅ Authentic</span><span class="cog-text">{{ meta.authenticity_check }}</span></div>
+                {% endif %}
+                {% if meta.get("suggested_correction") %}
+                <div class="cog-row"><span class="cog-label">💡 Suggest</span><span class="cog-text">{{ meta.suggested_correction }}</span></div>
+                {% endif %}
+
+                {% else %}
+                {% set ticks_to_meta = agent.metacognition_interval - (agent.consciousness_tick % agent.metacognition_interval) %}
+                <div class="cog-warming">Warming up — next reflection in ~{{ ticks_to_meta }} tick{{ "s" if ticks_to_meta != 1 }}</div>
+                {% endif %}
+            </div>
+
+            {# --- Attention --- #}
+            {% if agent.attention_directive %}
+            <div class="cog-section">
+                <div class="cog-section-label">Attention Directive</div>
+                {% set att = agent.attention_directive %}
+                {% if att.get("primary_drive") %}
+                <div class="cog-row"><span class="cog-label">Primary</span><span class="cog-text">{{ att.primary_drive }}</span></div>
+                {% endif %}
+                {% if att.get("secondary_drive") %}
+                <div class="cog-row"><span class="cog-label">Secondary</span><span class="cog-text">{{ att.secondary_drive }}</span></div>
+                {% endif %}
+                {% if att.get("social_need") %}
+                <div class="cog-row"><span class="cog-label">Social</span><span class="cog-text">{{ att.social_need }}</span></div>
+                {% endif %}
+                {% if att.get("recommended_mode") %}
+                <div class="cog-row"><span class="cog-label">Rec. mode</span><span class="badge badge-muted">{{ att.recommended_mode | title }}</span></div>
+                {% endif %}
+                {% if att.get("energy_budget") %}
+                <div class="cog-row"><span class="cog-label">Budget</span><span class="badge badge-muted">{{ att.energy_budget | title }}</span></div>
+                {% endif %}
+            </div>
+            {% endif %}
+
+            {# --- Self-model --- #}
+            <div class="cog-section">
+                <div class="cog-section-label">Self-Model</div>
+                {% if agent.self_model %}
+                {% set sm = agent.self_model %}
+
+                {% if sm.get("strong_convictions") %}
+                <div class="cog-row"><span class="cog-label">Convictions</span><span class="cog-text">{{ sm.strong_convictions[:3] | join("; ") }}</span></div>
+                {% endif %}
+                {% if sm.get("known_unknowns") %}
+                <div class="cog-row"><span class="cog-label">Unknowns</span><span class="cog-text">{{ sm.known_unknowns[:3] | join("; ") }}</span></div>
+                {% endif %}
+                {% if sm.get("strengths") %}
+                <div class="cog-row"><span class="cog-label">Strengths</span><span class="cog-text">{{ sm.strengths[:2] | join("; ") }}</span></div>
+                {% endif %}
+                {% if sm.get("growth_edges") %}
+                <div class="cog-row"><span class="cog-label">Edges</span><span class="cog-text">{{ sm.growth_edges[:2] | join("; ") }}</span></div>
+                {% endif %}
+                {% if sm.get("evolving_interests") %}
+                <div class="cog-row"><span class="cog-label">Interests</span><span class="cog-text">{{ sm.evolving_interests[:3] | join("; ") }}</span></div>
+                {% endif %}
+                {% set smc = sm.get("self_model_confidence", 0) %}
+                {% if smc %}
+                <div class="cog-row">
+                    <span class="cog-label">Confidence</span>
+                    <div class="cog-bar-track"><div class="cog-bar-fill cog-bar-fill--blue" style="width:{{ (smc * 100) | int }}%"></div></div>
+                    <span class="cog-val">{{ "%.0f"|format(smc * 100) }}%</span>
+                </div>
+                {% endif %}
+
+                {% else %}
+                {% set ticks_to_sm = agent.self_model_interval - (agent.consciousness_tick % agent.self_model_interval) %}
+                <div class="cog-warming">Forming — next rebuild in ~{{ ticks_to_sm }} tick{{ "s" if ticks_to_sm != 1 }}</div>
+                {% endif %}
+            </div>
+
+            {# --- Narrative --- #}
+            <div class="cog-section">
+                <div class="cog-section-label">Narrative</div>
+                {% if agent.latest_narrative %}
+                {% set nar = agent.latest_narrative %}
+                {% if nar.get("summary") %}
+                <div class="cog-row"><span class="cog-text">{{ nar.summary }}</span></div>
+                {% endif %}
+                {% if nar.get("key_themes") %}
+                <div class="cog-row"><span class="cog-label">Themes</span><span class="cog-text">{{ nar.key_themes[:3] | join(", ") }}</span></div>
+                {% endif %}
+                {% if nar.get("unresolved_tensions") %}
+                <div class="cog-row"><span class="cog-label">Tensions</span><span class="cog-text">{{ nar.unresolved_tensions[:2] | join("; ") }}</span></div>
+                {% endif %}
+                {% if nar.get("growth_evidence") %}
+                <div class="cog-row"><span class="cog-label">Growth</span><span class="cog-text">{{ nar.growth_evidence }}</span></div>
+                {% endif %}
+                {% else %}
+                {% set ticks_to_nar = agent.narrative_interval - (agent.consciousness_tick % agent.narrative_interval) %}
+                <div class="cog-warming">Weaving — first chapter in ~{{ ticks_to_nar }} tick{{ "s" if ticks_to_nar != 1 }}</div>
+                {% endif %}
+            </div>
+
+            {# --- Changed Recently badges --- #}
+            <div style="margin-top: 0.5rem;">
                 {% for key, changed in agent.changed_recently.items() %}
                     {% if changed %}
                     <span class="badge recent-pill">{{ key.replace("_", " ") }}</span>

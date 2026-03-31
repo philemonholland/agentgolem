@@ -538,6 +538,35 @@ def build_dialogue_snapshot(st: DashboardState) -> dict[str, Any]:
     }
 
 
+def _build_desires(internal_state: Any, self_model: Any) -> list[str]:
+    """Synthesize a compact list of desires from internal state and self-model."""
+    desires: list[str] = []
+    if internal_state is not None:
+        curiosity = getattr(internal_state, "curiosity_focus", "")
+        intensity = getattr(internal_state, "curiosity_intensity", 0)
+        if curiosity:
+            label = f"Explore: {curiosity}"
+            if intensity >= 0.7:
+                label += " (strong)"
+            desires.append(label)
+        growth = getattr(internal_state, "growth_vector", "")
+        if growth:
+            desires.append(f"Grow toward: {growth}")
+        isolation = getattr(internal_state, "isolation_signal", 0)
+        if isolation > 0.5:
+            desires.append("Seek connection with peers")
+    if self_model is not None:
+        interests = getattr(self_model, "evolving_interests", [])
+        for interest in interests[:2]:
+            if interest and f"Explore: {interest}" not in desires:
+                desires.append(f"Interested in: {interest}")
+        edges = getattr(self_model, "growth_edges", [])
+        for edge in edges[:2]:
+            if edge:
+                desires.append(f"Develop: {edge}")
+    return desires
+
+
 def _build_agent_snapshot(st: DashboardState, agent: Any) -> dict[str, Any]:
     bus = st.peer_bus
     data_dir = getattr(agent, "_data_dir", None)
@@ -620,6 +649,11 @@ def _build_agent_snapshot(st: DashboardState, agent: Any) -> dict[str, Any]:
         ),
         "latest_narrative": latest_chapter.to_dict() if latest_chapter is not None else None,
         "narrative_summary": latest_chapter.summary if latest_chapter is not None else "No narrative chapter yet.",
+        "desires": _build_desires(internal_state, self_model),
+        "consciousness_tick": getattr(agent, "_consciousness_tick_counter", 0),
+        "metacognition_interval": getattr(agent, "_metacognition_interval", 3),
+        "self_model_interval": getattr(agent, "_self_model_interval", 10),
+        "narrative_interval": getattr(agent, "_narrative_interval", 15),
         "recent_thoughts": list(reversed(getattr(agent, "_recent_thoughts", [])[-activity_limit:])),
         "heartbeat_due": (
             heartbeat_manager.is_due() if heartbeat_manager is not None else False

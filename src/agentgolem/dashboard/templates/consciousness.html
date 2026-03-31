@@ -78,4 +78,69 @@
     </div>
     {% include "_settings_history.html" %}
 </section>
+
+<script>
+(() => {
+    const STORAGE_KEY = "agentgolem:council-inner-state-open";
+
+    function readOpenKeys() {
+        const raw = window.sessionStorage.getItem(STORAGE_KEY);
+        if (raw === null) {
+            return null;
+        }
+        try {
+            const parsed = JSON.parse(raw);
+            return Array.isArray(parsed) ? parsed : [];
+        } catch {
+            return [];
+        }
+    }
+
+    function writeOpenKeys(root) {
+        if (!root) {
+            return;
+        }
+        const openKeys = Array.from(
+            root.querySelectorAll("details[data-persist-key][open]")
+        ).map((detail) => detail.dataset.persistKey);
+        window.sessionStorage.setItem(STORAGE_KEY, JSON.stringify(openKeys));
+    }
+
+    function restoreOpenKeys(root) {
+        if (!root) {
+            return;
+        }
+        const saved = readOpenKeys();
+        if (saved === null) {
+            return;
+        }
+        const openKeys = new Set(saved);
+        root.querySelectorAll("details[data-persist-key]").forEach((detail) => {
+            detail.open = openKeys.has(detail.dataset.persistKey);
+        });
+    }
+
+    document.body.addEventListener("toggle", (event) => {
+        const detail = event.target;
+        if (!(detail instanceof HTMLDetailsElement) || !detail.dataset.persistKey) {
+            return;
+        }
+        writeOpenKeys(document.getElementById("council-grid"));
+    }, true);
+
+    document.body.addEventListener("htmx:beforeSwap", (event) => {
+        if (event.target && event.target.id === "council-grid") {
+            writeOpenKeys(event.target);
+        }
+    });
+
+    document.body.addEventListener("htmx:afterSwap", (event) => {
+        if (event.target && event.target.id === "council-grid") {
+            restoreOpenKeys(event.target);
+        }
+    });
+
+    restoreOpenKeys(document.getElementById("council-grid"));
+})();
+</script>
 {% endblock %}

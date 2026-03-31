@@ -292,6 +292,38 @@ async def test_dialogue_partial_returns_html(client: httpx.AsyncClient):
     assert "Dialogue Strip" in resp.text
 
 
+async def test_dashboard_preserves_inner_state_details(client: httpx.AsyncClient):
+    resp = await client.get("/dashboard")
+    assert "agentgolem:council-inner-state-open" in resp.text
+
+    partial = await client.get("/dashboard/partials/council")
+    assert 'data-persist-key="inner-state:' in partial.text
+
+
+async def test_dashboard_uses_two_column_council_grid(client: httpx.AsyncClient):
+    resp = await client.get("/dashboard")
+    assert "card-grid--council" in resp.text
+
+
+async def test_dashboard_rich_cognition_panels(client: httpx.AsyncClient):
+    """Verify the rich cognition UI elements render in the council grid."""
+    resp = await client.get("/dashboard/partials/council")
+    text = resp.text
+    assert resp.status_code == 200
+    # Cognition section labels are present
+    assert "Felt Sense" in text
+    assert "cog-section-label" in text
+    # Metacognition section exists (either data or warming up)
+    assert "Metacognition" in text
+    # Self-Model section
+    assert "Self-Model" in text
+    # Narrative section
+    assert "Narrative" in text
+    # Warming-up messages for pillars not yet ticked (test agent has no data)
+    lower = text.lower()
+    assert "warming up" in lower or "forming" in lower or "weaving" in lower
+
+
 async def test_node_detail_not_found(client: httpx.AsyncClient):
     resp = await client.get("/dashboard/memory/nodes/nonexistent-id")
     assert resp.status_code == 200
