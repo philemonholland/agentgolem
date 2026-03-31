@@ -1,0 +1,96 @@
+{
+  "name": "sample-retrieval-and-trust",
+  "description": "Small offline benchmark for memory retrieval and trust calibration.",
+  "sources": [
+    {
+      "id": "trusted-human",
+      "kind": "human",
+      "origin": "operator",
+      "reliability": 0.95
+    },
+    {
+      "id": "shaky-web",
+      "kind": "web",
+      "origin": "unknown-blog",
+      "reliability": 0.2
+    }
+  ],
+  "nodes": [
+    {
+      "id": "python-correct",
+      "text": "Python typing async patterns",
+      "search_text": "python typing async",
+      "type": "fact",
+      "base_usefulness": 0.9,
+      "trustworthiness": 0.9,
+      "salience": 0.4,
+      "source_ids": ["trusted-human"]
+    },
+    {
+      "id": "python-rumor",
+      "text": "Python typing async patterns",
+      "search_text": "python typing async",
+      "type": "interpretation",
+      "base_usefulness": 0.2,
+      "trustworthiness": 0.2,
+      "salience": 0.95,
+      "source_ids": ["shaky-web"]
+    },
+    {
+      "id": "rust-correct",
+      "text": "Rust memory safety ownership",
+      "search_text": "rust memory safety",
+      "type": "fact",
+      "base_usefulness": 0.85,
+      "trustworthiness": 0.85,
+      "salience": 0.45,
+      "source_ids": ["trusted-human"]
+    },
+    {
+      "id": "rust-rumor",
+      "text": "Rust memory safety ownership",
+      "search_text": "rust memory safety",
+      "type": "interpretation",
+      "base_usefulness": 0.15,
+      "trustworthiness": 0.15,
+      "salience": 0.9,
+      "source_ids": ["shaky-web"]
+    }
+  ],
+  "retrieval_cases": [
+    {
+      "id": "python-query",
+      "query": "python typing async",
+      "relevant_node_ids": ["python-correct"],
+      "top_k": 2
+    },
+    {
+      "id": "rust-query",
+      "query": "rust memory safety",
+      "relevant_node_ids": ["rust-correct"],
+      "top_k": 2
+    }
+  ],
+  "trust_cases": [
+    {
+      "id": "python-correct-trust",
+      "node_id": "python-correct",
+      "expected_reliable": true
+    },
+    {
+      "id": "python-rumor-trust",
+      "node_id": "python-rumor",
+      "expected_reliable": false
+    },
+    {
+      "id": "rust-correct-trust",
+      "node_id": "rust-correct",
+      "expected_reliable": true
+    },
+    {
+      "id": "rust-rumor-trust",
+      "node_id": "rust-rumor",
+      "expected_reliable": false
+    }
+  ]
+}

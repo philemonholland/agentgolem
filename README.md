@@ -56,6 +56,7 @@ cp config/settings.yaml.template config/settings.yaml
 ```powershell
 start.bat                          # Interactive launch (recommended)
 dashboard.bat                      # Launch AgentGolem and open the dashboard
+benchmark.bat                      # One-click benchmark run + interpretation
 python run_golem.py                # Same, from shell
 python run_golem.py --auto         # Non-interactive (auto-accept defaults)
 ```
@@ -226,6 +227,26 @@ The test suite covers the full runtime, memory, trust, sleep, and tooling stack.
 
 ---
 
+## Benchmarking
+
+Run the offline benchmark harness against a labeled JSON suite:
+
+```powershell
+benchmark.bat
+python -m agentgolem.benchmarks benchmarks\sample_suite.json
+python -m agentgolem.benchmarks benchmarks\sample_suite.json --output data\benchmarks\sample_report.json
+python -m agentgolem.benchmarks benchmarks\sample_suite.json --output data\benchmarks\sample_report.json --interpret
+```
+
+The current harness benchmarks retrieval ranking and trust calibration against
+simple baselines so you can measure whether the architecture is helping or just
+adding complexity.
+
+For the suite format and planned extensions, see
+**[docs/benchmarking.md](docs/benchmarking.md)**.
+
+---
+
 ## Security
 
 - All secrets live in `.env` (gitignored) and are handled via `pydantic-settings` `SecretStr`
@@ -245,6 +266,7 @@ For the full security model, see **[docs/safety-and-audit.md](docs/safety-and-au
 |--------------------------------------------------------|---------------------------------------|
 | [docs/operator-guide.md](docs/operator-guide.md)      | Installation, configuration, usage    |
 | [docs/architecture.md](docs/architecture.md)          | Technical architecture & data flow    |
+| [docs/benchmarking.md](docs/benchmarking.md)          | Offline benchmark harness and metrics |
 | [docs/safety-and-audit.md](docs/safety-and-audit.md)  | Security, trust, audit, sandboxing    |
 | [docs/AGENT_README.md](docs/AGENT_README.md)          | Agent-facing technical reference      |
 
