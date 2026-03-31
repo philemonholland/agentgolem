@@ -152,6 +152,12 @@ def _get_graph_data(db_path: Path, filters: dict, agent_name: str) -> dict:
     total_edges = _query_db(db_path, "SELECT COUNT(*) as cnt FROM edges")[0]["cnt"]
     stats["_total_edges"] = total_edges
     stats["_total_nodes"] = sum(v for k, v in stats.items() if not k.startswith("_"))
+    # Latest modification timestamp for live-mode change detection
+    try:
+        latest = _query_db(db_path, "SELECT MAX(updated_at) as ts FROM nodes")
+        stats["_latest_ts"] = latest[0]["ts"] if latest else ""
+    except Exception:
+        stats["_latest_ts"] = ""
 
     return {"nodes": nodes, "edges": edges, "clusters": clusters, "stats": stats}
 
@@ -972,16 +978,13 @@ async function liveRefresh() {
   try {
     const r = await fetch('/api/graph?' + params);
     const data = await r.json();
-    const hash = `${data.stats._total_nodes}:${data.stats._total_edges}:${data.stats._peer_nodes || 0}:${data.stats._entanglements || 0}`;
+    const hash = `${data.stats._total_nodes}:${data.stats._total_edges}:${data.stats._peer_nodes || 0}:${data.stats._entanglements || 0}:${data.stats._latest_ts || ''}`;
     if (hash !== lastGraphHash) {
       lastGraphHash = hash;
-      // Preserve current zoom transform
-      const savedTransform = currentTransform;
       renderGraph(data);
-      if (savedTransform && currentZoom) {
-        d3.select('#graph-svg').call(currentZoom.transform, savedTransform);
-      }
       renderStats(data.stats);
+      // Auto-fit once simulation has mostly settled
+      setTimeout(() => fitToScreen(), 1500);
       // Flash the stats bar to signal update
       const el = document.getElementById('stats');
       el.style.transition = 'background 0.3s';
