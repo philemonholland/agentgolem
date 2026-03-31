@@ -16,6 +16,7 @@ from agentgolem.config.secrets import Secrets
 from agentgolem.config.settings import Settings
 from agentgolem.llm.base import Message
 from agentgolem.runtime.bus import AgentMessage
+from agentgolem.runtime.bus import InterAgentBus
 from agentgolem.runtime.loop import MainLoop
 from agentgolem.runtime.state import AgentMode
 from agentgolem.tools.base import ApprovalGate
@@ -252,6 +253,34 @@ async def test_tick_awake_skips_peer_messages_when_conversation_paused(
 
     assert saw["consciousness"] is True
     assert saw["peer"] is False
+
+
+async def test_acquire_floor_with_reflection_times_out_and_falls_back(
+    loop_env: tuple[Settings, Secrets, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, secrets, _ = loop_env
+    loop = MainLoop(settings=settings, secrets=secrets)
+    bus = InterAgentBus()
+    bus.register("Holder")
+    bus.register(loop.agent_name)
+    loop._peer_bus = bus
+
+    await bus.acquire_floor("Holder")
+
+    async def fake_wait_for(awaitable, timeout: float):
+        if hasattr(awaitable, "close"):
+            awaitable.close()
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr("agentgolem.runtime.loop.asyncio.wait_for", fake_wait_for)
+
+    transcript, holds_floor = await loop._acquire_floor_with_reflection()
+
+    assert transcript == []
+    assert holds_floor is False
+    assert bus.floor_holder == "Holder"
+    bus.release_floor()
 
 
 async def test_complete_discussion_sleeps_agent_on_http_error(

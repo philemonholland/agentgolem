@@ -1419,14 +1419,19 @@ class MainLoop:
     # Discussion floor helpers (turn-taking)
     # ------------------------------------------------------------------
 
-    async def _acquire_floor_with_reflection(self) -> list:
+    async def _acquire_floor_with_reflection(self) -> tuple[list, bool]:
         """Acquire the discussion floor, doing a memory walk while waiting.
 
-        Returns the recent discussion transcript so the speaker can
-        integrate what was said while they waited.
+        Returns ``(transcript, holds_floor)`` so the caller can decide whether
+        it must release the floor afterward.
+
+        To avoid multi-minute stalls behind a single long speaker, peer replies
+        only wait a bounded amount of time for the global floor. If the wait
+        times out, the agent still replies using recent transcript context, but
+        without holding the floor.
         """
         if not self._peer_bus:
-            return []
+            return [], False
 
         bus = self._peer_bus
         if bus.floor_locked():
@@ -1434,15 +1439,22 @@ class MainLoop:
             self._emit("🧘", f"Waiting for {holder} to finish — reflecting…")
             walk_task = asyncio.create_task(self._memory_walk_while_waiting())
             try:
-                await bus.acquire_floor(self.agent_name)
+                try:
+                    await asyncio.wait_for(bus.acquire_floor(self.agent_name), timeout=15.0)
+                    return bus.get_transcript(limit=10), True
+                except asyncio.TimeoutError:
+                    self._emit(
+                        "⚡",
+                        "Waited too long for the discussion floor — replying without it.",
+                    )
+                    return bus.get_transcript(limit=10), False
             finally:
                 walk_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await walk_task
         else:
             await bus.acquire_floor(self.agent_name)
-
-        return bus.get_transcript(limit=10)
+            return bus.get_transcript(limit=10), True
 
     def _release_floor(self) -> None:
         """Release the discussion floor if held."""
@@ -3084,7 +3096,7 @@ class MainLoop:
         )
 
         # Acquire the discussion floor (reflects while waiting)
-        transcript = await self._acquire_floor_with_reflection()
+        transcript, holds_floor = await self._acquire_floor_with_reflection()
         try:
             transcript_ctx = self._format_transcript_context(transcript)
 
@@ -3153,7 +3165,8 @@ class MainLoop:
                 label=f"Council-7 Discussion {idx + 1}: {title}",
             )
         finally:
-            self._release_floor()
+            if holds_floor:
+                self._release_floor()
 
     async def _discuss_niscalajyoti_chapter(self) -> None:
         """Discuss the most recently read chapter with peer agents."""
@@ -3171,7 +3184,7 @@ class MainLoop:
         )
 
         # Acquire the discussion floor (reflects while waiting)
-        transcript = await self._acquire_floor_with_reflection()
+        transcript, holds_floor = await self._acquire_floor_with_reflection()
         try:
             transcript_ctx = self._format_transcript_context(transcript)
 
@@ -3232,7 +3245,8 @@ class MainLoop:
                     error=repr(e),
                 )
         finally:
-            self._release_floor()
+            if holds_floor:
+                self._release_floor()
 
     async def _revisit_niscalajyoti(self) -> None:
         """Non-linear revisit — agent chooses which chapters to re-read."""
