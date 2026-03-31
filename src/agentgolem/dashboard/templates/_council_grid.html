@@ -94,6 +94,18 @@
                 <span class="cog-val">{{ agent.formative_events_count }}</span>
             </div>
             {% endif %}
+            {% if agent.ocean_scores %}
+            <div style="margin-top:0.3rem;">
+                <span class="cog-label" style="font-size:0.7rem; opacity:0.7;">OCEAN</span>
+                {% for trait_name, trait_val in agent.ocean_scores.items() %}
+                <div class="cog-row">
+                    <span class="cog-label" style="font-size:0.72rem;">{{ trait_name[:1] | upper }}</span>
+                    <div class="cog-bar-track"><div class="cog-bar-fill cog-bar-fill--purple" style="width:{{ (trait_val * 100) | int }}%"></div></div>
+                    <span class="cog-val" style="font-size:0.72rem;">{{ "%.0f"|format(trait_val * 100) }}%</span>
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
         </div>
         {% endif %}
 
@@ -242,6 +254,28 @@
                 {% endif %}
                 {% if meta.get("suggested_correction") %}
                 <div class="cog-row"><span class="cog-label">💡 Suggest</span><span class="cog-text">{{ meta.suggested_correction }}</span></div>
+                {% endif %}
+                {% if meta.get("contradiction_awareness") %}
+                <div class="cog-row"><span class="cog-label">⚡ Tensions</span><span class="cog-text">{{ meta.contradiction_awareness }}</span></div>
+                {% endif %}
+                {% if meta.get("goal_alignment") %}
+                <div class="cog-row"><span class="cog-label">🎯 Goal fit</span><span class="cog-text">{{ meta.goal_alignment }}</span></div>
+                {% endif %}
+                {% set fatigue = meta.get("cognitive_fatigue", 0) %}
+                {% if fatigue > 0.3 %}
+                <div class="cog-row">
+                    <span class="cog-label">😴 Fatigue</span>
+                    <div class="cog-bar-track"><div class="cog-bar-fill cog-bar-fill--red" style="width:{{ (fatigue * 100) | int }}%"></div></div>
+                    <span class="cog-val">{{ "%.0f"|format(fatigue * 100) }}%</span>
+                </div>
+                {% endif %}
+                {% set diversity = meta.get("action_diversity", 0.5) %}
+                {% if diversity < 0.5 %}
+                <div class="cog-row">
+                    <span class="cog-label">🎲 Diversity</span>
+                    <div class="cog-bar-track"><div class="cog-bar-fill cog-bar-fill--orange" style="width:{{ (diversity * 100) | int }}%"></div></div>
+                    <span class="cog-val">{{ "%.0f"|format(diversity * 100) }}%</span>
+                </div>
                 {% endif %}
 
                 {% else %}

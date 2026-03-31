@@ -27,6 +27,11 @@ class MetacognitiveObservation:
     novelty_appetite: float = 0.5
     authenticity_check: str = ""
     suggested_correction: str = ""
+    # Deeper signals
+    contradiction_awareness: str = ""
+    goal_alignment: str = ""
+    cognitive_fatigue: float = 0.0  # 0.0 = fresh, 1.0 = exhausted
+    action_diversity: float = 0.5  # 0.0 = stuck, 1.0 = highly varied
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -47,6 +52,14 @@ class MetacognitiveObservation:
             parts.append(f"Avoiding: {self.avoidance_signal}")
         if self.authenticity_check:
             parts.append(f"Authenticity: {self.authenticity_check}")
+        if self.contradiction_awareness:
+            parts.append(f"Contradictions: {self.contradiction_awareness}")
+        if self.goal_alignment:
+            parts.append(f"Goal alignment: {self.goal_alignment}")
+        if self.cognitive_fatigue > 0.5:
+            parts.append(f"Fatigue: {self.cognitive_fatigue:.0%}")
+        if self.action_diversity < 0.3:
+            parts.append(f"Diversity low: {self.action_diversity:.0%}")
         if self.suggested_correction:
             parts.append(f"Suggestion: {self.suggested_correction}")
         return " | ".join(parts) if parts else "No metacognitive signals."
@@ -70,11 +83,17 @@ class MetacognitiveMonitor:
         recent_actions: list[str],
         focus_depth: int,
         neglected_topics: list[str] | None = None,
+        contradiction_topics: list[str] | None = None,
+        active_goals: list[str] | None = None,
     ) -> str:
         """Build the metacognitive reflection prompt."""
         thoughts_text = "\n".join(f"- {t}" for t in recent_thoughts[-8:]) or "(none)"
         actions_text = "\n".join(f"- {a}" for a in recent_actions[-8:]) or "(none)"
         neglected = ", ".join(neglected_topics[:5]) if neglected_topics else "(none detected)"
+        contradictions = (
+            ", ".join(contradiction_topics[:5]) if contradiction_topics else "(none detected)"
+        )
+        goals = "\n".join(f"- {g}" for g in (active_goals or [])[:5]) or "(none)"
 
         return f"""\
 You are {agent_name}, performing a brief metacognitive self-check.
@@ -87,12 +106,20 @@ Recent actions:
 
 Focus depth (consecutive ticks on same topic): {focus_depth}
 Neglected memory clusters: {neglected}
+Unresolved contradictions: {contradictions}
+
+Active goals:
+{goals}
 
 Reflect honestly:
 - Am I stuck in a repetitive pattern?
 - Am I avoiding any topic or perspective?
 - Is my curiosity genuine or am I going through motions?
 - What bias might I be exhibiting?
+- Do I have unresolved contradictions I should examine?
+- Am I aligned with my goals, or am I drifting?
+- Am I fatigued (repeating ideas, losing depth)?
+- Am I varying my actions enough (search, think, discuss, browse)?
 - What would break me out of a rut?
 
 Respond ONLY as valid JSON:
@@ -102,6 +129,10 @@ Respond ONLY as valid JSON:
   "avoidance_signal": "what am I avoiding, or empty string",
   "novelty_appetite": 0.0-1.0,
   "authenticity_check": "am I genuinely curious? brief honest assessment",
+  "contradiction_awareness": "unresolved tensions I should examine, or empty string",
+  "goal_alignment": "how well am I advancing my goals? brief assessment, or empty string",
+  "cognitive_fatigue": 0.0-1.0,
+  "action_diversity": 0.0-1.0,
   "suggested_correction": "one concrete thing to try differently"
 }}"""
 
@@ -127,6 +158,14 @@ Respond ONLY as valid JSON:
                 ))),
                 authenticity_check=str(data.get("authenticity_check", "")),
                 suggested_correction=str(data.get("suggested_correction", "")),
+                contradiction_awareness=str(data.get("contradiction_awareness", "")),
+                goal_alignment=str(data.get("goal_alignment", "")),
+                cognitive_fatigue=max(0.0, min(1.0, float(
+                    data.get("cognitive_fatigue", 0.0)
+                ))),
+                action_diversity=max(0.0, min(1.0, float(
+                    data.get("action_diversity", 0.5)
+                ))),
             )
             self._last_observation = obs
             return obs

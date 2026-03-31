@@ -850,6 +850,43 @@ def _load_agent_trace_stats(agent: Any, limit: int = 50) -> dict[str, Any]:
     return stats.to_dict()
 
 
+def _load_agent_activity(agent: Any, limit: int = 30) -> dict[str, Any]:
+    """Load search/browse activity from execution traces."""
+    from agentgolem.harness.trace import load_traces
+
+    data_dir = getattr(agent, "_data_dir", None)
+    if data_dir is None:
+        return {"searches": [], "browses": [], "browse_queue": []}
+
+    traces = load_traces(data_dir, limit=200)
+
+    searches: list[dict[str, Any]] = []
+    browses: list[dict[str, Any]] = []
+    for t in traces:
+        d = t.to_dict()
+        if t.call_site == "_autonomous_search":
+            searches.append({
+                "timestamp": t.timestamp,
+                "query": t.prompt_summary[:200],
+                "outcome": t.outcome_value[:300] if t.outcome_value else "",
+            })
+        elif t.call_site == "_autonomous_browse":
+            browses.append({
+                "timestamp": t.timestamp,
+                "summary": t.prompt_summary[:200],
+                "reflection": d.get("outcome_value", "")[:300],
+                "response_length": t.response_length,
+            })
+
+    browse_queue: list[str] = list(getattr(agent, "_browse_queue", []))
+
+    return {
+        "searches": searches[:limit],
+        "browses": browses[:limit],
+        "browse_queue": browse_queue,
+    }
+
+
 def _compact_trace_diagnostics(agent: Any) -> dict[str, Any] | None:
     """Return a compact diagnostic summary for the agent card, or None."""
     from agentgolem.harness.trace import load_traces
@@ -978,6 +1015,7 @@ def _build_agent_snapshot(st: DashboardState, agent: Any) -> dict[str, Any]:
         "desires": _build_desires(internal_state, self_model),
         "temperament": temperament.to_dict() if temperament is not None else {},
         "temperament_label": temperament.short_label() if temperament is not None else "",
+        "ocean_scores": temperament.ocean_scores() if temperament is not None else {},
         "emotional_dynamics": emotional_dynamics.to_dict() if emotional_dynamics is not None else {},
         "emotional_baseline": (
             emotional_dynamics.effective_baseline if emotional_dynamics is not None else 0.0
@@ -1236,6 +1274,16 @@ def create_app(dashboard_state: DashboardState | None = None) -> FastAPI:
         if agent is None:
             raise HTTPException(404, f"Agent '{agent_name}' not found")
         return _load_agent_trace_stats(agent, limit)
+
+    @app.get("/api/council/agents/{agent_name}/activity")
+    async def get_agent_activity(
+        agent_name: str, limit: int = Query(30, ge=1, le=200),
+    ) -> dict[str, Any]:
+        """Return search/browse activity for an agent."""
+        agent = _resolve_agent(_state, agent_name)
+        if agent is None:
+            raise HTTPException(404, f"Agent '{agent_name}' not found")
+        return _load_agent_activity(agent, limit)
 
     # ── Attention request endpoints ──────────────────────────────────
 

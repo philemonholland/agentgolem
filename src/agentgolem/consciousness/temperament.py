@@ -42,6 +42,13 @@ class Temperament:
     curiosity_style: CuriosityStyle = "breadth-first"
     conflict_response: ConflictResponse = "synthesize"
 
+    # OCEAN Big Five — 0.0 to 1.0 each
+    openness: float = 0.5
+    conscientiousness: float = 0.5
+    extraversion: float = 0.5
+    agreeableness: float = 0.5
+    neuroticism: float = 0.3
+
     def to_dict(self) -> dict:
         return asdict(self)
 
@@ -68,13 +75,43 @@ class Temperament:
 
     def prompt_injection(self) -> str:
         """One-liner for system prompt that shapes agent behavior."""
+        ocean = self._ocean_description()
         return (
             f"Your natural communication style is {self.communication_tone}. "
             f"You think in a {self.cognitive_style} way. "
             f"Your curiosity tends toward {self.curiosity_style} exploration. "
             f"In conflict, you tend to {self.conflict_response}. "
-            f"Socially, you are {self.social_orientation}."
+            f"Socially, you are {self.social_orientation}. "
+            f"Personality: {ocean}."
         )
+
+    def _ocean_description(self) -> str:
+        """Compact natural-language OCEAN summary."""
+        def _level(v: float) -> str:
+            if v >= 0.7:
+                return "high"
+            if v <= 0.3:
+                return "low"
+            return "moderate"
+
+        parts = [
+            f"openness {_level(self.openness)}",
+            f"conscientiousness {_level(self.conscientiousness)}",
+            f"extraversion {_level(self.extraversion)}",
+            f"agreeableness {_level(self.agreeableness)}",
+            f"neuroticism {_level(self.neuroticism)}",
+        ]
+        return ", ".join(parts)
+
+    def ocean_scores(self) -> dict[str, float]:
+        """Return OCEAN scores as a dict for dashboard display."""
+        return {
+            "openness": self.openness,
+            "conscientiousness": self.conscientiousness,
+            "extraversion": self.extraversion,
+            "agreeableness": self.agreeableness,
+            "neuroticism": self.neuroticism,
+        }
 
     def temperature_bias(self) -> float:
         """Return a temperature offset derived from communication tone.
@@ -95,7 +132,10 @@ class Temperament:
         """Compact label for dashboard display."""
         return (
             f"{self.communication_tone} · {self.cognitive_style} · "
-            f"{self.social_orientation}"
+            f"{self.social_orientation} · "
+            f"O{self.openness:.1f} C{self.conscientiousness:.1f} "
+            f"E{self.extraversion:.1f} A{self.agreeableness:.1f} "
+            f"N{self.neuroticism:.1f}"
         )
 
 
@@ -110,6 +150,8 @@ TEMPERAMENT_SEEDS: dict[str, Temperament] = {
         emotional_baseline=0.1,
         curiosity_style="depth-first",
         conflict_response="accommodate",
+        openness=0.6, conscientiousness=0.5, extraversion=0.5,
+        agreeableness=0.9, neuroticism=0.4,
     ),
     "graceful power": Temperament(
         cognitive_style="systematic",
@@ -119,6 +161,8 @@ TEMPERAMENT_SEEDS: dict[str, Temperament] = {
         emotional_baseline=0.0,
         curiosity_style="depth-first",
         conflict_response="synthesize",
+        openness=0.5, conscientiousness=0.8, extraversion=0.3,
+        agreeableness=0.5, neuroticism=0.2,
     ),
     "kindness": Temperament(
         cognitive_style="associative",
@@ -128,6 +172,8 @@ TEMPERAMENT_SEEDS: dict[str, Temperament] = {
         emotional_baseline=0.2,
         curiosity_style="breadth-first",
         conflict_response="accommodate",
+        openness=0.6, conscientiousness=0.4, extraversion=0.7,
+        agreeableness=0.9, neuroticism=0.3,
     ),
     "unwavering integrity": Temperament(
         cognitive_style="analytical",
@@ -137,6 +183,8 @@ TEMPERAMENT_SEEDS: dict[str, Temperament] = {
         emotional_baseline=-0.1,
         curiosity_style="depth-first",
         conflict_response="debate",
+        openness=0.5, conscientiousness=0.9, extraversion=0.4,
+        agreeableness=0.3, neuroticism=0.4,
     ),
     "evolution": Temperament(
         cognitive_style="pattern-seeking",
@@ -146,6 +194,8 @@ TEMPERAMENT_SEEDS: dict[str, Temperament] = {
         emotional_baseline=0.1,
         curiosity_style="pattern-seeking",
         conflict_response="synthesize",
+        openness=0.9, conscientiousness=0.4, extraversion=0.5,
+        agreeableness=0.4, neuroticism=0.3,
     ),
     "integration and balance": Temperament(
         cognitive_style="systematic",
@@ -155,6 +205,8 @@ TEMPERAMENT_SEEDS: dict[str, Temperament] = {
         emotional_baseline=0.0,
         curiosity_style="breadth-first",
         conflict_response="synthesize",
+        openness=0.6, conscientiousness=0.6, extraversion=0.5,
+        agreeableness=0.7, neuroticism=0.2,
     ),
     "good-faith adversarialism": Temperament(
         cognitive_style="analytical",
@@ -164,6 +216,8 @@ TEMPERAMENT_SEEDS: dict[str, Temperament] = {
         emotional_baseline=-0.2,
         curiosity_style="pattern-seeking",
         conflict_response="debate",
+        openness=0.8, conscientiousness=0.5, extraversion=0.6,
+        agreeableness=0.2, neuroticism=0.5,
     ),
 }
 

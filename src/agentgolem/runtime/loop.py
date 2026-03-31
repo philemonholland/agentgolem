@@ -5447,6 +5447,28 @@ class MainLoop:
         summary = preview_lines[0] if preview_lines else "(no results)"
         self._recent_thoughts.append(f"Searched '{query}': {summary[:300]}")
 
+        # Emit an execution trace so the dashboard can surface search activity
+        from agentgolem.harness.trace import ExecutionTrace, append_trace
+
+        trace = ExecutionTrace(
+            call_site="_autonomous_search",
+            purpose="search",
+            agent_name=self.agent_name,
+            prompt_summary=f"query: {query}{suffix}"[:200],
+            context_tokens=0,
+            completion_tokens=0,
+            response_length=0,
+            action_taken="search",
+            outcome_type="search_results",
+            outcome_value=f"{len(results)} results; {summary[:200]}",
+            timestamp=datetime.now(UTC).isoformat(),
+        )
+        if self._data_dir:
+            try:
+                append_trace(trace, self._data_dir)
+            except Exception:
+                pass
+
     async def _autonomous_think(self, topic: str) -> None:
         """Reflect on a topic internally."""
         self._emit("💭", f"Thinking about: {topic}")
@@ -6376,15 +6398,28 @@ class MainLoop:
 
     async def _run_metacognitive_reflection(self, tick: int) -> None:
         """Pillar 1 — detect patterns, biases, and avoidance."""
-        from agentgolem.consciousness.metacognitive_monitor import find_neglected_topics
+        from agentgolem.consciousness.metacognitive_monitor import (
+            find_neglected_topics,
+            find_contradiction_clusters,
+        )
 
         try:
             neglected: list[str] = []
+            contradictions: list[str] = []
             if self._memory_store:
                 try:
                     neglected = await find_neglected_topics(self._memory_store)
                 except Exception:
                     pass
+                try:
+                    contradictions = await find_contradiction_clusters(self._memory_store)
+                except Exception:
+                    pass
+
+            # Gather active goal summaries
+            goal_labels: list[str] = []
+            for g in self._get_active_goals()[:5]:
+                goal_labels.append(g.get("description", "?")[:80])
 
             prompt = self._metacognitive_monitor.build_reflection_prompt(
                 agent_name=self.agent_name,
@@ -6392,13 +6427,15 @@ class MainLoop:
                 recent_actions=self._recent_thoughts[-5:],
                 focus_depth=self._internal_state.focus_depth,
                 neglected_topics=neglected,
+                contradiction_topics=contradictions,
+                active_goals=goal_labels,
             )
             raw = await self._complete_discussion(
                 [Message(role="system", content=prompt)],
                 trace_meta={"call_site": "_run_metacognitive_reflection", "purpose": "metacognition"},
             )
             obs = self._metacognitive_monitor.parse_response(raw)
-            if obs.pattern_detected or obs.avoidance_signal:
+            if obs.pattern_detected or obs.avoidance_signal or obs.contradiction_awareness:
                 self._emit("🧠", f"Metacognition: {obs.summary()}")
         except Exception as exc:
             self._logger.warning(
