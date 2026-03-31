@@ -310,6 +310,221 @@ def _resolve_agent(st: DashboardState, agent_name: str | None = None) -> Any | N
     return None
 
 
+def _dedupe_names(values: list[Any]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        candidate = value.strip()
+        if not candidate or candidate.lower() in seen:
+            continue
+        deduped.append(candidate)
+        seen.add(candidate.lower())
+    return deduped
+
+
+def _current_agent_label(agent: Any, duplicate_counts: dict[str, int]) -> str:
+    current = getattr(agent, "agent_name", "") or getattr(agent, "_initial_agent_name", "?")
+    initial = getattr(agent, "_initial_agent_name", current)
+    if duplicate_counts.get(current.lower(), 0) > 1:
+        return f"{current} ({initial})"
+    return current
+
+
+def _relationship_identity_maps(
+    st: DashboardState,
+) -> tuple[dict[str, str | None], dict[str, str]]:
+    agents = _get_agents(st)
+    duplicate_counts: dict[str, int] = {}
+    for agent in agents:
+        current = getattr(agent, "agent_name", "")
+        if current:
+            duplicate_counts[current.lower()] = duplicate_counts.get(current.lower(), 0) + 1
+
+    identity_lookup: dict[str, str | None] = {}
+    display_lookup: dict[str, str] = {}
+    for agent in agents:
+        initial = getattr(agent, "_initial_agent_name", getattr(agent, "agent_name", ""))
+        display_lookup[initial] = _current_agent_label(agent, duplicate_counts)
+        for name in _agent_identity_names(agent):
+            lowered = name.lower()
+            existing = identity_lookup.get(lowered)
+            if existing is None and lowered in identity_lookup:
+                continue
+            if existing is not None and existing != initial:
+                identity_lookup[lowered] = None
+                continue
+            identity_lookup[lowered] = initial
+    return identity_lookup, display_lookup
+
+
+def _relationship_average(
+    existing_value: Any,
+    existing_weight: int,
+    incoming_value: Any,
+    incoming_weight: int,
+) -> float:
+    existing = float(existing_value)
+    incoming = float(incoming_value)
+    left = max(existing_weight, 1)
+    right = max(incoming_weight, 1)
+    return ((existing * left) + (incoming * right)) / (left + right)
+
+
+def _relationship_prompt_summary(relationship: dict[str, Any]) -> str:
+    trust = float(relationship.get("trust", 0.5))
+    trust_label = "high" if trust >= 0.7 else "low" if trust < 0.4 else "moderate"
+    parts = [f"Trust: {trust_label}"]
+
+    shared = relationship.get("shared_experiences", [])
+    if isinstance(shared, list) and shared:
+        parts.append(f"Shared: {', '.join(shared[-2:])}")
+
+    disagreements = relationship.get("disagreements", [])
+    if isinstance(disagreements, list) and disagreements:
+        parts.append(f"Disagree about: {', '.join(disagreements[-2:])}")
+
+    debt = float(relationship.get("intellectual_debt", 0.0))
+    if abs(debt) > 0.3:
+        direction = (
+            "they've contributed more ideas" if debt > 0 else "you've contributed more ideas"
+        )
+        parts.append(direction)
+
+    return " | ".join(parts)
+
+
+def _merge_relationship_entries(
+    existing: dict[str, Any],
+    incoming: dict[str, Any],
+) -> dict[str, Any]:
+    existing_count = int(existing.get("interaction_count", 0))
+    incoming_count = int(incoming.get("interaction_count", 0))
+    merged = dict(existing)
+    merged["peer_id"] = incoming.get("peer_id") or existing.get("peer_id")
+    merged["peer_name"] = incoming.get("peer_name") or existing.get("peer_name")
+    merged["aliases"] = _dedupe_names(
+        [
+            *existing.get("aliases", []),
+            *incoming.get("aliases", []),
+        ]
+    )
+    merged["trust"] = _relationship_average(
+        existing.get("trust", 0.5),
+        existing_count,
+        incoming.get("trust", 0.5),
+        incoming_count,
+    )
+    merged["intellectual_debt"] = _relationship_average(
+        existing.get("intellectual_debt", 0.0),
+        existing_count,
+        incoming.get("intellectual_debt", 0.0),
+        incoming_count,
+    )
+    merged["communication_compatibility"] = _relationship_average(
+        existing.get("communication_compatibility", 0.5),
+        existing_count,
+        incoming.get("communication_compatibility", 0.5),
+        incoming_count,
+    )
+    merged["interaction_count"] = existing_count + incoming_count
+    merged["last_interaction_tick"] = max(
+        int(existing.get("last_interaction_tick", 0)),
+        int(incoming.get("last_interaction_tick", 0)),
+    )
+    merged["shared_experiences"] = _dedupe_names(
+        [
+            *existing.get("shared_experiences", []),
+            *incoming.get("shared_experiences", []),
+        ]
+    )[-20:]
+    merged["disagreements"] = _dedupe_names(
+        [
+            *existing.get("disagreements", []),
+            *incoming.get("disagreements", []),
+        ]
+    )[-10:]
+    return merged
+
+
+def _normalize_relationships_for_dashboard(
+    st: DashboardState,
+    relationship_store: Any | None,
+) -> tuple[dict[str, dict[str, Any]], str]:
+    if relationship_store is None:
+        return {}, ""
+
+    raw_relationships = relationship_store.to_dict()
+    if not isinstance(raw_relationships, dict):
+        return {}, ""
+
+    identity_lookup, display_lookup = _relationship_identity_maps(st)
+    normalized: dict[str, dict[str, Any]] = {}
+
+    for raw_key, raw_value in raw_relationships.items():
+        if not isinstance(raw_value, dict):
+            continue
+
+        aliases = raw_value.get("aliases", [])
+        alias_values = aliases if isinstance(aliases, list) else []
+        candidates = _dedupe_names(
+            [
+                raw_value.get("peer_id"),
+                raw_value.get("peer_name"),
+                raw_key,
+                *alias_values,
+            ]
+        )
+
+        resolved_peer_id: str | None = None
+        for candidate in candidates:
+            resolved = identity_lookup.get(candidate.lower())
+            if resolved is not None:
+                resolved_peer_id = resolved
+                break
+
+        peer_id = resolved_peer_id or str(raw_value.get("peer_id") or raw_key)
+        peer_name = display_lookup.get(
+            resolved_peer_id or "",
+            str(raw_value.get("peer_name") or raw_key),
+        )
+        entry = {
+            "peer_id": peer_id,
+            "peer_name": peer_name,
+            "aliases": _dedupe_names([raw_key, raw_value.get("peer_name"), *alias_values]),
+            "trust": float(raw_value.get("trust", 0.5)),
+            "intellectual_debt": float(raw_value.get("intellectual_debt", 0.0)),
+            "shared_experiences": _dedupe_names(raw_value.get("shared_experiences", [])),
+            "disagreements": _dedupe_names(raw_value.get("disagreements", [])),
+            "last_interaction_tick": int(raw_value.get("last_interaction_tick", 0)),
+            "interaction_count": int(raw_value.get("interaction_count", 0)),
+            "communication_compatibility": float(
+                raw_value.get("communication_compatibility", 0.5)
+            ),
+        }
+
+        if peer_id in normalized:
+            normalized[peer_id] = _merge_relationship_entries(normalized[peer_id], entry)
+        else:
+            normalized[peer_id] = entry
+
+    summary_lines = []
+    for relationship in sorted(
+        normalized.values(),
+        key=lambda item: int(item.get("interaction_count", 0)),
+        reverse=True,
+    ):
+        if int(relationship.get("interaction_count", 0)) <= 0:
+            continue
+        summary_lines.append(
+            f"- {relationship['peer_name']}: {_relationship_prompt_summary(relationship)}"
+        )
+
+    summary = "Peer relationships:\n" + "\n".join(summary_lines[:5]) if summary_lines else ""
+    return normalized, summary
+
+
 def _get_data_dir(st: DashboardState) -> Path | None:
     """Return the parent data directory (e.g. ``data/``) that contains agent subdirs."""
     if st.data_dir is not None:
@@ -626,6 +841,9 @@ def _build_agent_snapshot(st: DashboardState, agent: Any) -> dict[str, Any]:
     self_model = getattr(agent, "_self_model", None)
     narrative_synthesizer = getattr(agent, "_narrative_synthesizer", None)
     latest_chapter = getattr(narrative_synthesizer, "latest_chapter", None)
+    relationships, relationships_summary = _normalize_relationships_for_dashboard(
+        st, relationship_store
+    )
 
     attention_directive = None
     if attention_director is not None and internal_state is not None:
@@ -712,13 +930,8 @@ def _build_agent_snapshot(st: DashboardState, agent: Any) -> dict[str, Any]:
         "formative_events_count": (
             len(emotional_dynamics.formative_events) if emotional_dynamics is not None else 0
         ),
-        "relationships": (
-            relationship_store.to_dict() if relationship_store is not None else {}
-        ),
-        "relationships_summary": (
-            relationship_store.all_relationships_summary()
-            if relationship_store is not None else ""
-        ),
+        "relationships": relationships,
+        "relationships_summary": relationships_summary,
         "developmental_stage": (
             developmental_state.current_stage if developmental_state is not None else "nascent"
         ),

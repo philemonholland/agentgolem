@@ -622,6 +622,10 @@ async def test_run_calibration_protocol_updates_state_and_graph(
         assert any("Calibration correction:" in node.text for node in goal_nodes)
         assert any("abstract synthesis" in node.text.lower() for node in risk_nodes)
         assert any("Calibration commitment:" in node.text for node in identity_nodes)
+
+        heartbeat_text = (settings.data_dir / "heartbeat.md").read_text(encoding="utf-8")
+        assert "Completed VowOS Calibration protocol" in heartbeat_text
+        assert "Updated internal_state and self_model from calibration" in heartbeat_text
     finally:
         await close_db(db)
 

@@ -2569,6 +2569,7 @@ class MainLoop:
                 origin="calibration_protocol",
                 label="VowOS Calibration",
             )
+            await self._write_calibration_heartbeat(summary)
         except Exception as exc:
             self._emit("❌", f"Calibration failed: {exc}")
             self._logger.error(
@@ -2643,6 +2644,56 @@ class MainLoop:
         self._recent_thoughts = self._recent_thoughts[-50:]
 
         await self._persist_calibration_graph(summary, raw_response)
+
+    async def _write_calibration_heartbeat(
+        self,
+        summary: CalibrationSummary | None,
+    ) -> None:
+        """Write a heartbeat immediately after calibration so the change is visible."""
+        if self.heartbeat_manager is None:
+            return
+
+        recent_actions = ["Completed VowOS Calibration protocol"]
+        changing_priorities: list[str] = []
+        unresolved_questions: list[str] = []
+        memory_mutations = ["Encoded calibration reflection into memory"]
+        contradictions_and_supersessions: list[str] = []
+
+        if summary is not None:
+            if summary.correction:
+                changing_priorities.append(
+                    f"Calibration correction: {summary.correction}"
+                )
+            if summary.commitment:
+                changing_priorities.append(
+                    f"Calibration commitment: {summary.commitment}"
+                )
+            unresolved_questions.extend(summary.drift_signals[:2])
+            memory_mutations.extend(
+                [
+                    "Updated internal_state and self_model from calibration",
+                    "Persisted calibration-derived goal/risk/identity nodes",
+                ]
+            )
+            for vow, score in summary.vow_scores.items():
+                contradictions_and_supersessions.append(
+                    f"{vow}: {score:.1f}/10 alignment"
+                )
+        else:
+            changing_priorities.append(
+                "Calibration completed, but structured parsing failed; "
+                "raw reflection was still stored."
+            )
+
+        summary_payload = HeartbeatSummary(
+            recent_actions=recent_actions,
+            changing_priorities=changing_priorities,
+            unresolved_questions=unresolved_questions,
+            memory_mutations=memory_mutations,
+            contradictions_and_supersessions=contradictions_and_supersessions[:5],
+        )
+        await self.heartbeat_manager.update(summary_payload)
+        self._emit("📝", "Heartbeat refreshed from calibration")
 
     async def _persist_calibration_graph(
         self,

@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 import pytest
 
+from agentgolem.consciousness.relationships import RelationshipStore
 from agentgolem.dashboard.api import DashboardState, create_app
 from agentgolem.identity.heartbeat import HeartbeatManager
 from agentgolem.identity.soul import SoulManager
@@ -21,7 +22,6 @@ from agentgolem.memory.store import SQLiteMemoryStore
 from agentgolem.runtime.interrupts import InterruptManager
 from agentgolem.runtime.state import RuntimeState
 from agentgolem.tools.base import ApprovalGate
-
 
 # ---------------------------------------------------------------------------
 # Helpers & fixtures
@@ -276,6 +276,59 @@ def renamed_council_state(tmp_path: Path) -> DashboardState:
 
 
 @pytest.fixture()
+def relationship_label_state(tmp_path: Path) -> DashboardState:
+    state = _make_council_state(tmp_path)
+    primary = _make_council_agent(
+        tmp_path,
+        "Council-1",
+        "awake",
+        "Listening",
+        current_name="Aurora",
+        name_history=["Council-1", "Aurora"],
+    )
+    primary._relationship_store = RelationshipStore.from_dict(
+        {
+            "Council-4": {
+                "peer_name": "Council-4",
+                "aliases": ["Council-4"],
+                "trust": 0.6,
+                "shared_experiences": ["legacy resonance"],
+                "interaction_count": 2,
+                "communication_compatibility": 0.6,
+            },
+            "Karuna": {
+                "peer_name": "Karuna",
+                "aliases": ["Council-4", "Karuna"],
+                "trust": 0.9,
+                "shared_experiences": ["renamed exchange"],
+                "interaction_count": 1,
+                "communication_compatibility": 0.9,
+            },
+        }
+    )
+    state.agents = [
+        primary,
+        _make_council_agent(
+            tmp_path,
+            "Council-4",
+            "awake",
+            "Reflecting",
+            current_name="Karuna",
+            name_history=["Council-4", "Karuna"],
+        ),
+        _make_council_agent(
+            tmp_path,
+            "Council-7",
+            "awake",
+            "Reflecting",
+            current_name="Karuna",
+            name_history=["Council-7", "Karuna"],
+        ),
+    ]
+    return state
+
+
+@pytest.fixture()
 async def client(dashboard_state: DashboardState) -> Any:
     app = create_app(dashboard_state)
     transport = httpx.ASGITransport(app=app)
@@ -294,6 +347,14 @@ async def council_client(council_state: DashboardState) -> Any:
 @pytest.fixture()
 async def renamed_council_client(renamed_council_state: DashboardState) -> Any:
     app = create_app(renamed_council_state)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
+@pytest.fixture()
+async def relationship_label_client(relationship_label_state: DashboardState) -> Any:
+    app = create_app(relationship_label_state)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
@@ -380,6 +441,21 @@ async def test_get_council_agent_resolves_alias_after_rename(
     data = resp.json()
     assert data["name"] == "Aurora"
     assert data["initial_name"] == "Council-1"
+
+
+async def test_get_council_agent_normalizes_stale_relationship_labels(
+    relationship_label_client: httpx.AsyncClient,
+) -> None:
+    resp = await relationship_label_client.get("/api/council/agents/Council-1")
+    assert resp.status_code == 200
+    data = resp.json()
+
+    assert list(data["relationships"]) == ["Council-4"]
+    relationship = data["relationships"]["Council-4"]
+    assert relationship["peer_name"] == "Karuna (Council-4)"
+    assert relationship["interaction_count"] == 3
+    assert set(relationship["aliases"]) >= {"Council-4", "Karuna"}
+    assert "Karuna (Council-4)" in data["relationships_summary"]
 
 
 async def test_get_setting_with_history(council_client: httpx.AsyncClient) -> None:
