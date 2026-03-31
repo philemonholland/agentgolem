@@ -32,6 +32,12 @@
             <div style="display: flex; justify-content: space-between; gap: 1rem; align-items: center; flex-wrap: wrap;">
                 <div>
                     <strong>{{ agent.name }}</strong>
+                    {% if agent.initial_name and agent.initial_name != agent.name %}
+                    <div class="muted" style="font-size: 0.78rem;">Originally {{ agent.initial_name }}</div>
+                    {% endif %}
+                    {% if agent.aliases %}
+                    <div class="muted" style="font-size: 0.72rem; opacity: 0.8;">Aliases: {{ agent.aliases | join(", ") }}</div>
+                    {% endif %}
                     {% if agent.ethical_vector %}
                     <div class="muted">{{ agent.ethical_vector }}</div>
                     {% endif %}
@@ -98,8 +104,9 @@
             {% for peer_name, peer in agent.relationships.items() %}
             {% if peer is mapping %}
             {% set trust = peer.get("trust", 0.5) %}
+            {% set peer_display = peer.get("peer_name", peer_name) %}
             <div class="cog-row">
-                <span class="cog-label" style="min-width:6rem;">{{ peer_name | truncate(12, True, "…") }}</span>
+                <span class="cog-label" style="min-width:6rem;" title="{{ peer_name }}">{{ peer_display | truncate(12, True, "…") }}</span>
                 <div class="cog-bar-track" title="Trust: {{ '%.0f'|format(trust * 100) }}%">
                     <div class="cog-bar-fill cog-bar-fill--{{ 'green' if trust > 0.6 else ('red' if trust < 0.4 else 'blue') }}" style="width:{{ (trust * 100) | int }}%"></div>
                 </div>

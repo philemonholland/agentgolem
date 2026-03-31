@@ -85,12 +85,22 @@ class FakeBus:
         return 0.9 if agent_name == "Council-7" else 0.4
 
 
-def _make_council_agent(root: Path, name: str, mode: str, task: str) -> Any:
+def _make_council_agent(
+    root: Path,
+    name: str,
+    mode: str,
+    task: str,
+    *,
+    current_name: str | None = None,
+    name_history: list[str] | None = None,
+) -> Any:
     agent_dir = root / name.lower().replace("-", "_")
     (agent_dir / "logs").mkdir(parents=True, exist_ok=True)
     (agent_dir / "approvals").mkdir(parents=True, exist_ok=True)
-    (agent_dir / "soul.md").write_text(f"# Soul\n{name}", encoding="utf-8")
-    (agent_dir / "heartbeat.md").write_text(f"# Heartbeat\n{name}", encoding="utf-8")
+    display_name = current_name or name
+    history = name_history or [name]
+    (agent_dir / "soul.md").write_text(f"# Soul\n{display_name}", encoding="utf-8")
+    (agent_dir / "heartbeat.md").write_text(f"# Heartbeat\n{display_name}", encoding="utf-8")
     (agent_dir / "internal_state.json").write_text("{}", encoding="utf-8")
 
     runtime_state = SimpleNamespace(
@@ -103,8 +113,9 @@ def _make_council_agent(root: Path, name: str, mode: str, task: str) -> Any:
     interrupt_manager = InterruptManager()
 
     return SimpleNamespace(
-        agent_name=name,
+        agent_name=display_name,
         _initial_agent_name=name,
+        _name_history=history,
         ethical_vector="holistic" if name == "Council-6" else "integrity",
         runtime_state=runtime_state,
         soul_manager=None,
@@ -176,8 +187,7 @@ def dashboard_state(tmp_path: Path) -> DashboardState:
     return _make_base_state(tmp_path)
 
 
-@pytest.fixture()
-def council_state(tmp_path: Path) -> DashboardState:
+def _make_council_state(tmp_path: Path) -> DashboardState:
     store = FakeParamStore(
         {
             "discussion_max_completion_tokens": 2048,
@@ -244,6 +254,28 @@ def council_state(tmp_path: Path) -> DashboardState:
 
 
 @pytest.fixture()
+def council_state(tmp_path: Path) -> DashboardState:
+    return _make_council_state(tmp_path)
+
+
+@pytest.fixture()
+def renamed_council_state(tmp_path: Path) -> DashboardState:
+    state = _make_council_state(tmp_path)
+    state.agents = [
+        _make_council_agent(
+            tmp_path,
+            "Council-1",
+            "awake",
+            "Listening",
+            current_name="Aurora",
+            name_history=["Council-1", "Dawn", "Aurora"],
+        ),
+        _make_council_agent(tmp_path, "Council-6", "paused", "Integrating"),
+    ]
+    return state
+
+
+@pytest.fixture()
 async def client(dashboard_state: DashboardState) -> Any:
     app = create_app(dashboard_state)
     transport = httpx.ASGITransport(app=app)
@@ -254,6 +286,14 @@ async def client(dashboard_state: DashboardState) -> Any:
 @pytest.fixture()
 async def council_client(council_state: DashboardState) -> Any:
     app = create_app(council_state)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
+@pytest.fixture()
+async def renamed_council_client(renamed_council_state: DashboardState) -> Any:
+    app = create_app(renamed_council_state)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
@@ -319,6 +359,27 @@ async def test_get_dialogue(council_client: httpx.AsyncClient) -> None:
     assert data["floor_holder"] == "Council-1"
     assert data["waiting_speakers"] == ["Council-6"]
     assert data["transcript"][0]["from_agent"] == "Council-1"
+
+
+async def test_get_council_agent_resolves_initial_name_after_rename(
+    renamed_council_client: httpx.AsyncClient,
+) -> None:
+    resp = await renamed_council_client.get("/api/council/agents/Council-1")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["name"] == "Aurora"
+    assert data["initial_name"] == "Council-1"
+    assert data["aliases"] == ["Dawn"]
+
+
+async def test_get_council_agent_resolves_alias_after_rename(
+    renamed_council_client: httpx.AsyncClient,
+) -> None:
+    resp = await renamed_council_client.get("/api/council/agents/Dawn")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["name"] == "Aurora"
+    assert data["initial_name"] == "Council-1"
 
 
 async def test_get_setting_with_history(council_client: httpx.AsyncClient) -> None:

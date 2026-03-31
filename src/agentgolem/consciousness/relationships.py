@@ -41,7 +41,9 @@ MAX_DISAGREEMENTS: int = 10
 class PeerRelationship:
     """Rich relationship model between this agent and one peer."""
 
-    peer_name: str
+    peer_id: str = ""
+    peer_name: str = ""
+    aliases: list[str] = field(default_factory=list)
     trust: float = TRUST_INITIAL
     intellectual_debt: float = 0.0  # positive = I owe them, negative = they owe me
     shared_experiences: list[str] = field(default_factory=list)
@@ -49,6 +51,16 @@ class PeerRelationship:
     last_interaction_tick: int = 0
     interaction_count: int = 0
     communication_compatibility: float = COMPATIBILITY_INITIAL
+
+    def __post_init__(self) -> None:
+        if not self.peer_id and self.peer_name:
+            self.peer_id = self.peer_name
+        if not self.peer_name and self.peer_id:
+            self.peer_name = self.peer_id
+        if not self.aliases:
+            self.aliases = [self.peer_name]
+        elif self.peer_name.lower() not in {alias.lower() for alias in self.aliases}:
+            self.aliases.append(self.peer_name)
 
     def resonance(self) -> float:
         """Compute a single resonance score (0–1) for this relationship.
@@ -90,6 +102,21 @@ class PeerRelationship:
         filtered = {k: v for k, v in data.items() if k in known}
         return cls(**filtered)
 
+    def update_identity(
+        self,
+        peer_name: str | None = None,
+        aliases: list[str] | None = None,
+    ) -> None:
+        """Refresh the current display name while preserving alias history."""
+        if not peer_name:
+            peer_name = self.peer_name
+        self.peer_name = peer_name
+        known = {alias.lower() for alias in self.aliases}
+        for alias in [peer_name, *(aliases or [])]:
+            if alias and alias.lower() not in known:
+                self.aliases.append(alias)
+                known.add(alias.lower())
+
 
 # ---------------------------------------------------------------------------
 # Relationship Store — manages all relationships for one agent
@@ -101,34 +128,57 @@ class RelationshipStore:
 
     relationships: dict[str, PeerRelationship] = field(default_factory=dict)
 
-    def get_or_create(self, peer_name: str) -> PeerRelationship:
-        if peer_name not in self.relationships:
-            self.relationships[peer_name] = PeerRelationship(peer_name=peer_name)
-        return self.relationships[peer_name]
+    def get_or_create(
+        self,
+        peer_id: str,
+        peer_name: str | None = None,
+        aliases: list[str] | None = None,
+    ) -> PeerRelationship:
+        key = self._resolve_key(peer_id, peer_name, aliases)
+        if key is None:
+            rel = PeerRelationship(peer_id=peer_id, peer_name=peer_name or peer_id)
+            rel.update_identity(peer_name or peer_id, aliases)
+            self.relationships[peer_id] = rel
+            return rel
+
+        rel = self.relationships[key]
+        if key != peer_id:
+            self.relationships.pop(key)
+            self.relationships[peer_id] = rel
+        rel.peer_id = peer_id or rel.peer_id
+        rel.update_identity(peer_name or rel.peer_name, aliases)
+        return rel
+
+    def get(self, peer_key: str) -> PeerRelationship | None:
+        """Return a relationship by stable id, current name, or alias."""
+        resolved = self._resolve_key(peer_key)
+        if resolved is None:
+            return None
+        return self.relationships.get(resolved)
 
     def get_resonance_dict(self) -> dict[str, float]:
         """Export resonance values for emotional contagion."""
-        return {name: rel.resonance() for name, rel in self.relationships.items()}
+        return {rel.peer_name: rel.resonance() for rel in self.relationships.values()}
 
     def prompt_context(self, peer_name: str) -> str:
         """Build prompt context for a specific peer relationship."""
-        rel = self.relationships.get(peer_name)
+        rel = self.get(peer_name)
         if rel is None:
             return f"You haven't interacted with {peer_name} yet."
-        return f"Your relationship with {peer_name}: {rel.prompt_summary()}"
+        return f"Your relationship with {rel.peer_name}: {rel.prompt_summary()}"
 
     def all_relationships_summary(self) -> str:
         """Brief summary of all relationships for identity preamble."""
         if not self.relationships:
             return ""
         lines = []
-        for name, rel in sorted(
+        for _, rel in sorted(
             self.relationships.items(),
             key=lambda x: x[1].interaction_count,
             reverse=True,
         ):
             if rel.interaction_count > 0:
-                lines.append(f"- {name}: {rel.prompt_summary()}")
+                lines.append(f"- {rel.peer_name}: {rel.prompt_summary()}")
         if not lines:
             return ""
         return "Peer relationships:\n" + "\n".join(lines[:5])
@@ -143,7 +193,15 @@ class RelationshipStore:
         rels = {}
         for name, rel_data in data.items():
             if isinstance(rel_data, dict):
-                rels[name] = PeerRelationship.from_dict(rel_data)
+                rel = PeerRelationship.from_dict(rel_data)
+                key = rel.peer_id or name
+                if not rel.peer_id:
+                    rel.peer_id = name
+                if not rel.peer_name:
+                    rel.peer_name = name
+                if not rel.aliases:
+                    rel.aliases = [rel.peer_name]
+                rels[key] = rel
         return cls(relationships=rels)
 
     def save(self, path: Path) -> None:
@@ -159,6 +217,27 @@ class RelationshipStore:
             return cls.from_dict(data)
         except (json.JSONDecodeError, TypeError, KeyError):
             return cls()
+
+    def _resolve_key(
+        self,
+        peer_id: str,
+        peer_name: str | None = None,
+        aliases: list[str] | None = None,
+    ) -> str | None:
+        if peer_id in self.relationships:
+            return peer_id
+        target_names = {
+            candidate.lower()
+            for candidate in [peer_name or peer_id, *(aliases or [])]
+            if candidate
+        }
+        for key, rel in self.relationships.items():
+            if rel.peer_id == peer_id:
+                return key
+            aliases = [rel.peer_name, *rel.aliases, key]
+            if target_names & {alias.lower() for alias in aliases if alias}:
+                return key
+        return None
 
 
 # ---------------------------------------------------------------------------

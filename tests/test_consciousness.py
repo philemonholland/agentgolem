@@ -1380,6 +1380,20 @@ class TestRelationalDepth:
         assert "Council-2" in summary
         assert "Peer relationships" in summary
 
+    def test_relationship_store_merges_renamed_peer(self) -> None:
+        from agentgolem.consciousness.relationships import RelationshipStore
+
+        store = RelationshipStore()
+        rel = store.get_or_create("Council-2", "Anvaya")
+        rel.trust = 0.83
+
+        merged = store.get_or_create("Council-2", "Lumina")
+
+        assert merged.trust == pytest.approx(0.83)
+        assert merged.peer_name == "Lumina"
+        assert "Anvaya" in merged.aliases
+        assert "Lumina" in merged.aliases
+
     def test_load_missing_returns_empty(self, tmp_path: Path) -> None:
         from agentgolem.consciousness.relationships import RelationshipStore
         store = RelationshipStore.load(tmp_path / "nope.json")

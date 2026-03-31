@@ -81,6 +81,14 @@ async def test_resolve_name(bus: InterAgentBus) -> None:
     assert bus.resolve_name("nobody") is None
 
 
+async def test_rename_keeps_old_alias_resolvable(bus: InterAgentBus) -> None:
+    bus.rename("Bob", "Robert")
+    assert bus.resolve_name("Bob") == "Robert"
+    assert bus.resolve_name("Robert") == "Robert"
+    assert bus.get_registered_id("Bob") == "Bob"
+    assert bus.get_registered_id("Robert") == "Bob"
+
+
 async def test_get_peers(bus: InterAgentBus) -> None:
     peers = bus.get_peers("Alice")
     assert set(peers) == {"Bob", "Carol"}
@@ -255,7 +263,16 @@ async def test_rename_preserves_priority() -> None:
     bus.register("Council-6", discussion_priority=DISCUSSION_PRIORITY_INITIATOR)
     bus.rename("Council-6", "Harmony")
     assert bus.get_priority("Harmony") == DISCUSSION_PRIORITY_INITIATOR
-    assert bus.get_priority("Council-6") == DISCUSSION_PRIORITY_DEFAULT  # old name gone
+    assert bus.get_priority("Council-6") == DISCUSSION_PRIORITY_INITIATOR
+
+
+async def test_rename_rejects_reserved_name() -> None:
+    bus = InterAgentBus()
+    bus.register("Council-1")
+    bus.register("Council-2")
+    bus.rename("Council-1", "Aletheia")
+    with pytest.raises(ValueError, match="already reserved"):
+        bus.rename("Council-2", "Aletheia")
 
 
 async def test_priority_floor_ordering() -> None:

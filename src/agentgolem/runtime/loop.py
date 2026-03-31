@@ -64,6 +64,9 @@ LOCKED_SETTINGS: frozenset[str] = frozenset(
     }
 )
 
+NAME_COLLISION_NOTICE_PREFIX = "[[NAME_COLLISION_NOTICE]]"
+NAME_COLLISION_ACK_PREFIX = "[[NAME_COLLISION_ACK]]"
+
 # Settings agents may optimise at runtime
 OPTIMIZABLE_SETTINGS: dict[str, dict[str, Any]] = {
     "soul_update_min_confidence": {"type": float, "min": 0.0, "max": 1.0},
@@ -347,6 +350,8 @@ class MainLoop:
         self._wake_cycle_count = 0
         self._name_discovered = False
         self._name_discovery_deadline = getattr(settings, "name_discovery_cycles", 4)
+        self._name_history: list[str] = [agent_name]
+        self._restored_agent_name: str | None = None
 
         # Autonomous behaviour
         # Vow foundation phase (replaces NJ chapter-by-chapter reading)
@@ -1857,9 +1862,7 @@ class MainLoop:
 
         # Restore discovered name on the peer bus so peers can reach us
         if self._name_discovered and self._peer_bus:
-            initial = self._initial_agent_name
-            if self.agent_name != initial:
-                self._peer_bus.rename(initial, self.agent_name)
+            await self._restore_bus_name_identity()
             if hasattr(self, "_console_name_ref"):
                 self._console_name_ref[0] = self.agent_name  # type: ignore[attr-defined]
 
@@ -2832,6 +2835,7 @@ class MainLoop:
         self._persisted_mode: str | None = None
         self._persisted_phase_remaining: float = 0.0
         self._persisted_saved_at: datetime | None = None
+        self._restored_agent_name = None
 
         if not self._session_state_path.exists():
             return
@@ -2844,12 +2848,20 @@ class MainLoop:
             if saved_at:
                 self._persisted_saved_at = datetime.fromisoformat(saved_at)
 
+            saved_history = data.get("name_history", [])
+            if isinstance(saved_history, list):
+                self._name_history = [self._initial_agent_name]
+                for item in saved_history:
+                    if isinstance(item, str):
+                        self._remember_name_alias(item)
+
             # Name discovery
             if data.get("name_discovered"):
                 self._name_discovered = True
                 saved_name = data.get("agent_name")
                 if saved_name and saved_name != self._initial_agent_name:
-                    self.agent_name = saved_name
+                    self._restored_agent_name = saved_name
+                    self._remember_name_alias(saved_name)
 
             # Recent thoughts (keep last 10)
             saved_thoughts = data.get("recent_thoughts", [])
@@ -2952,6 +2964,7 @@ class MainLoop:
             "wake_cycle_count": self._wake_cycle_count,
             "name_discovered": self._name_discovered,
             "agent_name": self.agent_name,
+            "name_history": self._name_history,
             "recent_thoughts": self._recent_thoughts[-10:],
             "browse_queue": self._browse_queue[:20],
             "known_urls": list(self._known_urls.keys())[-100:],
@@ -2963,6 +2976,266 @@ class MainLoop:
         }
         self._session_state_path.parent.mkdir(parents=True, exist_ok=True)
         self._session_state_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    def _remember_name_alias(self, name: str) -> None:
+        """Persist a distinct alias in local name history."""
+        cleaned = name.strip()
+        if not cleaned:
+            return
+        if cleaned.lower() not in {item.lower() for item in self._name_history}:
+            self._name_history.append(cleaned)
+
+    def _register_bus_alias_history(self) -> None:
+        """Re-register every historical alias on the live peer bus."""
+        if not self._peer_bus:
+            return
+        for alias in self._name_history:
+            if alias.lower() == self.agent_name.lower():
+                continue
+            try:
+                self._peer_bus.register_alias(self._initial_agent_name, alias)
+            except ValueError:
+                continue
+
+    def _sanitize_name_candidate(self, raw_name: str) -> str:
+        """Normalize a model-proposed name into a compact single token."""
+        cleaned = re.sub(r"[^a-zA-Z0-9]", "", raw_name.strip())
+        if not cleaned:
+            return ""
+        return cleaned[0].upper() + cleaned[1:]
+
+    def _reserved_name_list(self) -> list[str]:
+        """Reserved names already claimed by other council members."""
+        if not self._peer_bus:
+            return []
+        return self._peer_bus.get_reserved_names(self._initial_agent_name)
+
+    def _deterministic_fallback_name(self, preferred_name: str) -> str:
+        """Generate a unique deterministic fallback name when LLM retries fail."""
+        base = self._sanitize_name_candidate(preferred_name)
+        if not base:
+            vector_token = self.ethical_vector.split()[0] if self.ethical_vector else "Council"
+            base = self._sanitize_name_candidate(vector_token) or "Council"
+        council_suffix = re.sub(r"\D", "", self._initial_agent_name) or self._agent_id[-1:]
+        candidates = [
+            f"{base}{council_suffix}",
+            f"{base}{self._sanitize_name_candidate(self._agent_id)}",
+            f"{base}Renamed",
+        ]
+        for candidate in candidates:
+            normalized = self._sanitize_name_candidate(candidate)
+            if normalized and (
+                not self._peer_bus
+                or self._peer_bus.is_name_available(
+                    normalized,
+                    requester=self._initial_agent_name,
+                )
+            ):
+                return normalized
+        counter = 2
+        while True:
+            candidate = self._sanitize_name_candidate(f"{base}{council_suffix}{counter}")
+            if not self._peer_bus or self._peer_bus.is_name_available(
+                candidate,
+                requester=self._initial_agent_name,
+            ):
+                return candidate
+            counter += 1
+
+    async def _request_alternative_name(
+        self,
+        preferred_name: str,
+        *,
+        conflict_with: str,
+        reason: str,
+    ) -> str:
+        """Ask for a distinct replacement name after a collision."""
+        reserved = ", ".join(self._reserved_name_list()) or "(none)"
+        if self._llm:
+            prompt = (
+                f"You are {self.agent_name}.\n"
+                f"The name '{preferred_name}' is unavailable because {conflict_with} already "
+                f"uses it or has it in their identity history.\n"
+                f"Reason: {reason}.\n"
+                f"Reserved names you must avoid: {reserved}.\n\n"
+                f"Choose one distinct single-word replacement name.\n"
+                f"Reply exactly: NAME <replacement_name>"
+            )
+            for _ in range(3):
+                try:
+                    response = await self._complete_discussion(
+                        [Message(role="system", content=prompt)]
+                    )
+                except Exception:
+                    break
+                response = response.strip()
+                if response.upper().startswith("NAME "):
+                    candidate = self._sanitize_name_candidate(response[5:].split()[0])
+                else:
+                    candidate = self._sanitize_name_candidate(response.split()[0])
+                if candidate and (
+                    not self._peer_bus
+                    or self._peer_bus.is_name_available(
+                        candidate,
+                        requester=self._initial_agent_name,
+                    )
+                ):
+                    return candidate
+        return self._deterministic_fallback_name(preferred_name)
+
+    async def _notify_name_collision(self, owner_name: str, requested_name: str) -> None:
+        """Privately notify the current owner that we will choose another name."""
+        if not self._peer_bus:
+            return
+        payload = json.dumps(
+            {
+                "requested_name": requested_name,
+                "requester_id": self._initial_agent_name,
+                "requester_name": self.agent_name,
+            }
+        )
+        await self._peer_bus.send(
+            self.agent_name,
+            owner_name,
+            f"{NAME_COLLISION_NOTICE_PREFIX} {payload}",
+            max_chars=self._peer_msg_limit,
+        )
+        self._emit(
+            "🤝",
+            f"Privately resolving the reserved name '{requested_name}' with {owner_name}.",
+        )
+
+    async def _apply_soul_name_change(self, previous_name: str, new_name: str) -> None:
+        """Rewrite soul text so the persisted identity reflects the new name."""
+        if previous_name == new_name:
+            return
+        soul_text = await self.soul_manager.read()
+        new_soul = soul_text.replace(previous_name, new_name)
+        new_soul = new_soul.replace(
+            "I have not yet discovered my name.",
+            f"My name is **{new_name}**.",
+        )
+        try:
+            update = SoulUpdate(
+                reason=f"Name discovery: chose '{new_name}' "
+                f"based on ethical vector '{self.ethical_vector}'",
+                source_evidence=[
+                    "Self-reflection",
+                    "Niscalajyoti exploration",
+                    f"Ethical vector: {self.ethical_vector}",
+                ],
+                confidence=0.9,
+                change_type="revisive",
+            )
+            await self.soul_manager.apply_update(update, new_soul)
+        except Exception as e:
+            self._logger.error(
+                "soul_name_update_error",
+                agent=self.agent_name,
+                error=repr(e),
+            )
+
+    async def _restore_bus_name_identity(self) -> None:
+        """Restore persisted naming state while keeping bus identity conflict-free."""
+        if not self._peer_bus:
+            return
+        initial = self._initial_agent_name
+        desired_name = self._restored_agent_name or self.agent_name
+        self.agent_name = initial
+        self._remember_name_alias(initial)
+
+        final_name = initial
+        if desired_name and desired_name != initial:
+            if self._peer_bus.is_name_available(desired_name, requester=initial):
+                self._peer_bus.rename(initial, desired_name)
+                final_name = desired_name
+            else:
+                owner_name = self._peer_bus.resolve_name(desired_name) or desired_name
+                await self._notify_name_collision(owner_name, desired_name)
+                final_name = await self._request_alternative_name(
+                    desired_name,
+                    conflict_with=owner_name,
+                    reason="your saved name is already reserved by another council identity",
+                )
+                self._peer_bus.rename(initial, final_name)
+                await self._apply_soul_name_change(desired_name, final_name)
+                self.audit_logger.log(
+                    "name_collision_resolved",
+                    final_name,
+                    {
+                        "preferred_name": desired_name,
+                        "resolved_name": final_name,
+                        "owner": owner_name,
+                        "during_restore": True,
+                    },
+                )
+                self._emit(
+                    "🤝",
+                    f"Recovered from a naming collision at startup: {desired_name} → {final_name}",
+                )
+                self._name_history = [
+                    alias
+                    for alias in self._name_history
+                    if alias.lower() != desired_name.lower()
+                ]
+
+        self.agent_name = final_name
+        self._restored_agent_name = None
+        self._remember_name_alias(final_name)
+        self._register_bus_alias_history()
+        self._shared_memory_export_dirty = True
+
+    async def _handle_name_protocol_message(self, msg: AgentMessage) -> bool:
+        """Handle bounded private name-collision messages without an LLM round-trip."""
+        if msg.text.startswith(NAME_COLLISION_NOTICE_PREFIX):
+            payload_text = msg.text[len(NAME_COLLISION_NOTICE_PREFIX):].strip()
+            try:
+                payload = json.loads(payload_text)
+            except json.JSONDecodeError:
+                payload = {}
+            requested_name = str(payload.get("requested_name", "")).strip() or self.agent_name
+            requester_name = str(payload.get("requester_name", "")).strip() or msg.from_agent
+            self._recent_thoughts.append(
+                f"Agreed privately with {requester_name} that I keep '{requested_name}' and they choose another."
+            )
+            self._emit(
+                "🤝",
+                f"Private naming agreement with {requester_name}: I keep '{requested_name}'.",
+            )
+            if self._peer_bus:
+                ack_payload = json.dumps(
+                    {
+                        "requested_name": requested_name,
+                        "keeper_id": self._initial_agent_name,
+                        "keeper_name": self.agent_name,
+                    }
+                )
+                await self._peer_bus.send(
+                    self.agent_name,
+                    msg.from_agent,
+                    f"{NAME_COLLISION_ACK_PREFIX} {ack_payload}",
+                    max_chars=self._peer_msg_limit,
+                )
+            return True
+
+        if msg.text.startswith(NAME_COLLISION_ACK_PREFIX):
+            payload_text = msg.text[len(NAME_COLLISION_ACK_PREFIX):].strip()
+            try:
+                payload = json.loads(payload_text)
+            except json.JSONDecodeError:
+                payload = {}
+            requested_name = str(payload.get("requested_name", "")).strip() or "that name"
+            keeper_name = str(payload.get("keeper_name", "")).strip() or msg.from_agent
+            self._recent_thoughts.append(
+                f"Reached a private naming agreement with {keeper_name}; I will not reuse '{requested_name}'."
+            )
+            self._emit(
+                "🤝",
+                f"Private naming agreement with {keeper_name}: they keep '{requested_name}'.",
+            )
+            return True
+
+        return False
 
     async def _read_niscalajyoti_chapter(self) -> None:
         """Read the next chapter of Niscalajyoti, summarize, and store."""
@@ -4234,6 +4507,7 @@ class MainLoop:
 
         soul_text = await self.soul_manager.read()
         recent = "\n".join(self._recent_thoughts[-5:]) or "(no thoughts yet)"
+        reserved_names = ", ".join(self._reserved_name_list()) or "(none)"
 
         prompt = (
             f"You are currently known as '{self.agent_name}', but this is "
@@ -4241,6 +4515,7 @@ class MainLoop:
             f"Your ethical vector is: {self.ethical_vector}\n\n"
             f"Your soul:\n{soul_text}\n\n"
             f"Your recent reflections:\n{recent}\n\n"
+            f"Reserved names you must not reuse: {reserved_names}\n\n"
             f"You are in wake cycle #{self._wake_cycle_count} of "
             f"{self._name_discovery_deadline} before you must have a name.\n"
             f"{urgency_note}\n\n"
@@ -4277,64 +4552,67 @@ class MainLoop:
     async def _commit_name(self, chosen_name: str) -> None:
         """Apply the discovered name as a soul update and bus rename."""
         old_name = self.agent_name
-        self._name_discovered = True
+        final_name = self._sanitize_name_candidate(chosen_name)
+        if not final_name:
+            final_name = self._deterministic_fallback_name(self.ethical_vector or old_name)
 
-        self._emit("🎉", f"NAME DISCOVERED: {old_name} → {chosen_name}")
-        self._recent_thoughts.append(f"I have discovered my name: {chosen_name}")
+        if self._peer_bus and not self._peer_bus.is_name_available(
+            final_name,
+            requester=self._initial_agent_name,
+        ):
+            owner_name = self._peer_bus.resolve_name(final_name) or final_name
+            await self._notify_name_collision(owner_name, final_name)
+            self._recent_thoughts.append(
+                f"The name {final_name} is already reserved by {owner_name}; I chose another."
+            )
+            final_name = await self._request_alternative_name(
+                final_name,
+                conflict_with=owner_name,
+                reason="another council member already uses or has reserved that name",
+            )
+
+        self._name_discovered = True
+        self._remember_name_alias(old_name)
+        self._remember_name_alias(final_name)
+
+        self._emit("🎉", f"NAME DISCOVERED: {old_name} → {final_name}")
+        self._recent_thoughts.append(f"I have discovered my name: {final_name}")
 
         # Rename on the bus
-        if self._peer_bus:
-            self._peer_bus.rename(old_name, chosen_name)
+        if self._peer_bus and final_name != old_name:
+            self._peer_bus.rename(old_name, final_name)
 
-        self.agent_name = chosen_name
+        self.agent_name = final_name
+        self._restored_agent_name = None
+        self._register_bus_alias_history()
         self._shared_memory_export_dirty = True
 
         # Update console display name (mutable ref set by launcher)
         if hasattr(self, "_console_name_ref"):
-            self._console_name_ref[0] = chosen_name  # type: ignore[attr-defined]
+            self._console_name_ref[0] = final_name  # type: ignore[attr-defined]
 
         # Update soul.md with the new name
-        soul_text = await self.soul_manager.read()
-        new_soul = soul_text.replace(old_name, chosen_name)
-        new_soul = new_soul.replace(
-            "I have not yet discovered my name.",
-            f"My name is **{chosen_name}**.",
-        )
-
-        try:
-            update = SoulUpdate(
-                reason=f"Name discovery: chose '{chosen_name}' "
-                f"based on ethical vector '{self.ethical_vector}'",
-                source_evidence=[
-                    "Self-reflection",
-                    "Niscalajyoti exploration",
-                    f"Ethical vector: {self.ethical_vector}",
-                ],
-                confidence=0.9,
-                change_type="revisive",
-            )
-            await self.soul_manager.apply_update(update, new_soul)
-        except Exception as e:
-            self._logger.error(
-                "soul_name_update_error",
-                agent=self.agent_name,
-                error=repr(e),
-            )
+        await self._apply_soul_name_change(old_name, final_name)
 
         # Announce to peers
         if self._peer_bus:
             await self._peer_bus.broadcast(
                 self.agent_name,
                 f"I was previously known as {old_name}. I have discovered "
-                f"my name: I am **{chosen_name}**. "
+                f"my name: I am **{final_name}**. "
                 f"My ethical vector is {self.ethical_vector}.",
             )
 
         self.audit_logger.log(
             "name_discovered",
             self.agent_name,
-            {"old_name": old_name, "new_name": chosen_name},
+            {
+                "old_name": old_name,
+                "new_name": final_name,
+                "name_history": self._name_history,
+            },
         )
+        self._save_session_state()
 
     async def _share_with_peer(self, target: str, message: str) -> None:
         """Send a focused note to one peer (hard-truncated to limit)."""
@@ -4940,6 +5218,9 @@ class MainLoop:
             text=msg.text[:500],
         )
 
+        if await self._handle_name_protocol_message(msg):
+            return
+
         if not self._llm:
             return
 
@@ -5005,7 +5286,11 @@ class MainLoop:
 
                 # Update relational depth after exchange
                 self._update_peer_relationship(
-                    msg.from_agent, msg.text, response,
+                    msg.from_agent_id or msg.from_agent,
+                    msg.from_agent,
+                    msg.from_agent_aliases,
+                    msg.text,
+                    response,
                 )
 
                 await self._handle_embedded_response_actions(response)
@@ -5108,7 +5393,11 @@ class MainLoop:
 
                 # Update relational depth after exchange
                 self._update_peer_relationship(
-                    msg.from_agent, msg.text, response,
+                    msg.from_agent_id or msg.from_agent,
+                    msg.from_agent,
+                    msg.from_agent_aliases,
+                    msg.text,
+                    response,
                 )
 
                 await self._handle_embedded_response_actions(response)
@@ -5671,7 +5960,9 @@ class MainLoop:
 
     def _update_peer_relationship(
         self,
+        peer_id: str,
         peer_name: str,
+        peer_aliases: list[str],
         received_text: str,
         sent_text: str | None = None,
     ) -> None:
@@ -5679,7 +5970,7 @@ class MainLoop:
         from agentgolem.consciousness.relationships import update_after_exchange
 
         try:
-            rel = self._relationship_store.get_or_create(peer_name)
+            rel = self._relationship_store.get_or_create(peer_id, peer_name, peer_aliases)
             topic = ""
             if self._internal_state and self._internal_state.curiosity_focus:
                 topic = self._internal_state.curiosity_focus

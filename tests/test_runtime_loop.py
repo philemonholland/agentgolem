@@ -16,7 +16,11 @@ from agentgolem.config.secrets import Secrets
 from agentgolem.config.settings import Settings
 from agentgolem.llm.base import Message
 from agentgolem.runtime.bus import AgentMessage, InterAgentBus
-from agentgolem.runtime.loop import MainLoop
+from agentgolem.runtime.loop import (
+    NAME_COLLISION_ACK_PREFIX,
+    NAME_COLLISION_NOTICE_PREFIX,
+    MainLoop,
+)
 from agentgolem.runtime.state import AgentMode
 from agentgolem.tools.base import ApprovalGate
 
@@ -320,6 +324,82 @@ async def test_acquire_floor_with_reflection_times_out_and_falls_back(
     assert holds_floor is False
     assert bus.floor_holder == "Holder"
     bus.release_floor()
+
+
+async def test_name_collision_notice_gets_private_ack(
+    loop_env: tuple[Settings, Secrets, Path],
+) -> None:
+    settings, secrets, tmp_path = loop_env
+    bus = InterAgentBus()
+    bus.register("Council-1")
+    bus.register("Council-2")
+
+    owner = MainLoop(
+        settings=Settings(data_dir=tmp_path / "owner", awake_duration_minutes=9999),
+        secrets=secrets,
+        agent_name="Council-1",
+        peer_bus=bus,
+    )
+
+    msg = AgentMessage(
+        from_agent="Council-2",
+        from_agent_id="Council-2",
+        text=(
+            f"{NAME_COLLISION_NOTICE_PREFIX} "
+            + json.dumps(
+                {
+                    "requested_name": "Aurora",
+                    "requester_id": "Council-2",
+                    "requester_name": "Council-2",
+                }
+            )
+        ),
+    )
+
+    await owner._respond_to_peer(msg)
+
+    ack = await bus.receive("Council-2")
+    assert ack is not None
+    assert ack.text.startswith(NAME_COLLISION_ACK_PREFIX)
+    assert "Aurora" in ack.text
+
+
+async def test_commit_name_chooses_unique_fallback_when_name_is_reserved(
+    loop_env: tuple[Settings, Secrets, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, secrets, tmp_path = loop_env
+    bus = InterAgentBus()
+    bus.register("Council-1")
+    bus.register("Council-2")
+    bus.rename("Council-2", "Aletheia")
+
+    loop = MainLoop(
+        settings=Settings(data_dir=tmp_path / "requester", awake_duration_minutes=9999),
+        secrets=secrets,
+        agent_name="Council-1",
+        peer_bus=bus,
+    )
+
+    async def fake_read() -> str:
+        return "I have not yet discovered my name."
+
+    async def fake_apply_update(*args, **kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(loop.soul_manager, "read", fake_read)
+    monkeypatch.setattr(loop.soul_manager, "apply_update", fake_apply_update)
+
+    await loop._commit_name("Aletheia")
+
+    assert loop.agent_name == "Aletheia1"
+    assert bus.resolve_name("Council-1") == "Aletheia1"
+    assert loop._name_history == ["Council-1", "Aletheia1"]
+
+    notice = await bus.receive("Aletheia")
+    assert notice is not None
+    assert notice.text.startswith(NAME_COLLISION_NOTICE_PREFIX)
+    assert "Aletheia" in notice.text
 
 
 async def test_complete_discussion_sleeps_agent_on_http_error(

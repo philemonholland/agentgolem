@@ -272,9 +272,28 @@ def _legacy_agent(st: DashboardState) -> Any | None:
 
 def _get_agents(st: DashboardState) -> list[Any]:
     if st.agents:
-        return sorted(st.agents, key=lambda a: getattr(a, "agent_name", ""))
+        return sorted(
+            st.agents,
+            key=lambda a: getattr(a, "_initial_agent_name", getattr(a, "agent_name", "")),
+        )
     legacy = _legacy_agent(st)
     return [legacy] if legacy is not None else []
+
+
+def _agent_identity_names(agent: Any) -> list[str]:
+    names: list[str] = []
+    for value in (
+        getattr(agent, "agent_name", ""),
+        getattr(agent, "_initial_agent_name", ""),
+    ):
+        if value and value.lower() not in {item.lower() for item in names}:
+            names.append(value)
+    for alias in getattr(agent, "_name_history", []):
+        if isinstance(alias, str) and alias and alias.lower() not in {
+            item.lower() for item in names
+        }:
+            names.append(alias)
+    return names
 
 
 def _resolve_agent(st: DashboardState, agent_name: str | None = None) -> Any | None:
@@ -286,8 +305,7 @@ def _resolve_agent(st: DashboardState, agent_name: str | None = None) -> Any | N
 
     requested = agent_name.strip().lower()
     for agent in agents:
-        name = getattr(agent, "agent_name", "").lower()
-        if name == requested or name.startswith(requested):
+        if requested in {name.lower() for name in _agent_identity_names(agent)}:
             return agent
     return None
 
@@ -423,7 +441,7 @@ def _setting_history(st: DashboardState, key: str | None = None, limit: int | No
             entries.append(
                 {
                     "timestamp": entry.get("timestamp"),
-                    "agent": entry.get("target_id", getattr(agent, "agent_name", "?")),
+                    "agent": getattr(agent, "agent_name", "?"),
                     "mutation_type": mutation,
                     "key": setting_key,
                     "reason": evidence.get("reason", ""),
@@ -641,6 +659,14 @@ def _build_agent_snapshot(st: DashboardState, agent: Any) -> dict[str, Any]:
     return {
         "name": getattr(agent, "agent_name", "?"),
         "initial_name": getattr(agent, "_initial_agent_name", getattr(agent, "agent_name", "?")),
+        "aliases": [
+            alias
+            for alias in getattr(agent, "_name_history", [])
+            if isinstance(alias, str)
+            and alias
+            and alias.lower() != getattr(agent, "agent_name", "").lower()
+            and alias.lower() != getattr(agent, "_initial_agent_name", "").lower()
+        ],
         "ethical_vector": getattr(agent, "ethical_vector", ""),
         "mode": getattr(getattr(runtime_state, "mode", None), "value", "unknown"),
         "current_task": getattr(runtime_state, "current_task", None),

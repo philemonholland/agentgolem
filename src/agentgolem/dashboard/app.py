@@ -44,7 +44,9 @@ def _selected_snapshot(
         return None
     if selected_agent_name:
         for agent in agents:
-            if agent["name"] == selected_agent_name:
+            names = [agent.get("name", ""), agent.get("initial_name", "")]
+            names.extend(agent.get("aliases", []))
+            if selected_agent_name.lower() in {name.lower() for name in names if name}:
                 return agent
     return agents[0]
 
@@ -56,7 +58,9 @@ def _selected_agent_name(
     agents = overview.get("agents", [])
     if request_agent:
         for agent in agents:
-            if agent["name"].lower() == request_agent.lower():
+            names = [agent.get("name", ""), agent.get("initial_name", "")]
+            names.extend(agent.get("aliases", []))
+            if request_agent.lower() in {name.lower() for name in names if name}:
                 return agent["name"]
     return agents[0]["name"] if agents else None
 
