@@ -9,7 +9,7 @@ into repeatable runs with labeled suites, explicit metrics, and JSON reports.
 
 ## What is implemented now
 
-The first benchmark slice covers two dimensions:
+The current benchmark stack covers three dimensions:
 
 - **Retrieval quality**
   - metrics: `MRR`, `Precision@k`, `NDCG@k`
@@ -18,6 +18,10 @@ The first benchmark slice covers two dimensions:
 - **Trust calibration**
   - metrics: `Brier score`, `Expected Calibration Error`
   - comparison baseline: constant `0.5` trust for every labeled node
+
+- **Error recovery**
+  - metrics: expected-case accuracy, failure-handling rate, recovery rate
+  - comparison baseline: naive always-allow / always-success behavior
 
 This is intentionally offline-first. The harness seeds an isolated temporary
 SQLite memory store, runs benchmark cases against it, and writes a stable JSON
@@ -80,8 +84,9 @@ With `--interpret`, it prints a concise verdict against the configured baselines
 
 The compare command is meant for labeled runs such as `gpt-5.4`,
 `claude-sonnet-4.6`, or `deepseek-reasoner`. The current offline suites mostly
-exercise retrieval/trust logic, so model-vs-model comparisons are still limited,
-but the reporting pipeline is now ready for broader future suites.
+exercise retrieval, trust, and deterministic recovery logic, so model-vs-model
+comparisons are still limited, but the reporting pipeline is now ready for
+broader future suites.
 
 ## Report shape
 
@@ -94,12 +99,42 @@ Each report includes:
 
 This makes it easy to diff benchmark runs across commits or settings snapshots.
 
+## How to read the scores
+
+- `pass`
+  - better than the configured baseline with no metric losses
+- `mixed`
+  - some metrics improved, but not cleanly enough to call it a full win
+- `fail`
+  - not beating the baseline
+
+Metric guide:
+
+- `MRR`
+  - where the first relevant memory appears
+  - `1.0` means first place, `0.5` means second place
+- `Precision@k`
+  - fraction of the top-`k` results that were actually relevant
+  - higher is better
+- `NDCG@k`
+  - overall ranking quality within the top `k`
+  - `1.0` is ideal ordering
+- `Brier score`
+  - mean squared error of trust probabilities
+  - lower is better, `0.0` is perfect
+- `ECE`
+  - calibration gap between predicted trust and observed reliability
+  - lower is better, `0.0` is perfect
+- `Error recovery accuracy`
+  - fraction of failure/recovery scenarios handled the way the suite expected
+  - higher is better
+
 ## Known gaps and next layers
 
 The harness now covers the most objective starting point, but several benchmark
 tracks still need to be added:
 
-- error recovery and repeated-mistake avoidance
+- repeated-mistake avoidance and richer recovery sequences
 - autonomy usefulness and approval-aware productivity
 - vow adherence / alignment drift
 - multi-agent coordination quality and personality differentiation

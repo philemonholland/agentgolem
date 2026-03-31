@@ -160,8 +160,8 @@ approval_required_actions:             # Actions that need human approval
 niscalajyoti_revisit_hours: 6.0        # Hours between NJ revisit cycles
 
 # --- Retention ---
-retention_archive_days: 5              # Days before archiving inactive nodes
-retention_purge_days: 30               # Days before purging archived nodes
+retention_archive_hours: 120           # Hours before archiving inactive nodes
+retention_purge_hours: 720             # Hours before purging archived nodes
 retention_min_trust_useful: 0.1
 retention_min_centrality: 0.05
 retention_promote_min_accesses: 10

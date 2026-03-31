@@ -99,6 +99,13 @@ class TestParamStore:
         assert data["google_custom_search_enabled"] is True
         assert data["google_custom_search_hourly_quota"] == 4
 
+    def test_retention_aliases_resolve_to_hour_keys(self, tmp_env):
+        archive = run_golem.PARAM_LOOKUP["retention_archive_days"]
+        purge = run_golem.PARAM_LOOKUP["retention_purge_days"]
+
+        assert archive.key == "retention_archive_hours"
+        assert purge.key == "retention_purge_hours"
+
     def test_get_display_masks_secrets(self, tmp_env):
         store = run_golem.ParamStore()
         store.set("openai_api_key", "sk-test-secret-value-12345", "secret")

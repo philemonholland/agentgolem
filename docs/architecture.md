@@ -531,7 +531,7 @@ Memory nodes move through three lifecycle stages:
 
 ```
   ACTIVE ───────────▶ ARCHIVED ──────────▶ PURGED
-       (archive_days)          (purge_days)
+       (archive_hours)         (purge_hours)
 ```
 
 ### Stage Transitions

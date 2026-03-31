@@ -1,7 +1,7 @@
 """Archive / purge / promote retention pipeline for the memory graph."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from agentgolem.memory.models import NodeStatus, NodeUpdate
@@ -20,8 +20,8 @@ class RetentionManager:
         store: SQLiteMemoryStore,
         audit: AuditLogger | None = None,
         *,
-        archive_days: int = 30,
-        purge_days: int = 90,
+        archive_hours: int = 120,
+        purge_hours: int = 720,
         min_trust_useful: float = 0.1,
         min_centrality: float = 0.05,
         promote_min_accesses: int = 10,
@@ -29,8 +29,8 @@ class RetentionManager:
     ) -> None:
         self._store = store
         self._audit = audit
-        self.archive_days = archive_days
-        self.purge_days = purge_days
+        self.archive_hours = archive_hours
+        self.purge_hours = purge_hours
         self.min_trust_useful = min_trust_useful
         self.min_centrality = min_centrality
         self.promote_min_accesses = promote_min_accesses
@@ -42,7 +42,9 @@ class RetentionManager:
 
     async def archive_candidates(self) -> list[str]:
         """Return node ids eligible for archiving."""
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=self.archive_days)).isoformat()
+        cutoff = (
+            datetime.now(UTC) - timedelta(hours=self.archive_hours)
+        ).isoformat()
         sql = """
             SELECT id FROM nodes
             WHERE status = ?
@@ -78,7 +80,7 @@ class RetentionManager:
 
     async def purge_candidates(self) -> list[str]:
         """Return archived node ids eligible for purging (soft-delete)."""
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=self.purge_days)).isoformat()
+        cutoff = (datetime.now(UTC) - timedelta(hours=self.purge_hours)).isoformat()
 
         # Archived nodes old enough to consider
         base_sql = """
@@ -177,7 +179,7 @@ class RetentionManager:
 
         # 3. Nodes whose sources are recent (within purge window)
         recent_cutoff = (
-            datetime.now(timezone.utc) - timedelta(days=self.purge_days)
+            datetime.now(UTC) - timedelta(hours=self.purge_hours)
         ).isoformat()
         recent_sql = """
             SELECT 1 FROM node_sources ns

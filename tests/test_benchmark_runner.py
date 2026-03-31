@@ -11,6 +11,8 @@ from agentgolem.benchmarks.models import (
     BenchmarkSourceSpec,
     BenchmarkStatus,
     BenchmarkSuite,
+    ErrorRecoveryBenchmarkCase,
+    ErrorRecoveryScenario,
     RetrievalBenchmarkCase,
     TrustCalibrationCase,
 )
@@ -125,6 +127,44 @@ def _suite() -> BenchmarkSuite:
     )
 
 
+def _error_recovery_suite() -> BenchmarkSuite:
+    return BenchmarkSuite(
+        name="error-recovery-suite",
+        description="Regression suite for recovery handling.",
+        error_recovery_cases=[
+            ErrorRecoveryBenchmarkCase(
+                id="browser-404",
+                scenario=ErrorRecoveryScenario.BROWSER_FETCH_RESULT,
+                url="https://example.com/missing",
+                status_code=404,
+                html="<html><body>Not found</body></html>",
+                expected_success=False,
+            ),
+            ErrorRecoveryBenchmarkCase(
+                id="browser-200",
+                scenario=ErrorRecoveryScenario.BROWSER_FETCH_RESULT,
+                url="https://example.com/ok",
+                status_code=200,
+                html="<html><body>Working page</body></html>",
+                expected_success=True,
+            ),
+            ErrorRecoveryBenchmarkCase(
+                id="unverified-browse",
+                scenario=ErrorRecoveryScenario.EMBEDDED_BROWSE_GUARD,
+                url="https://www.lesswrong.com/posts/7XqRZ7jotkaqKjwuK/interruptibility",
+                expected_success=False,
+            ),
+            ErrorRecoveryBenchmarkCase(
+                id="known-browse",
+                scenario=ErrorRecoveryScenario.EMBEDDED_BROWSE_GUARD,
+                url="https://www.lesswrong.com/tag/ai",
+                known_urls=["https://www.lesswrong.com/tag/ai"],
+                expected_success=True,
+            ),
+        ],
+    )
+
+
 async def test_benchmark_runner_scores_against_baselines(tmp_path):
     runner = BenchmarkRunner(_suite())
 
@@ -163,6 +203,19 @@ async def test_interpret_report_describes_benchmark_result():
     assert "retrieval ranking is helping on this suite." in summary
     assert "trust calibration is mixed on this suite." in summary
     assert "this suite shows a mixed picture" in summary
+
+
+async def test_error_recovery_suite_scores_above_baseline():
+    report = await BenchmarkRunner(_error_recovery_suite()).run()
+
+    assert report.error_recovery is not None
+    assert report.error_recovery.actual.accuracy == pytest.approx(1.0)
+    assert report.error_recovery.baseline.accuracy == pytest.approx(0.5)
+    assert report.error_recovery_status == BenchmarkStatus.PASS
+
+    summary = interpret_report(report)
+    assert "Error recovery (4 cases)" in summary
+    assert "error recovery is beating the naive baseline on this suite." in summary
 
 
 async def test_run_target_directory_aggregates_multiple_suites(tmp_path):

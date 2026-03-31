@@ -240,12 +240,13 @@ python -m agentgolem.benchmarks benchmarks --output data\benchmarks\claude-sonne
 python -m agentgolem.benchmarks.compare data\benchmarks\gpt-5.4.json data\benchmarks\claude-sonnet-4.6.json
 ```
 
-The current harness benchmarks retrieval ranking and trust calibration against
-simple baselines so you can measure whether the architecture is helping or just
-adding complexity.
+The current harness benchmarks retrieval ranking, trust calibration, and
+deterministic error recovery against simple baselines so you can measure whether
+the architecture is helping or just adding complexity.
 
-Current suites are still mostly memory/trust focused, so cross-model comparison
-becomes more meaningful as autonomy, dialogue, and tool-use benchmark tracks are added.
+Current suites are still mostly memory/trust/recovery focused, so cross-model
+comparison becomes more meaningful as autonomy, dialogue, and tool-use benchmark
+tracks are added.
 
 For the suite format and planned extensions, see
 **[docs/benchmarking.md](docs/benchmarking.md)**.

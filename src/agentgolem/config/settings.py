@@ -2,10 +2,28 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+_HOURS_PER_DAY = 24
+
+
+def _migrate_legacy_retention_fields(data: dict) -> list[str]:
+    migrated: list[str] = []
+    legacy_map = {
+        "retention_archive_days": "retention_archive_hours",
+        "retention_purge_days": "retention_purge_hours",
+    }
+    for old_key, new_key in legacy_map.items():
+        if old_key in data:
+            if new_key not in data:
+                data[new_key] = int(data[old_key]) * _HOURS_PER_DAY
+                migrated.append(new_key)
+            del data[old_key]
+    return migrated
 
 
 class Settings(BaseModel):
@@ -42,8 +60,8 @@ class Settings(BaseModel):
     )
     niscalajyoti_revisit_hours: float = 6.0
     calibration_interval_hours: float = 24.0
-    retention_archive_days: int = 5
-    retention_purge_days: int = 30
+    retention_archive_hours: int = 120
+    retention_purge_hours: int = 720
     retention_min_trust_useful: float = 0.1
     retention_min_centrality: float = 0.05
     retention_promote_min_accesses: int = 10
@@ -109,6 +127,15 @@ class Settings(BaseModel):
     llm_discussion_provider: str = ""
     llm_code_provider: str = ""
 
+    @model_validator(mode="before")
+    @classmethod
+    def _convert_legacy_retention_units(cls, value: object) -> object:
+        if isinstance(value, Mapping):
+            data = dict(value)
+            _migrate_legacy_retention_fields(data)
+            return data
+        return value
+
 
 def load_settings(config_path: Path = Path("config/settings.yaml")) -> Settings:
     """Load settings from YAML file, falling back to defaults."""
@@ -136,8 +163,9 @@ def migrate_settings(config_path: Path = Path("config/settings.yaml")) -> list[s
     else:
         data = {}
 
-    defaults = Settings()
     added: list[str] = []
+    added.extend(_migrate_legacy_retention_fields(data))
+    defaults = Settings()
 
     for field_name in Settings.model_fields:
         if field_name not in data:

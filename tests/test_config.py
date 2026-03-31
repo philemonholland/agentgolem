@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 import pytest
+import yaml
 from pydantic import SecretStr
 
 from agentgolem.config import (
@@ -87,6 +88,8 @@ def test_settings_defaults_when_no_yaml(tmp_path: Path) -> None:
     assert settings.google_custom_search_hourly_quota == 4
     assert settings.google_custom_search_bucket_capacity == 100
     assert settings.google_custom_search_safe == "active"
+    assert settings.retention_archive_hours == 120
+    assert settings.retention_purge_hours == 720
     assert settings.approval_required_actions == ["email_send", "moltbook_send"]
 
 
@@ -239,7 +242,41 @@ def test_migrate_settings_creates_file(tmp_path: Path) -> None:
     assert reloaded.agent_count == 7
 
 
-# ── 9. repo_root setting ────────────────────────────────────────────────
+# ── 9. retention migration ──────────────────────────────────────────────
+
+
+def test_load_settings_converts_legacy_retention_days_to_hours(tmp_path: Path) -> None:
+    yaml_path = tmp_path / "settings.yaml"
+    yaml_path.write_text(
+        "retention_archive_days: 5\nretention_purge_days: 30\n",
+        encoding="utf-8",
+    )
+
+    settings = load_settings(yaml_path)
+
+    assert settings.retention_archive_hours == 120
+    assert settings.retention_purge_hours == 720
+
+
+def test_migrate_settings_rewrites_legacy_retention_days_keys(tmp_path: Path) -> None:
+    yaml_path = tmp_path / "settings.yaml"
+    yaml_path.write_text(
+        "retention_archive_days: 5\nretention_purge_days: 30\n",
+        encoding="utf-8",
+    )
+
+    added = migrate_settings(yaml_path)
+    rewritten = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+
+    assert "retention_archive_hours" in added
+    assert "retention_purge_hours" in added
+    assert rewritten["retention_archive_hours"] == 120
+    assert rewritten["retention_purge_hours"] == 720
+    assert "retention_archive_days" not in rewritten
+    assert "retention_purge_days" not in rewritten
+
+
+# ── 10. repo_root setting ───────────────────────────────────────────────
 
 
 def test_repo_root_default_empty() -> None:

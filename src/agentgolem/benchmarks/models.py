@@ -18,6 +18,13 @@ class BenchmarkStatus(StrEnum):
     NOT_APPLICABLE = "not_applicable"
 
 
+class ErrorRecoveryScenario(StrEnum):
+    """Scenario types for error-recovery benchmarking."""
+
+    BROWSER_FETCH_RESULT = "browser_fetch_result"
+    EMBEDDED_BROWSE_GUARD = "embedded_browse_guard"
+
+
 class BenchmarkSourceSpec(BaseModel):
     """A source to seed into an offline benchmark store."""
 
@@ -73,6 +80,18 @@ class TrustCalibrationCase(BaseModel):
     expected_reliable: bool
 
 
+class ErrorRecoveryBenchmarkCase(BaseModel):
+    """A deterministic recovery scenario with an expected outcome."""
+
+    id: str
+    scenario: ErrorRecoveryScenario
+    url: str
+    expected_success: bool
+    status_code: int | None = None
+    html: str = ""
+    known_urls: list[str] = Field(default_factory=list)
+
+
 class BenchmarkSuite(BaseModel):
     """A complete offline benchmark suite."""
 
@@ -83,6 +102,7 @@ class BenchmarkSuite(BaseModel):
     edges: list[BenchmarkEdgeSpec] = Field(default_factory=list)
     retrieval_cases: list[RetrievalBenchmarkCase] = Field(default_factory=list)
     trust_cases: list[TrustCalibrationCase] = Field(default_factory=list)
+    error_recovery_cases: list[ErrorRecoveryBenchmarkCase] = Field(default_factory=list)
 
 
 class RetrievalAggregateMetrics(BaseModel):
@@ -147,6 +167,36 @@ class TrustBenchmarkReport(BaseModel):
     cases: list[TrustCaseResult]
 
 
+class ErrorRecoveryAggregateMetrics(BaseModel):
+    """Aggregate error-recovery metrics."""
+
+    accuracy: float
+    expected_failure_handling_rate: float
+    expected_recovery_rate: float
+
+
+class ErrorRecoveryCaseResult(BaseModel):
+    """Per-case error-recovery outcomes."""
+
+    case_id: str
+    scenario: ErrorRecoveryScenario
+    url: str
+    expected_success: bool
+    actual_success: bool
+    baseline_success: bool
+    matched_expectation: bool
+    baseline_matched_expectation: bool
+
+
+class ErrorRecoveryBenchmarkReport(BaseModel):
+    """Error recovery benchmark summary."""
+
+    case_count: int
+    actual: ErrorRecoveryAggregateMetrics
+    baseline: ErrorRecoveryAggregateMetrics
+    cases: list[ErrorRecoveryCaseResult]
+
+
 class BenchmarkReport(BaseModel):
     """Full benchmark report for a single suite."""
 
@@ -156,8 +206,10 @@ class BenchmarkReport(BaseModel):
     generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     retrieval: RetrievalBenchmarkReport | None = None
     trust: TrustBenchmarkReport | None = None
+    error_recovery: ErrorRecoveryBenchmarkReport | None = None
     retrieval_status: BenchmarkStatus = BenchmarkStatus.NOT_APPLICABLE
     trust_status: BenchmarkStatus = BenchmarkStatus.NOT_APPLICABLE
+    error_recovery_status: BenchmarkStatus = BenchmarkStatus.NOT_APPLICABLE
     overall_status: BenchmarkStatus = BenchmarkStatus.NOT_APPLICABLE
 
 

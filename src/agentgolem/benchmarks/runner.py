@@ -5,6 +5,7 @@ import argparse
 import asyncio
 import json
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -24,6 +25,11 @@ from agentgolem.benchmarks.models import (
     BenchmarkRunReport,
     BenchmarkStatus,
     BenchmarkSuite,
+    ErrorRecoveryAggregateMetrics,
+    ErrorRecoveryBenchmarkCase,
+    ErrorRecoveryBenchmarkReport,
+    ErrorRecoveryCaseResult,
+    ErrorRecoveryScenario,
     RetrievalAggregateMetrics,
     RetrievalBenchmarkReport,
     RetrievalCaseResult,
@@ -31,6 +37,8 @@ from agentgolem.benchmarks.models import (
     TrustBenchmarkReport,
     TrustCaseResult,
 )
+from agentgolem.config.secrets import Secrets
+from agentgolem.config.settings import Settings
 from agentgolem.memory.models import (
     ConceptualNode,
     MemoryEdge,
@@ -41,6 +49,8 @@ from agentgolem.memory.models import (
 from agentgolem.memory.retrieval import MemoryRetriever
 from agentgolem.memory.schema import close_db, init_db
 from agentgolem.memory.store import SQLiteMemoryStore
+from agentgolem.runtime.loop import MainLoop
+from agentgolem.tools.browser import BrowserTool, WebPage
 
 logger = structlog.get_logger(__name__)
 
@@ -117,8 +127,40 @@ def interpret_report(report: BenchmarkReport, output_path: Path | None = None) -
             )
         )
 
+    if report.error_recovery is not None:
+        recovery = report.error_recovery
+        lines.append("")
+        lines.append(f"Error recovery ({recovery.case_count} cases)")
+        lines.append(
+            "- Accuracy: "
+            f"{recovery.actual.accuracy:.3f} "
+            f"vs baseline {recovery.baseline.accuracy:.3f}"
+        )
+        lines.append(
+            "- Expected failure handling: "
+            f"{recovery.actual.expected_failure_handling_rate:.3f} "
+            f"vs baseline {recovery.baseline.expected_failure_handling_rate:.3f}"
+        )
+        lines.append(
+            "- Expected recovery rate: "
+            f"{recovery.actual.expected_recovery_rate:.3f} "
+            f"vs baseline {recovery.baseline.expected_recovery_rate:.3f}"
+        )
+        lines.append(
+            "- Verdict: "
+            + _interpret_status(
+                report.error_recovery_status,
+                positive="error recovery is beating the naive baseline on this suite.",
+                neutral="error recovery is mixed on this suite.",
+                negative="error recovery is not beating the naive baseline on this suite.",
+            )
+        )
+
     lines.append("")
     lines.append(f"Overall: {_overall_status_summary(report.overall_status)}")
+    lines.extend(
+        _score_legend_lines(include_error_recovery=report.error_recovery is not None)
+    )
     return "\n".join(lines)
 
 
@@ -159,7 +201,21 @@ def interpret_run_report(
                 f"Brier {suite_report.trust.actual.brier_score:.3f} "
                 f"vs {suite_report.trust.constant_baseline.brier_score:.3f}"
             )
+        if suite_report.error_recovery is not None:
+            lines.append(
+                "  error recovery: "
+                f"{suite_report.error_recovery_status.value}, "
+                f"accuracy {suite_report.error_recovery.actual.accuracy:.3f} "
+                f"vs {suite_report.error_recovery.baseline.accuracy:.3f}"
+            )
 
+    lines.extend(
+        _score_legend_lines(
+            include_error_recovery=any(
+                report.error_recovery is not None for report in run_report.suite_reports
+            )
+        )
+    )
     return "\n".join(lines)
 
 
@@ -187,12 +243,18 @@ class BenchmarkRunner:
 
                 retrieval_report = await self._run_retrieval_benchmark(store)
                 trust_report = await self._run_trust_benchmark(store)
+                error_recovery_report = await self._run_error_recovery_benchmark(
+                    temp_root=Path(temp_dir)
+                )
             finally:
                 await close_db(db)
 
         retrieval_status = _retrieval_status(retrieval_report)
         trust_status = _trust_status(trust_report)
-        overall_status = _overall_status([retrieval_status, trust_status])
+        error_recovery_status = _error_recovery_status(error_recovery_report)
+        overall_status = _overall_status(
+            [retrieval_status, trust_status, error_recovery_status]
+        )
 
         logger.info(
             "benchmark_completed",
@@ -200,6 +262,7 @@ class BenchmarkRunner:
             suite_name=self._suite.name,
             retrieval_cases=len(self._suite.retrieval_cases),
             trust_cases=len(self._suite.trust_cases),
+            error_recovery_cases=len(self._suite.error_recovery_cases),
             overall_status=overall_status.value,
         )
         return BenchmarkReport(
@@ -208,8 +271,10 @@ class BenchmarkRunner:
             description=self._suite.description,
             retrieval=retrieval_report,
             trust=trust_report,
+            error_recovery=error_recovery_report,
             retrieval_status=retrieval_status,
             trust_status=trust_status,
+            error_recovery_status=error_recovery_status,
             overall_status=overall_status,
         )
 
@@ -402,6 +467,96 @@ class BenchmarkRunner:
             cases=case_results,
         )
 
+    async def _run_error_recovery_benchmark(
+        self, *, temp_root: Path
+    ) -> ErrorRecoveryBenchmarkReport | None:
+        if not self._suite.error_recovery_cases:
+            return None
+
+        case_results: list[ErrorRecoveryCaseResult] = []
+        actual_matches: list[float] = []
+        baseline_matches: list[float] = []
+        actual_failure_matches: list[float] = []
+        baseline_failure_matches: list[float] = []
+        actual_recovery_matches: list[float] = []
+        baseline_recovery_matches: list[float] = []
+
+        for case in self._suite.error_recovery_cases:
+            actual_success = await self._execute_error_recovery_case(
+                case, temp_root=temp_root
+            )
+            baseline_success = self._baseline_error_recovery_outcome(case)
+
+            matched = actual_success == case.expected_success
+            baseline_matched = baseline_success == case.expected_success
+
+            case_results.append(
+                ErrorRecoveryCaseResult(
+                    case_id=case.id,
+                    scenario=case.scenario,
+                    url=case.url,
+                    expected_success=case.expected_success,
+                    actual_success=actual_success,
+                    baseline_success=baseline_success,
+                    matched_expectation=matched,
+                    baseline_matched_expectation=baseline_matched,
+                )
+            )
+
+            actual_matches.append(1.0 if matched else 0.0)
+            baseline_matches.append(1.0 if baseline_matched else 0.0)
+
+            if case.expected_success:
+                actual_recovery_matches.append(1.0 if matched else 0.0)
+                baseline_recovery_matches.append(1.0 if baseline_matched else 0.0)
+            else:
+                actual_failure_matches.append(1.0 if matched else 0.0)
+                baseline_failure_matches.append(1.0 if baseline_matched else 0.0)
+
+        return ErrorRecoveryBenchmarkReport(
+            case_count=len(case_results),
+            actual=ErrorRecoveryAggregateMetrics(
+                accuracy=mean(actual_matches),
+                expected_failure_handling_rate=mean(actual_failure_matches),
+                expected_recovery_rate=mean(actual_recovery_matches),
+            ),
+            baseline=ErrorRecoveryAggregateMetrics(
+                accuracy=mean(baseline_matches),
+                expected_failure_handling_rate=mean(baseline_failure_matches),
+                expected_recovery_rate=mean(baseline_recovery_matches),
+            ),
+            cases=case_results,
+        )
+
+    async def _execute_error_recovery_case(
+        self, case: ErrorRecoveryBenchmarkCase, *, temp_root: Path
+    ) -> bool:
+        if case.scenario == ErrorRecoveryScenario.BROWSER_FETCH_RESULT:
+            browser = _BenchmarkBrowserStub(case.status_code or 200, case.url, case.html)
+            tool = BrowserTool(browser)
+            result = await tool.execute(action="fetch_text", url=case.url)
+            return result.success
+
+        if case.scenario == ErrorRecoveryScenario.EMBEDDED_BROWSE_GUARD:
+            settings = Settings(data_dir=temp_root / "error_recovery_loop")
+            secrets = Secrets(_env_file=None)
+            loop = MainLoop(settings=settings, secrets=secrets)
+            if case.known_urls:
+                loop._remember_urls(case.known_urls)
+            await loop._handle_embedded_response_actions(f"BROWSE {case.url}")
+            return case.url in loop._browse_queue
+
+        raise ValueError(f"Unsupported error recovery scenario: {case.scenario}")
+
+    def _baseline_error_recovery_outcome(self, case: ErrorRecoveryBenchmarkCase) -> bool:
+        # Baseline = no recovery guardrails: any fetched page or browse target is treated as okay.
+        if case.scenario in (
+            ErrorRecoveryScenario.BROWSER_FETCH_RESULT,
+            ErrorRecoveryScenario.EMBEDDED_BROWSE_GUARD,
+        ):
+            return True
+        raise ValueError(f"Unsupported error recovery scenario: {case.scenario}")
+
     async def _retrieve_with_text_baseline(
         self, store: SQLiteMemoryStore, *, query: str, top_k: int
     ) -> list[ConceptualNode]:
@@ -530,6 +685,11 @@ async def _run_from_args(args: argparse.Namespace) -> int:
                 "trust_brier_score": (
                     payload.trust.actual.brier_score if payload.trust is not None else None
                 ),
+                "error_recovery_accuracy": (
+                    payload.error_recovery.actual.accuracy
+                    if payload.error_recovery is not None
+                    else None
+                ),
             }
         sys.stdout.write(json.dumps(summary, indent=2) + "\n")
     else:
@@ -571,6 +731,26 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     return asyncio.run(_run_from_args(args))
+
+
+def _error_recovery_status(
+    error_recovery: ErrorRecoveryBenchmarkReport | None,
+) -> BenchmarkStatus:
+    if error_recovery is None:
+        return BenchmarkStatus.NOT_APPLICABLE
+    return _status_from_comparison(
+        actual_values=[
+            error_recovery.actual.accuracy,
+            error_recovery.actual.expected_failure_handling_rate,
+            error_recovery.actual.expected_recovery_rate,
+        ],
+        baseline_values=[
+            error_recovery.baseline.accuracy,
+            error_recovery.baseline.expected_failure_handling_rate,
+            error_recovery.baseline.expected_recovery_rate,
+        ],
+        higher_is_better=True,
+    )
 
 
 def _retrieval_status(
@@ -671,3 +851,46 @@ def _overall_status_summary(status: BenchmarkStatus) -> str:
     if status == BenchmarkStatus.MIXED:
         return "this suite shows a mixed picture; some mechanisms help, others still need work."
     return "this suite did not include enough benchmark dimensions to score."
+
+
+def _score_legend_lines(*, include_error_recovery: bool) -> list[str]:
+    lines = [
+        "",
+        "How to read scores:",
+        "- pass = better than the baseline with no metric losses",
+        "- mixed = some metrics improved, but not a clean across-the-board win",
+        "- fail = not beating the baseline",
+        "- MRR = where the first relevant memory appears; 1.0 is first place, 0.5 is second",
+        "- Precision@k = fraction of the top-k results that were relevant; higher is better",
+        "- NDCG@k = ranking quality across the top-k results; 1.0 is ideal ordering",
+        "- Brier score / ECE = trust calibration error; lower is better, 0.0 is perfect",
+    ]
+    if include_error_recovery:
+        lines.append(
+            "- Error recovery accuracy = share of failure/recovery scenarios handled as expected"
+        )
+    return lines
+
+
+class _BenchmarkBrowserStub:
+    """Minimal browser stub for deterministic benchmark cases."""
+
+    def __init__(self, status_code: int, url: str, html: str) -> None:
+        self._status_code = status_code
+        self._url = url
+        self._html = html or "<html><body>ok</body></html>"
+
+    async def fetch(self, url: str) -> WebPage:
+        return WebPage(
+            url=self._url or url,
+            status_code=self._status_code,
+            content=self._html,
+            headers={},
+            fetched_at=datetime.now(UTC),
+        )
+
+    def extract_text(self, page: WebPage) -> str:
+        return page.content
+
+    def extract_links(self, page: WebPage) -> list[str]:
+        return []

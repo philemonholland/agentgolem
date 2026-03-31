@@ -47,8 +47,8 @@ approval_required_actions:
 - email_send
 - moltbook_send
 niscalajyoti_revisit_hours: 6.0
-retention_archive_days: 5
-retention_purge_days: 30
+retention_archive_hours: 120
+retention_purge_hours: 720
 retention_min_trust_useful: 0.1
 retention_min_centrality: 0.05
 retention_promote_min_accesses: 10

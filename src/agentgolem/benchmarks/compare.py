@@ -35,11 +35,17 @@ def format_report_comparison(report_paths: list[Path]) -> str:
                 if report.trust is not None
                 else "trust_brier=n/a"
             )
+            error_recovery = (
+                f"error_recovery_accuracy={report.error_recovery.actual.accuracy:.3f}"
+                if report.error_recovery is not None
+                else "error_recovery_accuracy=n/a"
+            )
             lines.append(
                 f"- {label}: overall={report.overall_status.value}, "
                 f"retrieval={report.retrieval_status.value}, "
                 f"trust={report.trust_status.value}, "
-                f"{retrieval}, {trust}"
+                f"error_recovery={report.error_recovery_status.value}, "
+                f"{retrieval}, {trust}, {error_recovery}"
             )
         lines.append("")
 

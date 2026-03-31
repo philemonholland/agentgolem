@@ -340,12 +340,12 @@ trust_useful     ≥ retention_promote_min_trust_useful   (default 0.5)
 Nodes are candidates for archiving when:
 
 ```
-days_since_last_access > retention_archive_days          (default 30)
+hours_since_last_access > retention_archive_hours        (default 120)
 AND trust_useful       < retention_min_trust_useful      (default 0.1)
 AND centrality         < retention_min_centrality        (default 0.05)
 ```
 
-Archived nodes move to purge after `retention_purge_days` (default 90) if no
+Archived nodes move to purge after `retention_purge_hours` (default 720) if no
 promotion occurs and protection rules don't apply.
 
 ---

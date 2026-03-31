@@ -531,18 +531,20 @@ PARAM_DEFS: list[ParamDef] = [
     ),
     # --- Retention ---
     param(
-        "retention_archive_days",
-        "Archive After (days)",
-        "Days before weak nodes are archived",
+        "retention_archive_hours",
+        "Archive After (hours)",
+        "Hours before weak nodes are archived",
         "int",
         "Retention",
+        aliases=("retention_archive_days",),
     ),
     param(
-        "retention_purge_days",
-        "Purge After (days)",
-        "Days before archived nodes are purged",
+        "retention_purge_hours",
+        "Purge After (hours)",
+        "Hours before archived nodes are purged",
         "int",
         "Retention",
+        aliases=("retention_purge_days",),
     ),
     param(
         "retention_min_trust_useful",

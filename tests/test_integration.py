@@ -412,7 +412,7 @@ async def test_archive_candidates_finds_old_low_trust_nodes(db_store):
     store, audit, db = db_store
     rm = RetentionManager(
         store, audit,
-        archive_days=30, purge_days=90,
+        archive_hours=30 * 24, purge_hours=90 * 24,
         min_trust_useful=0.1, min_centrality=0.05,
         promote_min_accesses=10, promote_min_trust_useful=0.5,
     )
@@ -446,7 +446,7 @@ async def test_niscalajyoti_source_protected_from_purge(db_store):
     store, audit, db = db_store
     rm = RetentionManager(
         store, audit,
-        archive_days=30, purge_days=90,
+        archive_hours=30 * 24, purge_hours=90 * 24,
         min_trust_useful=0.1, min_centrality=0.05,
         promote_min_accesses=10, promote_min_trust_useful=0.5,
     )
@@ -766,7 +766,7 @@ async def test_retention_promotes_high_value_nodes(db_store):
     store, audit, db = db_store
     rm = RetentionManager(
         store, audit,
-        archive_days=30, purge_days=90,
+        archive_hours=30 * 24, purge_hours=90 * 24,
         min_trust_useful=0.1, min_centrality=0.05,
         promote_min_accesses=10, promote_min_trust_useful=0.5,
     )
