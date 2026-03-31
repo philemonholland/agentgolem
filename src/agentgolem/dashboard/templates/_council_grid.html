@@ -35,6 +35,12 @@
                     {% if agent.ethical_vector %}
                     <div class="muted">{{ agent.ethical_vector }}</div>
                     {% endif %}
+                    {% if agent.temperament_label %}
+                    <div class="muted" style="font-size: 0.7rem; opacity: 0.7;">{{ agent.temperament_label }}</div>
+                    {% endif %}
+                    {% if agent.developmental_badge %}
+                    <div class="muted" style="font-size: 0.7rem; opacity: 0.8;">{{ agent.developmental_badge }}</div>
+                    {% endif %}
                 </div>
                 <span class="badge badge-{{ agent.mode }}">{{ agent.mode | upper }}</span>
             </div>

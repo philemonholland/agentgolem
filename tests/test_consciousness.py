@@ -598,3 +598,644 @@ class TestSelfModelGraphIntegration:
 
         ctx = await build_graph_context_for_self_model(ekg_store)
         assert "No graph context" in ctx
+
+
+# ── Temperament ─────────────────────────────────────────────────────────
+
+
+class TestTemperament:
+    def test_defaults(self) -> None:
+        from agentgolem.consciousness.temperament import Temperament
+        t = Temperament()
+        assert t.cognitive_style == "systematic"
+        assert t.emotional_baseline == 0.0
+        assert t.risk_appetite == 0.5
+
+    def test_seed_from_ethical_vector(self) -> None:
+        from agentgolem.consciousness.temperament import seed_temperament
+        t = seed_temperament("kindness")
+        assert t.communication_tone == "warm"
+        assert t.social_orientation == "collaborative"
+        assert t.emotional_baseline == 0.2
+
+    def test_seed_adversarial(self) -> None:
+        from agentgolem.consciousness.temperament import seed_temperament
+        t = seed_temperament("good-faith adversarialism")
+        assert t.communication_tone == "provocative"
+        assert t.conflict_response == "debate"
+        assert t.emotional_baseline == -0.2
+
+    def test_seed_unknown_vector_returns_defaults(self) -> None:
+        from agentgolem.consciousness.temperament import seed_temperament
+        t = seed_temperament("unknown vector that doesn't exist")
+        assert t.cognitive_style == "systematic"
+        assert t.emotional_baseline == 0.0
+
+    def test_prompt_injection(self) -> None:
+        from agentgolem.consciousness.temperament import seed_temperament
+        t = seed_temperament("evolution")
+        prompt = t.prompt_injection()
+        assert "provocative" in prompt
+        assert "pattern-seeking" in prompt
+        assert "synthesize" in prompt
+
+    def test_short_label(self) -> None:
+        from agentgolem.consciousness.temperament import seed_temperament
+        t = seed_temperament("unwavering integrity")
+        label = t.short_label()
+        assert "precise" in label
+        assert "analytical" in label
+        assert "challenging" in label
+
+    def test_round_trip_json(self, tmp_path: Path) -> None:
+        from agentgolem.consciousness.temperament import Temperament
+        t = Temperament(
+            cognitive_style="intuitive",
+            communication_tone="warm",
+            emotional_baseline=0.15,
+        )
+        p = tmp_path / "temperament.json"
+        t.save(p)
+        loaded = Temperament.load(p)
+        assert loaded is not None
+        assert loaded.cognitive_style == "intuitive"
+        assert loaded.emotional_baseline == 0.15
+
+    def test_load_missing_returns_none(self, tmp_path: Path) -> None:
+        from agentgolem.consciousness.temperament import Temperament
+        assert Temperament.load(tmp_path / "nonexistent.json") is None
+
+    def test_all_seven_vectors_have_seeds(self) -> None:
+        from agentgolem.consciousness.temperament import TEMPERAMENT_SEEDS
+        expected = {
+            "alleviating woe", "graceful power", "kindness",
+            "unwavering integrity", "evolution",
+            "integration and balance", "good-faith adversarialism",
+        }
+        assert set(TEMPERAMENT_SEEDS.keys()) == expected
+
+    def test_all_seeds_have_distinct_tones(self) -> None:
+        """At least 4 different tones across 7 agents for real divergence."""
+        from agentgolem.consciousness.temperament import TEMPERAMENT_SEEDS
+        tones = {t.communication_tone for t in TEMPERAMENT_SEEDS.values()}
+        assert len(tones) >= 4
+
+
+# ===================================================================
+# Emotional Dynamics Tests
+# ===================================================================
+
+
+class TestEmotionalDynamics:
+    """Tests for the emotional dynamics system (Phase 3)."""
+
+    def test_momentum_smooths_transition(self) -> None:
+        """New valence = 0.7 * proposed + 0.3 * previous."""
+        from agentgolem.consciousness.emotional_dynamics import apply_momentum
+        result = apply_momentum(proposed_valence=1.0, previous_valence=0.0)
+        assert abs(result - 0.7) < 0.01
+
+    def test_momentum_prevents_wild_swing(self) -> None:
+        """Jumping from -1 to +1 should be dampened."""
+        from agentgolem.consciousness.emotional_dynamics import apply_momentum
+        result = apply_momentum(proposed_valence=1.0, previous_valence=-1.0)
+        # 0.7 * 1.0 + 0.3 * (-1.0) = 0.4
+        assert abs(result - 0.4) < 0.01
+
+    def test_momentum_clamped(self) -> None:
+        from agentgolem.consciousness.emotional_dynamics import apply_momentum
+        result = apply_momentum(proposed_valence=2.0, previous_valence=0.5)
+        assert result <= 1.0
+
+    def test_gravity_pulls_toward_baseline(self) -> None:
+        """Valence should drift 5% toward baseline each tick."""
+        from agentgolem.consciousness.emotional_dynamics import apply_gravity
+        result = apply_gravity(current_valence=1.0, baseline=0.0)
+        # delta = 0.0 - 1.0 = -1.0; new = 1.0 + 0.05 * (-1.0) = 0.95
+        assert abs(result - 0.95) < 0.001
+
+    def test_gravity_positive_baseline(self) -> None:
+        """Agent with positive baseline should drift upward."""
+        from agentgolem.consciousness.emotional_dynamics import apply_gravity
+        result = apply_gravity(current_valence=0.0, baseline=0.2)
+        assert result > 0.0
+
+    def test_gravity_at_baseline_is_stable(self) -> None:
+        from agentgolem.consciousness.emotional_dynamics import apply_gravity
+        result = apply_gravity(current_valence=0.2, baseline=0.2)
+        assert abs(result - 0.2) < 0.001
+
+    def test_contagion_applies_peer_influence(self) -> None:
+        from agentgolem.consciousness.emotional_dynamics import apply_contagion
+        result = apply_contagion(
+            own_valence=0.0,
+            peer_valences={"peer-A": 0.8, "peer-B": -0.4},
+            peer_resonance={"peer-A": 1.0, "peer-B": 0.5},
+        )
+        # peer-A: 1.0 * 0.05 * 0.8 = 0.04
+        # peer-B: 0.5 * 0.05 * (-0.4) = -0.01
+        # total influence = 0.03
+        assert abs(result - 0.03) < 0.01
+
+    def test_contagion_empty_peers(self) -> None:
+        from agentgolem.consciousness.emotional_dynamics import apply_contagion
+        result = apply_contagion(own_valence=0.5, peer_valences={}, peer_resonance={})
+        assert result == 0.5
+
+    def test_formative_event_shifts_baseline(self) -> None:
+        from agentgolem.consciousness.emotional_dynamics import (
+            EmotionalDynamicsState, record_formative_event,
+        )
+        state = EmotionalDynamicsState(effective_baseline=0.0, seed_baseline=0.0)
+        new_baseline = record_formative_event(state, tick=5, description="breakthrough", positive=True)
+        assert abs(new_baseline - 0.02) < 0.001
+        assert len(state.formative_events) == 1
+        assert state.formative_events[0].description == "breakthrough"
+
+    def test_formative_negative_event(self) -> None:
+        from agentgolem.consciousness.emotional_dynamics import (
+            EmotionalDynamicsState, record_formative_event,
+        )
+        state = EmotionalDynamicsState(effective_baseline=0.0, seed_baseline=0.0)
+        new_baseline = record_formative_event(state, tick=3, description="rejection", positive=False)
+        assert abs(new_baseline - (-0.02)) < 0.001
+
+    def test_formative_event_respects_max_drift(self) -> None:
+        from agentgolem.consciousness.emotional_dynamics import (
+            EmotionalDynamicsState, record_formative_event, MAX_BASELINE_DRIFT,
+        )
+        state = EmotionalDynamicsState(
+            effective_baseline=0.5, seed_baseline=0.0, cumulative_drift=0.5,
+        )
+        # Already at max drift, shouldn't shift further
+        new_baseline = record_formative_event(state, tick=10, description="praise", positive=True)
+        assert abs(new_baseline - 0.5) < 0.001
+        assert abs(state.cumulative_drift - MAX_BASELINE_DRIFT) < 0.001
+
+    def test_full_emotional_update_pipeline(self) -> None:
+        from agentgolem.consciousness.emotional_dynamics import (
+            EmotionalDynamicsState, full_emotional_update,
+        )
+        dynamics = EmotionalDynamicsState(effective_baseline=0.2, seed_baseline=0.2)
+        result = full_emotional_update(
+            proposed_valence=0.8,
+            previous_valence=0.0,
+            dynamics_state=dynamics,
+        )
+        # Momentum: 0.7 * 0.8 + 0.3 * 0.0 = 0.56
+        # Gravity: 0.56 + 0.05 * (0.2 - 0.56) = 0.56 - 0.018 = 0.542
+        assert 0.4 < result < 0.7
+
+    def test_dynamics_state_round_trip(self, tmp_path: Path) -> None:
+        from agentgolem.consciousness.emotional_dynamics import (
+            EmotionalDynamicsState, FormativeEvent,
+        )
+        state = EmotionalDynamicsState(
+            effective_baseline=0.15,
+            seed_baseline=0.1,
+            cumulative_drift=0.05,
+            formative_events=[
+                FormativeEvent(tick=3, description="discovery", baseline_shift=0.02),
+                FormativeEvent(tick=7, description="setback", baseline_shift=-0.01),
+            ],
+        )
+        path = tmp_path / "emo.json"
+        state.save(path)
+        loaded = EmotionalDynamicsState.load(path)
+        assert abs(loaded.effective_baseline - 0.15) < 0.001
+        assert abs(loaded.seed_baseline - 0.1) < 0.001
+        assert len(loaded.formative_events) == 2
+        assert loaded.formative_events[0].description == "discovery"
+
+    def test_detect_formative_positive(self) -> None:
+        from agentgolem.consciousness.emotional_dynamics import detect_formative_event
+        result = detect_formative_event(["I had a breakthrough in understanding"])
+        assert result is not None
+        _, desc, is_positive = result
+        assert "breakthrough" in desc
+        assert is_positive is True
+
+    def test_detect_formative_negative(self) -> None:
+        from agentgolem.consciousness.emotional_dynamics import detect_formative_event
+        result = detect_formative_event(["My rejected proposal was not accepted"])
+        assert result is not None
+        _, desc, is_positive = result
+        assert is_positive is False
+
+    def test_detect_formative_none(self) -> None:
+        from agentgolem.consciousness.emotional_dynamics import detect_formative_event
+        result = detect_formative_event(["Normal day of reading and thinking"])
+        assert result is None
+
+    def test_dynamics_state_load_missing_file(self, tmp_path: Path) -> None:
+        from agentgolem.consciousness.emotional_dynamics import EmotionalDynamicsState
+        loaded = EmotionalDynamicsState.load(tmp_path / "nonexistent.json")
+        assert loaded.effective_baseline == 0.0
+        assert loaded.formative_events == []
+
+    def test_event_log_bounded_at_50(self) -> None:
+        from agentgolem.consciousness.emotional_dynamics import (
+            EmotionalDynamicsState, record_formative_event,
+        )
+        state = EmotionalDynamicsState(effective_baseline=0.0, seed_baseline=0.0)
+        for i in range(60):
+            record_formative_event(state, tick=i, description=f"event-{i}", positive=True)
+        assert len(state.formative_events) <= 50
+
+
+# ===================================================================
+# Preference & Stance Memory Tests
+# ===================================================================
+
+
+class TestPreferences:
+    """Tests for the preference & stance memory system (Phase 4)."""
+
+    def test_detect_crystallization_from_repeated_focus(self) -> None:
+        from agentgolem.consciousness.preferences import detect_preference_candidates
+        focuses = ["ethics of care"] * 4
+        candidates = detect_preference_candidates(focuses, [], [])
+        assert len(candidates) >= 1
+        assert "ethics of care" in candidates[0].stance.lower()
+        assert candidates[0].domain == "epistemology"
+
+    def test_no_crystallization_below_threshold(self) -> None:
+        from agentgolem.consciousness.preferences import detect_preference_candidates
+        focuses = ["topic-a", "topic-b"]
+        candidates = detect_preference_candidates(focuses, [], [])
+        assert len(candidates) == 0
+
+    def test_growth_vector_crystallization(self) -> None:
+        from agentgolem.consciousness.preferences import detect_preference_candidates
+        vectors = ["deeper empathy", "deeper empathy"]
+        candidates = detect_preference_candidates([], vectors, [])
+        assert len(candidates) >= 1
+        assert "deeper empathy" in candidates[0].stance.lower()
+        assert candidates[0].domain == "methodology"
+
+    def test_dedup_against_existing(self) -> None:
+        from agentgolem.consciousness.preferences import detect_preference_candidates
+        focuses = ["justice"] * 5
+        existing = ["I value exploring justice"]
+        candidates = detect_preference_candidates(focuses, [], existing)
+        assert len(candidates) == 0
+
+    def test_build_preference_node(self) -> None:
+        from agentgolem.consciousness.preferences import (
+            PreferenceCandidate, build_preference_node,
+        )
+        from agentgolem.memory.models import NodeType
+        candidate = PreferenceCandidate(
+            stance="I value careful analysis",
+            domain="methodology",
+            evidence="growth vector repeated",
+            strength=0.7,
+        )
+        node = build_preference_node(candidate)
+        assert node.type == NodeType.PREFERENCE
+        assert node.text == "I value careful analysis"
+        assert node.base_usefulness == 0.7
+        assert node.canonical is True
+
+    def test_format_preferences_for_prompt(self) -> None:
+        from agentgolem.consciousness.preferences import format_preferences_for_prompt
+        from agentgolem.memory.models import ConceptualNode, NodeType
+        prefs = [
+            ConceptualNode(text="I value empathy", type=NodeType.PREFERENCE, base_usefulness=0.8),
+            ConceptualNode(text="I value analysis", type=NodeType.PREFERENCE, base_usefulness=0.5),
+        ]
+        result = format_preferences_for_prompt(prefs)
+        assert "crystallized stances" in result.lower()
+        assert "[strong]" in result
+        assert "[moderate]" in result
+
+    def test_format_empty_preferences(self) -> None:
+        from agentgolem.consciousness.preferences import format_preferences_for_prompt
+        assert format_preferences_for_prompt([]) == ""
+
+    def test_reinforcement_detects_overlap(self) -> None:
+        from agentgolem.consciousness.preferences import compute_reinforcement
+        delta = compute_reinforcement(
+            "I value exploring ethics",
+            "Today I spent time exploring ethics and found new connections.",
+        )
+        assert delta > 0
+
+
+# ------------------------------------------------------------------
+# Developmental Stages
+# ------------------------------------------------------------------
+
+
+class TestDevelopmental:
+    """Tests for developmental stage system."""
+
+    def test_initial_state_is_nascent(self):
+        from agentgolem.consciousness.developmental import DevelopmentalState
+        ds = DevelopmentalState()
+        assert ds.current_stage == "nascent"
+        assert ds.stage_index() == 0
+
+    def test_persistence(self, tmp_path: Path):
+        from agentgolem.consciousness.developmental import DevelopmentalState
+        ds = DevelopmentalState(current_stage="exploring", tick_entered=10)
+        ds.total_convictions = 5
+        path = tmp_path / "dev.json"
+        ds.save(path)
+        loaded = DevelopmentalState.load(path)
+        assert loaded.current_stage == "exploring"
+        assert loaded.total_convictions == 5
+        assert loaded.tick_entered == 10
+
+    def test_load_missing_file(self, tmp_path: Path):
+        from agentgolem.consciousness.developmental import DevelopmentalState
+        loaded = DevelopmentalState.load(tmp_path / "nonexistent.json")
+        assert loaded.current_stage == "nascent"
+
+    def test_no_transition_from_nascent_without_milestones(self):
+        from agentgolem.consciousness.developmental import DevelopmentalState, check_transition
+        ds = DevelopmentalState()
+        assert check_transition(ds) is None
+
+    def test_transition_nascent_to_exploring(self):
+        from agentgolem.consciousness.developmental import (
+            DevelopmentalState, check_transition, advance_stage,
+        )
+        ds = DevelopmentalState()
+        ds.total_convictions = 3
+        ds.total_peer_exchanges = 5
+        ds.total_narrative_chapters = 2
+        assert check_transition(ds) == "exploring"
+        event = advance_stage(ds, tick=50)
+        assert ds.current_stage == "exploring"
+        assert event.from_stage == "nascent"
+        assert event.to_stage == "exploring"
+        assert len(ds.transition_history) == 1
+
+    def test_transition_exploring_to_asserting(self):
+        from agentgolem.consciousness.developmental import (
+            DevelopmentalState, check_transition, advance_stage,
+        )
+        ds = DevelopmentalState(current_stage="exploring")
+        ds.total_convictions = 6
+        ds.total_peer_exchanges = 12
+        ds.total_narrative_chapters = 4
+        ds.peak_self_model_confidence = 0.5
+        assert check_transition(ds) == "asserting"
+        advance_stage(ds, tick=100)
+        assert ds.current_stage == "asserting"
+
+    def test_transition_asserting_to_integrating(self):
+        from agentgolem.consciousness.developmental import (
+            DevelopmentalState, check_transition, advance_stage,
+        )
+        ds = DevelopmentalState(current_stage="asserting")
+        ds.total_convictions = 10
+        ds.total_contradictions_resolved = 3
+        ds.total_peer_exchanges = 30
+        ds.total_narrative_chapters = 7
+        ds.peak_self_model_confidence = 0.6
+        assert check_transition(ds) == "integrating"
+        advance_stage(ds, tick=200)
+        assert ds.current_stage == "integrating"
+
+    def test_transition_integrating_to_wise(self):
+        from agentgolem.consciousness.developmental import (
+            DevelopmentalState, check_transition, advance_stage,
+        )
+        ds = DevelopmentalState(current_stage="integrating")
+        ds.total_convictions = 15
+        ds.total_contradictions_resolved = 6
+        ds.total_peer_exchanges = 60
+        ds.total_narrative_chapters = 12
+        ds.peak_self_model_confidence = 0.8
+        assert check_transition(ds) == "wise"
+        advance_stage(ds, tick=500)
+        assert ds.current_stage == "wise"
+
+    def test_no_transition_beyond_wise(self):
+        from agentgolem.consciousness.developmental import DevelopmentalState, check_transition
+        ds = DevelopmentalState(current_stage="wise")
+        ds.total_convictions = 100
+        ds.total_peer_exchanges = 1000
+        assert check_transition(ds) is None
+
+    def test_advance_requires_valid_transition(self):
+        from agentgolem.consciousness.developmental import DevelopmentalState, advance_stage
+        ds = DevelopmentalState()  # nascent, no milestones
+        with pytest.raises(ValueError, match="No valid transition"):
+            advance_stage(ds, tick=10)
+
+    def test_only_one_stage_at_a_time(self):
+        from agentgolem.consciousness.developmental import (
+            DevelopmentalState, check_transition, advance_stage,
+        )
+        ds = DevelopmentalState()
+        # Give enough for all stages
+        ds.total_convictions = 20
+        ds.total_contradictions_resolved = 10
+        ds.total_peer_exchanges = 100
+        ds.total_narrative_chapters = 20
+        ds.peak_self_model_confidence = 0.9
+        # Should only advance one step at a time
+        assert check_transition(ds) == "exploring"
+        advance_stage(ds, tick=10)
+        assert ds.current_stage == "exploring"
+        # Next check should yield asserting, not wise
+        assert check_transition(ds) == "asserting"
+
+    def test_stage_prompt_injection(self):
+        from agentgolem.consciousness.developmental import stage_prompt_injection
+        text = stage_prompt_injection("nascent")
+        assert "nascent" in text.lower()
+        assert "question" in text.lower()
+        text_wise = stage_prompt_injection("wise")
+        assert "mentor" in text_wise.lower()
+
+    def test_stage_badge(self):
+        from agentgolem.consciousness.developmental import stage_badge
+        assert "🌱" in stage_badge("nascent")
+        assert "🦉" in stage_badge("wise")
+        assert "🔍" in stage_badge("exploring")
+
+    def test_transition_history_accumulates(self):
+        from agentgolem.consciousness.developmental import (
+            DevelopmentalState, advance_stage,
+        )
+        ds = DevelopmentalState()
+        ds.total_convictions = 3
+        ds.total_peer_exchanges = 5
+        ds.total_narrative_chapters = 2
+        advance_stage(ds, tick=10)
+
+        ds.total_convictions = 6
+        ds.total_peer_exchanges = 12
+        ds.total_narrative_chapters = 4
+        ds.peak_self_model_confidence = 0.5
+        advance_stage(ds, tick=20)
+
+        assert len(ds.transition_history) == 2
+        assert ds.transition_history[0]["to_stage"] == "exploring"
+        assert ds.transition_history[1]["to_stage"] == "asserting"
+
+
+    def test_reinforcement_neutral_on_no_overlap(self) -> None:
+        from agentgolem.consciousness.preferences import compute_reinforcement
+        delta = compute_reinforcement(
+            "I value exploring ethics",
+            "The weather is nice today.",
+        )
+        assert delta == 0.0
+
+    def test_strength_increases_with_repetition(self) -> None:
+        from agentgolem.consciousness.preferences import detect_preference_candidates
+        focuses_3 = ["consciousness"] * 3
+        focuses_6 = ["consciousness"] * 6
+        c3 = detect_preference_candidates(focuses_3, [], [])
+        c6 = detect_preference_candidates(focuses_6, [], [])
+        assert len(c3) >= 1 and len(c6) >= 1
+        assert c6[0].strength > c3[0].strength
+
+
+# ===================================================================
+# Relational Depth Tests
+# ===================================================================
+
+
+class TestRelationalDepth:
+    """Tests for the relational depth system (Phase 5)."""
+
+    def test_peer_relationship_defaults(self) -> None:
+        from agentgolem.consciousness.relationships import PeerRelationship
+        rel = PeerRelationship(peer_name="Council-3")
+        assert rel.trust == 0.5
+        assert rel.intellectual_debt == 0.0
+        assert rel.interaction_count == 0
+        assert 0.0 <= rel.resonance() <= 1.0
+
+    def test_resonance_blends_trust_and_compatibility(self) -> None:
+        from agentgolem.consciousness.relationships import PeerRelationship
+        rel = PeerRelationship(peer_name="X", trust=1.0, communication_compatibility=1.0)
+        assert abs(rel.resonance() - 1.0) < 0.01
+        rel2 = PeerRelationship(peer_name="Y", trust=0.0, communication_compatibility=0.0)
+        assert abs(rel2.resonance()) < 0.01
+
+    def test_update_after_agreeable_exchange(self) -> None:
+        from agentgolem.consciousness.relationships import (
+            PeerRelationship, update_after_exchange,
+        )
+        rel = PeerRelationship(peer_name="peer-A")
+        initial_trust = rel.trust
+        update_after_exchange(
+            rel,
+            message_received="I agree, that's a great point and very insightful",
+            message_sent="Here's what I think about X",
+            tick=5,
+        )
+        assert rel.trust > initial_trust
+        assert rel.interaction_count == 1
+        assert rel.last_interaction_tick == 5
+
+    def test_update_after_disagreement(self) -> None:
+        from agentgolem.consciousness.relationships import (
+            PeerRelationship, update_after_exchange,
+        )
+        rel = PeerRelationship(peer_name="peer-B")
+        initial_trust = rel.trust
+        update_after_exchange(
+            rel,
+            message_received="I disagree, I challenge that assumption, it's flawed",
+            message_sent=None,
+            tick=10,
+            topic="ethics of care",
+        )
+        assert rel.trust < initial_trust
+        assert "ethics of care" in rel.disagreements
+
+    def test_intellectual_debt_tracks_imbalance(self) -> None:
+        from agentgolem.consciousness.relationships import (
+            PeerRelationship, update_after_exchange,
+        )
+        rel = PeerRelationship(peer_name="peer-C")
+        update_after_exchange(
+            rel,
+            message_received="I propose a new framework and suggest we consider this theory",
+            message_sent="ok",
+            tick=1,
+        )
+        assert rel.intellectual_debt > 0  # they contributed more ideas
+
+    def test_shared_experiences_accumulate(self) -> None:
+        from agentgolem.consciousness.relationships import (
+            PeerRelationship, update_after_exchange,
+        )
+        rel = PeerRelationship(peer_name="peer-D")
+        update_after_exchange(rel, "hello", "hi", tick=1, topic="consciousness")
+        update_after_exchange(rel, "world", "yes", tick=2, topic="ethics")
+        assert "consciousness" in rel.shared_experiences
+        assert "ethics" in rel.shared_experiences
+
+    def test_relationship_store_round_trip(self, tmp_path: Path) -> None:
+        from agentgolem.consciousness.relationships import (
+            RelationshipStore, PeerRelationship,
+        )
+        store = RelationshipStore()
+        store.get_or_create("Alpha")
+        store.relationships["Alpha"].trust = 0.8
+        store.get_or_create("Beta")
+        path = tmp_path / "rels.json"
+        store.save(path)
+        loaded = RelationshipStore.load(path)
+        assert "Alpha" in loaded.relationships
+        assert abs(loaded.relationships["Alpha"].trust - 0.8) < 0.01
+        assert "Beta" in loaded.relationships
+
+    def test_resonance_dict_export(self) -> None:
+        from agentgolem.consciousness.relationships import (
+            RelationshipStore, PeerRelationship,
+        )
+        store = RelationshipStore()
+        store.get_or_create("A")
+        store.get_or_create("B")
+        rd = store.get_resonance_dict()
+        assert "A" in rd and "B" in rd
+        assert all(0.0 <= v <= 1.0 for v in rd.values())
+
+    def test_prompt_summary(self) -> None:
+        from agentgolem.consciousness.relationships import PeerRelationship
+        rel = PeerRelationship(
+            peer_name="Council-5", trust=0.9,
+            shared_experiences=["ch.3 discussion"],
+            disagreements=["methodology"],
+        )
+        summary = rel.prompt_summary()
+        assert "high" in summary.lower()
+        assert "ch.3 discussion" in summary
+        assert "methodology" in summary
+
+    def test_decay_reduces_trust(self) -> None:
+        from agentgolem.consciousness.relationships import (
+            RelationshipStore, PeerRelationship, decay_relationships,
+        )
+        store = RelationshipStore()
+        rel = store.get_or_create("stale-peer")
+        rel.trust = 0.8
+        rel.last_interaction_tick = 0
+        decay_relationships(store, current_tick=20)
+        assert rel.trust < 0.8
+        assert rel.trust >= 0.3  # never below floor
+
+    def test_all_relationships_summary(self) -> None:
+        from agentgolem.consciousness.relationships import RelationshipStore
+        store = RelationshipStore()
+        rel = store.get_or_create("Council-2")
+        rel.interaction_count = 5
+        rel.trust = 0.75
+        summary = store.all_relationships_summary()
+        assert "Council-2" in summary
+        assert "Peer relationships" in summary
+
+    def test_load_missing_returns_empty(self, tmp_path: Path) -> None:
+        from agentgolem.consciousness.relationships import RelationshipStore
+        store = RelationshipStore.load(tmp_path / "nope.json")
+        assert store.relationships == {}

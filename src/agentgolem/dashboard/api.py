@@ -567,6 +567,17 @@ def _build_desires(internal_state: Any, self_model: Any) -> list[str]:
     return desires
 
 
+def _developmental_badge(developmental_state: Any) -> str:
+    """Return a compact badge string for the agent's developmental stage."""
+    if developmental_state is None:
+        return "🌱 nascent"
+    try:
+        from agentgolem.consciousness.developmental import stage_badge
+        return stage_badge(developmental_state.current_stage)
+    except Exception:
+        return f"❓ {getattr(developmental_state, 'current_stage', 'unknown')}"
+
+
 def _build_agent_snapshot(st: DashboardState, agent: Any) -> dict[str, Any]:
     bus = st.peer_bus
     data_dir = getattr(agent, "_data_dir", None)
@@ -575,6 +586,10 @@ def _build_agent_snapshot(st: DashboardState, agent: Any) -> dict[str, Any]:
 
     runtime_state = getattr(agent, "runtime_state", None)
     internal_state = getattr(agent, "_internal_state", None)
+    temperament = getattr(agent, "_temperament", None)
+    emotional_dynamics = getattr(agent, "_emotional_dynamics", None)
+    relationship_store = getattr(agent, "_relationship_store", None)
+    developmental_state = getattr(agent, "_developmental_state", None)
     monitor = getattr(agent, "_metacognitive_monitor", None)
     observation = getattr(monitor, "last_observation", None)
     attention_director = getattr(agent, "_attention_director", None)
@@ -650,6 +665,31 @@ def _build_agent_snapshot(st: DashboardState, agent: Any) -> dict[str, Any]:
         "latest_narrative": latest_chapter.to_dict() if latest_chapter is not None else None,
         "narrative_summary": latest_chapter.summary if latest_chapter is not None else "No narrative chapter yet.",
         "desires": _build_desires(internal_state, self_model),
+        "temperament": temperament.to_dict() if temperament is not None else {},
+        "temperament_label": temperament.short_label() if temperament is not None else "",
+        "emotional_dynamics": emotional_dynamics.to_dict() if emotional_dynamics is not None else {},
+        "emotional_baseline": (
+            emotional_dynamics.effective_baseline if emotional_dynamics is not None else 0.0
+        ),
+        "formative_events_count": (
+            len(emotional_dynamics.formative_events) if emotional_dynamics is not None else 0
+        ),
+        "relationships": (
+            relationship_store.to_dict() if relationship_store is not None else {}
+        ),
+        "relationships_summary": (
+            relationship_store.all_relationships_summary()
+            if relationship_store is not None else ""
+        ),
+        "developmental_stage": (
+            developmental_state.current_stage if developmental_state is not None else "nascent"
+        ),
+        "developmental_badge": (
+            _developmental_badge(developmental_state)
+        ),
+        "developmental_state": (
+            developmental_state.to_dict() if developmental_state is not None else {}
+        ),
         "consciousness_tick": getattr(agent, "_consciousness_tick_counter", 0),
         "metacognition_interval": getattr(agent, "_metacognition_interval", 3),
         "self_model_interval": getattr(agent, "_self_model_interval", 10),

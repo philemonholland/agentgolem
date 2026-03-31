@@ -157,6 +157,7 @@ def parse_internal_state_update(raw: str, current: InternalState) -> InternalSta
     if "epistemic_humility" in data:
         current.epistemic_humility = clamp(float(data["epistemic_humility"]))
     if "emotional_valence" in data:
+        # Store raw proposed valence — momentum/gravity applied externally
         current.emotional_valence = clamp(float(data["emotional_valence"]), -1.0, 1.0)
     if "engagement_level" in data:
         current.engagement_level = clamp(float(data["engagement_level"]))

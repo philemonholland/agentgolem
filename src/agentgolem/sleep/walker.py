@@ -19,6 +19,24 @@ VALID_SLEEP_PHASES = {"consolidation", "dream"}
 
 
 @dataclass(frozen=True)
+class PersonalityBias:
+    """Personality-driven weights for sleep seed selection and consolidation.
+
+    - salience_multiplier > 1.0 boosts depth-first agents (prioritize salience)
+    - centrality_multiplier > 1.0 boosts breadth-first agents (wide exploration)
+    - emotion_multiplier > 1.0 boosts agents with high emotional sensitivity
+    - risk_appetite affects consolidation aggressiveness (higher = bolder changes)
+    - preference_node_ids: nodes aligned with agent preferences get a boost
+    """
+
+    salience_multiplier: float = 1.0
+    centrality_multiplier: float = 1.0
+    emotion_multiplier: float = 1.0
+    risk_appetite: float = 0.5
+    preference_node_ids: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
 class SleepSpikingConfig:
     """Tunable parameters for the spiking-inspired sleep heuristic."""
 
@@ -134,6 +152,11 @@ class GraphWalker:
         self._runtime_state = runtime_state
         self._config = config or SleepSpikingConfig()
         self._neural_state = SleepNeuralState()
+        self._personality_bias = PersonalityBias()
+
+    def set_personality_bias(self, bias: PersonalityBias) -> None:
+        """Set personality-driven weighting for sleep behavior."""
+        self._personality_bias = bias
 
     def update_config(self, config: SleepSpikingConfig) -> None:
         """Update spiking parameters at runtime."""
@@ -162,8 +185,16 @@ class GraphWalker:
     # ------------------------------------------------------------------
 
     async def sample_seeds(self, n: int) -> list[str]:
-        """Return up to *n* node IDs weighted by centrality × recency × emotion × salience."""
+        """Return up to *n* node IDs weighted by centrality × recency × emotion × salience.
+
+        Personality bias modifies weights:
+        - depth-first agents boost salience (dream about what matters to them)
+        - breadth-first agents boost centrality (explore wide networks)
+        - emotional agents boost emotion score (dream more vividly)
+        - preference nodes get an extra boost (dream about convictions)
+        """
         now = datetime.now(timezone.utc)
+        bias = self._personality_bias
 
         async with self._store._db.execute(
             "SELECT id, centrality, last_accessed, emotion_score, salience "
@@ -186,6 +217,16 @@ class GraphWalker:
             recency_score = 1.0 / max(1.0, days_since)
             emotion_boost = 1.0 + 2.0 * min(abs(emotion), 1.0)
             salience_boost = 1.0 + min(max(salience, 0.0), 1.0)
+
+            # Apply personality bias multipliers
+            centrality *= bias.centrality_multiplier
+            emotion_boost *= bias.emotion_multiplier
+            salience_boost *= bias.salience_multiplier
+
+            # Preference node bonus
+            if node_id in bias.preference_node_ids:
+                salience_boost *= 1.5
+
             weight = centrality * recency_score * emotion_boost * salience_boost
             ids.append(node_id)
             weights.append(max(weight, 1e-9))
@@ -533,9 +574,20 @@ class GraphWalker:
         edge_pairs: dict[str, tuple[str, str]],
         spike_events: list[SpikeEvent],
     ) -> list[dict[str, Any]]:
-        """Generate STDP-like reinforce/weaken actions from spike timing."""
+        """Generate STDP-like reinforce/weaken actions from spike timing.
+
+        Personality bias affects aggressiveness:
+        - High risk_appetite → lower thresholds (bolder consolidation)
+        - Low risk_appetite → higher thresholds (conservative)
+        """
         if not edge_activations:
             return []
+
+        # Personality-biased thresholds
+        risk = self._personality_bias.risk_appetite
+        reinforce_threshold = 0.04 * (1.3 - 0.6 * risk)  # Bold: 0.028, Cautious: 0.052
+        weaken_threshold = -0.02 * (1.3 - 0.6 * risk)
+        max_reinforce = 0.2 * (0.7 + 0.6 * risk)  # Bold: 0.26, Cautious: 0.14
 
         max_activation = max(edge_activations.values(), default=1.0)
         actions: list[dict[str, Any]] = []
@@ -553,15 +605,15 @@ class GraphWalker:
                 self._config.stdp_strength * 0.75 * anti
             )
 
-            if delta >= 0.04:
+            if delta >= reinforce_threshold:
                 actions.append(
                     {
                         "type": "reinforce",
                         "edge_id": edge_id,
-                        "amount": round(min(delta, 0.2), 4),
+                        "amount": round(min(delta, max_reinforce), 4),
                     }
                 )
-            elif delta <= -0.02 or activation < 0.08:
+            elif delta <= weaken_threshold or activation < 0.08:
                 actions.append(
                     {
                         "type": "weaken",

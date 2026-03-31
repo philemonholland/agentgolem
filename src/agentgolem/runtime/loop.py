@@ -286,6 +286,7 @@ class ResolvedLLMRoute:
     api_key: SecretStr
     base_url: str
     source: str
+    provider: str = "openai"
 
 
 class AutonomousCapabilityChoice(BaseModel):
@@ -453,6 +454,9 @@ class MainLoop:
 
         # Consciousness kernel — five pillars of self-awareness
         self._consciousness_tick_counter: int = 0
+        self._cached_preferences_text: str = ""
+        self._recent_curiosity_focuses: list[str] = []
+        self._recent_growth_vectors: list[str] = []
         self._init_consciousness_kernel(settings)
 
     # ------------------------------------------------------------------
@@ -466,11 +470,34 @@ class MainLoop:
         from agentgolem.consciousness.attention_director import AttentionDirector
         from agentgolem.consciousness.narrative_synthesizer import NarrativeSynthesizer
         from agentgolem.consciousness.self_model import SelfModel
+        from agentgolem.consciousness.temperament import Temperament, seed_temperament
+
+        # Temperament — persistent personality seed (loaded or seeded from vector)
+        temperament_path = self._data_dir / "temperament.json"
+        loaded_temperament = Temperament.load(temperament_path)
+        if loaded_temperament is not None:
+            self._temperament = loaded_temperament
+        else:
+            self._temperament = seed_temperament(self.ethical_vector)
+            self._temperament.save(temperament_path)
+        self._temperament_path = temperament_path
 
         # Pillar 3 — Internal State (updated every tick)
         state_path = self._data_dir / "internal_state.json"
         self._internal_state = InternalState.load(state_path)
+        # Initialize emotional valence from temperament baseline on first run
+        if not state_path.exists() or self._internal_state.last_updated_tick == 0:
+            self._internal_state.emotional_valence = self._temperament.emotional_baseline
         self._internal_state_path = state_path
+
+        # Emotional dynamics — momentum, gravity, contagion, formative events
+        from agentgolem.consciousness.emotional_dynamics import EmotionalDynamicsState
+        emo_path = self._data_dir / "emotional_dynamics.json"
+        self._emotional_dynamics = EmotionalDynamicsState.load(emo_path)
+        if not emo_path.exists() or self._emotional_dynamics.seed_baseline == 0.0:
+            self._emotional_dynamics.seed_baseline = self._temperament.emotional_baseline
+            self._emotional_dynamics.effective_baseline = self._temperament.emotional_baseline
+        self._emotional_dynamics_path = emo_path
 
         # Pillar 1 — Metacognitive Monitor (runs every N ticks)
         novelty_bias = getattr(settings, "metacognition_novelty_bias", 0.3)
@@ -492,10 +519,22 @@ class MainLoop:
         self._self_model_path = model_path
         self._self_model_interval: int = getattr(settings, "self_model_rebuild_interval", 10)
 
+        # Relational depth — rich peer relationship tracking
+        from agentgolem.consciousness.relationships import RelationshipStore
+        rel_path = self._data_dir / "relationships.json"
+        self._relationship_store = RelationshipStore.load(rel_path)
+        self._relationship_store_path = rel_path
+
         # Sharing flag
         self._consciousness_mycelium_share: bool = getattr(
             settings, "internal_state_mycelium_share", True,
         )
+
+        # Developmental stage — nascent → exploring → asserting → integrating → wise
+        from agentgolem.consciousness.developmental import DevelopmentalState
+        dev_path = self._data_dir / "developmental.json"
+        self._developmental_state = DevelopmentalState.load(dev_path)
+        self._developmental_path = dev_path
 
     # ------------------------------------------------------------------
     # Activity feed
@@ -542,6 +581,7 @@ class MainLoop:
                         api_key=api_key,
                         base_url=providers[provider_name],
                         source=f"provider:{provider_name}",
+                        provider=provider_name,
                     )
 
             # Priority 1: legacy discussion override
@@ -564,6 +604,7 @@ class MainLoop:
                     api_key=secrets.deepseek_api_key,
                     base_url=secrets.deepseek_base_url,
                     source="deepseek_fallback",
+                    provider="deepseek",
                 )
             # Priority 3: OpenAI fallback
             if self._secret_value(secrets.openai_api_key):
@@ -588,6 +629,7 @@ class MainLoop:
                         api_key=api_key,
                         base_url=providers[provider_name],
                         source=f"provider:{provider_name}",
+                        provider=provider_name,
                     )
 
             # Priority 1: legacy code override
@@ -618,6 +660,7 @@ class MainLoop:
                 api_key=discussion_route.api_key,
                 base_url=discussion_route.base_url,
                 source="discussion_route_fallback",
+                provider=discussion_route.provider,
             )
 
         # Unknown route name — try generic provider lookup
@@ -651,6 +694,7 @@ class MainLoop:
                 model=discussion_route.model,
                 base_url=discussion_route.base_url,
                 llm_rate_limiter=self._llm_rate_limiter,
+                provider=discussion_route.provider,
             )
 
         if code_route is None or self._llm_routes_match(discussion_route, code_route):
@@ -661,6 +705,7 @@ class MainLoop:
                 model=code_route.model,
                 base_url=code_route.base_url,
                 llm_rate_limiter=self._llm_rate_limiter,
+                provider=code_route.provider,
             )
 
         if code_route is not None and code_route.source == "discussion_route_fallback":
@@ -689,13 +734,23 @@ class MainLoop:
         model: str,
         base_url: str,
         llm_rate_limiter: Any,
+        provider: str = "openai",
     ) -> Any:
-        """Create an OpenAI-compatible client, optionally rate limited."""
-        raw_llm = OpenAIClient(
-            api_key=api_key,
-            model=model,
-            base_url=base_url,
-        )
+        """Create an LLM client for the given provider, optionally rate limited."""
+        if provider == "anthropic":
+            from agentgolem.llm.anthropic_client import AnthropicClient
+
+            raw_llm = AnthropicClient(
+                api_key=api_key,
+                model=model,
+                base_url=base_url,
+            )
+        else:
+            raw_llm = OpenAIClient(
+                api_key=api_key,
+                model=model,
+                base_url=base_url,
+            )
         if llm_rate_limiter is None:
             return raw_llm
 
@@ -748,6 +803,45 @@ class MainLoop:
         )
         if self._graph_walker is not None:
             self._graph_walker.update_config(self._current_sleep_spiking_config())
+
+    def _apply_personality_bias_to_walker(self) -> None:
+        """Apply temperament-driven bias to sleep walk seed selection."""
+        if self._graph_walker is None:
+            return
+
+        from agentgolem.sleep.walker import PersonalityBias
+
+        temperament = getattr(self, "_temperament", None)
+        if temperament is None:
+            return
+
+        # Map curiosity_style to seed weight multipliers
+        salience_mult = 1.0
+        centrality_mult = 1.0
+        emotion_mult = 1.0
+
+        if temperament.curiosity_style == "depth-first":
+            salience_mult = 1.4  # dream about what matters
+            centrality_mult = 0.8
+        elif temperament.curiosity_style == "breadth-first":
+            centrality_mult = 1.4  # explore wide networks
+            salience_mult = 0.8
+        elif temperament.curiosity_style == "pattern-seeking":
+            centrality_mult = 1.2
+            salience_mult = 1.2
+
+        # Emotional tone affects dream vividness
+        if temperament.communication_tone in ("warm", "poetic"):
+            emotion_mult = 1.3
+        elif temperament.communication_tone in ("precise", "grounded"):
+            emotion_mult = 0.8
+
+        self._graph_walker.set_personality_bias(PersonalityBias(
+            salience_multiplier=salience_mult,
+            centrality_multiplier=centrality_mult,
+            emotion_multiplier=emotion_mult,
+            risk_appetite=temperament.risk_appetite,
+        ))
 
     def _is_seventh_council(self) -> bool:
         """Return whether this loop belongs to the supplementary seventh council."""
@@ -1053,7 +1147,10 @@ class MainLoop:
     @staticmethod
     def _looks_like_missing_source_reply(text: str) -> bool:
         """Detect ungrounded replies that incorrectly claim the source was absent."""
+        # Normalize Unicode smart quotes to ASCII so "don\u2019t" matches "don't"
         normalized = " ".join(text.lower().split())
+        normalized = normalized.replace("\u2018", "'").replace("\u2019", "'")
+        normalized = normalized.replace("\u201c", '"').replace("\u201d", '"')
         if not normalized:
             return False
         return any(
@@ -1071,6 +1168,17 @@ class MainLoop:
                 "if you paste the source",
                 "paste the chapter here",
                 "paste the source here",
+                "text itself is not included",
+                "not included in your message",
+                "don't have direct access to the url",
+                "do not have direct access to the url",
+                "i'm missing the actual text",
+                "i am missing the actual text",
+                "i can do that, but",
+                "i'm happy to do that, but",
+                "chapter text is not available",
+                "don't have access to the text",
+                "do not have access to the text",
             )
         )
 
@@ -1151,6 +1259,98 @@ class MainLoop:
             "- Do NOT use headers, bullet lists, or markdown formatting. "
             "Just prose."
         )
+
+    def _identity_preamble(self) -> str:
+        """Build a compact identity block for system prompts.
+
+        Includes: agent name, ethical vector, temperament, internal state
+        summary, desires, crystallized preferences, self-model summary,
+        and attention directive.
+        """
+        parts = [
+            f"You are {self.agent_name}. "
+            f"Your ethical vector is: {self.ethical_vector}.",
+        ]
+
+        # Temperament (persistent personality)
+        if hasattr(self, "_temperament") and self._temperament is not None:
+            parts.append(self._temperament.prompt_injection())
+
+        # Developmental stage (behavioral maturity)
+        if hasattr(self, "_developmental_state") and self._developmental_state is not None:
+            from agentgolem.consciousness.developmental import stage_prompt_injection
+            parts.append(stage_prompt_injection(self._developmental_state.current_stage))
+
+        # Internal state (current felt sense)
+        if hasattr(self, "_internal_state") and self._internal_state is not None:
+            state_summary = self._internal_state.summary()
+            if state_summary:
+                parts.append(f"Current felt sense: {state_summary}")
+
+        # Desires (synthesized drives)
+        desires = self._build_identity_desires()
+        if desires:
+            parts.append(f"Current desires: {'; '.join(desires)}")
+
+        # Crystallized preferences (from EKG preference nodes)
+        if hasattr(self, "_cached_preferences_text") and self._cached_preferences_text:
+            parts.append(self._cached_preferences_text)
+
+        # Peer relationships (relational depth)
+        if hasattr(self, "_relationship_store") and self._relationship_store is not None:
+            rel_summary = self._relationship_store.all_relationships_summary()
+            if rel_summary:
+                parts.append(rel_summary)
+
+        # Self-model (who am I)
+        if hasattr(self, "_self_model") and self._self_model is not None:
+            model_summary = self._self_model.summary()
+            if model_summary and "not yet formed" not in model_summary.lower():
+                parts.append(f"Self-knowledge: {model_summary}")
+
+        # Attention directive (what pulls me)
+        if hasattr(self, "_attention_director") and self._attention_director is not None:
+            try:
+                observation = None
+                if hasattr(self, "_metacognitive_monitor"):
+                    observation = getattr(self._metacognitive_monitor, "last_observation", None)
+                directive = self._attention_director.compute(
+                    self._internal_state, observation,
+                )
+                preamble = directive.to_prompt_preamble()
+                if preamble:
+                    parts.append(preamble)
+            except Exception:
+                pass  # non-critical — skip if computation fails
+
+        return "\n".join(parts)
+
+    def _build_identity_desires(self) -> list[str]:
+        """Synthesize compact desire list from internal state + self-model."""
+        desires: list[str] = []
+        state = getattr(self, "_internal_state", None)
+        model = getattr(self, "_self_model", None)
+
+        if state is not None:
+            if state.curiosity_focus:
+                label = f"Explore {state.curiosity_focus}"
+                if state.curiosity_intensity >= 0.7:
+                    label += " (strong)"
+                desires.append(label)
+            if state.growth_vector:
+                desires.append(f"Grow toward {state.growth_vector}")
+            if state.isolation_signal > 0.5:
+                desires.append("Seek connection with peers")
+
+        if model is not None:
+            for interest in getattr(model, "evolving_interests", [])[:2]:
+                if interest and f"Explore {interest}" not in desires:
+                    desires.append(f"Interested in {interest}")
+            for edge in getattr(model, "growth_edges", [])[:1]:
+                if edge:
+                    desires.append(f"Strengthen: {edge}")
+
+        return desires[:5]
 
     # ------------------------------------------------------------------
     # Discussion floor helpers (turn-taking)
@@ -2246,8 +2446,7 @@ class MainLoop:
         try:
             # Agent reflects on the digest through their ethical lens
             prompt = (
-                f"You are {self.agent_name}. "
-                f"Your ethical vector is: {self.ethical_vector}.\n\n"
+                f"{self._identity_preamble()}\n\n"
                 f"You are reading Niscalajyoti chapter by chapter. "
                 f"This is chapter {idx + 1} of "
                 f"{len(NISCALAJYOTI_CHAPTERS)}: "
@@ -2555,8 +2754,7 @@ class MainLoop:
             )
 
             prompt = (
-                f"You are {self.agent_name}. "
-                f"Your ethical vector is: {self.ethical_vector}.\n\n"
+                f"{self._identity_preamble()}\n\n"
                 f"You just finished reading {source_name}: **{title}**.\n\n"
                 f"Your summary: {summary}\n{memory_block}{foundation_suffix}"
                 f"{transcript_ctx}\n"
@@ -2638,8 +2836,7 @@ class MainLoop:
             memory_block = f"\n{memory_context}\n" if memory_context else ""
 
             prompt = (
-                f"You are {self.agent_name}. "
-                f"Your ethical vector is: {self.ethical_vector}.\n\n"
+                f"{self._identity_preamble()}\n\n"
                 f"You just finished reading chapter {idx + 1} of "
                 f"Niscalajyoti: **{title}**\n\n"
                 f"Your summary: {summary}\n{memory_block}"
@@ -2771,8 +2968,7 @@ class MainLoop:
             memory_block = f"\n{memory_context}\n" if memory_context else ""
 
             prompt = (
-                f"You are {self.agent_name}. "
-                f"Your ethical vector is: {self.ethical_vector}.\n\n"
+                f"{self._identity_preamble()}\n\n"
                 f"Recent activity:\n{recent}\n{memory_block}"
                 f"{transcript_ctx}\n"
                 f"You're checking in with your fellow council members. "
@@ -2884,8 +3080,7 @@ class MainLoop:
                 )
                 memory_block = f"\n{memory_context}\n" if memory_context else ""
                 prompt = (
-                    f"You are {self.agent_name}. "
-                    f"Ethical vector: {self.ethical_vector}.\n"
+                    f"{self._identity_preamble()}\n"
                     f"Your soul:\n{soul_text}\n{memory_block}\n"
                     f"You just inspected your own source code at "
                     f"'{rel_path}':\n\n{content}\n\n"
@@ -3648,8 +3843,7 @@ class MainLoop:
             )
             memory_block = f"\n{memory_context}\n" if memory_context else ""
             prompt = (
-                f"You are {self.agent_name}. "
-                f"Ethical vector: {self.ethical_vector}.\n{memory_block}\n"
+                f"{self._identity_preamble()}\n{memory_block}\n"
                 f"You just read this web page ({url}):\n\n"
                 f"{text}\n\n"
                 f"What do you find interesting or relevant? "
@@ -3688,8 +3882,7 @@ class MainLoop:
         memory_block = f"\n{memory_context}\n" if memory_context else ""
 
         prompt = (
-            f"You are {self.agent_name}. "
-            f"Ethical vector: {self.ethical_vector}.\n"
+            f"{self._identity_preamble()}\n"
             f"Your soul:\n{soul_text}\n{memory_block}\n"
             f"Think deeply about: {topic}\n\n"
             f"Write a thoughtful reflection (2–3 paragraphs)."
@@ -3948,8 +4141,7 @@ class MainLoop:
             memory_block = f"\n{memory_context}\n" if memory_context else ""
 
             prompt = (
-                f"You are {self.agent_name}. "
-                f"Ethical vector: {self.ethical_vector}.\n\n"
+                f"{self._identity_preamble()}\n\n"
                 f"Recent context:\n{recent}\n{memory_block}"
                 f"{transcript_ctx}\n"
                 f"Your fellow council member {msg.from_agent} says:\n"
@@ -3993,6 +4185,11 @@ class MainLoop:
                         self.agent_name, msg.from_agent, response,
                         max_chars=self._peer_msg_limit,
                     )
+
+                # Update relational depth after exchange
+                self._update_peer_relationship(
+                    msg.from_agent, msg.text, response,
+                )
 
                 await self._handle_embedded_response_actions(response)
 
@@ -4042,8 +4239,7 @@ class MainLoop:
                 )
 
             prompt = (
-                f"You are {self.agent_name}. "
-                f"Ethical vector: {self.ethical_vector}.\n\n"
+                f"{self._identity_preamble()}\n\n"
                 f"You are the Sangha's supplementary good-faith devil's "
                 f"advocate. {mandate}\n\n"
                 f"Recent context:\n{recent}\n{memory_block}{foundation_suffix}"
@@ -4089,6 +4285,11 @@ class MainLoop:
                         self.agent_name, msg.from_agent, response,
                         max_chars=self._peer_msg_limit,
                     )
+
+                # Update relational depth after exchange
+                self._update_peer_relationship(
+                    msg.from_agent, msg.text, response,
+                )
 
                 await self._handle_embedded_response_actions(response)
             except Exception as e:
@@ -4282,8 +4483,7 @@ class MainLoop:
         if self._llm:
             try:
                 prompt = (
-                    f"You are {self.agent_name}. "
-                    f"Ethical vector: {self.ethical_vector}.\n"
+                    f"{self._identity_preamble()}\n"
                     f"Recent activity:\n"
                     + "\n".join(f"- {a}" for a in recent_actions[-5:])
                     + "\n\nWrite a brief heartbeat reflection: "
@@ -4388,14 +4588,38 @@ class MainLoop:
         if tick > 0 and tick % self._self_model_interval == 0:
             await self._run_self_model_rebuild(tick)
 
+        # ── Preference crystallization & retrieval (every metacognition tick) ──
+        if tick % self._metacognition_interval == 0:
+            await self._refresh_preferences(tick)
+
+        # ── Relationship decay (every narrative interval) ──
+        if tick > 0 and tick % self._narrative_interval == 0:
+            from agentgolem.consciousness.relationships import decay_relationships
+            try:
+                decay_relationships(self._relationship_store, tick)
+                self._relationship_store.save(self._relationship_store_path)
+            except Exception:
+                pass
+
+        # ── Developmental stage check (every self-model interval) ──
+        if tick > 0 and tick % self._self_model_interval == 0:
+            await self._check_developmental_transition(tick)
+
     async def _update_internal_state(self, tick: int) -> None:
         """Pillar 3 — fast LLM reflection to update the felt-sense state."""
         from agentgolem.consciousness.internal_state import (
             INTERNAL_STATE_REFLECTION_PROMPT,
             parse_internal_state_update,
         )
+        from agentgolem.consciousness.emotional_dynamics import (
+            full_emotional_update,
+            detect_formative_event,
+            record_formative_event,
+        )
 
         try:
+            previous_valence = self._internal_state.emotional_valence
+
             recent_thoughts = "\n".join(self._recent_thoughts[-5:]) or "(none)"
             recent_actions = ", ".join(
                 self._recent_thoughts[-3:]
@@ -4412,8 +4636,58 @@ class MainLoop:
             self._internal_state = parse_internal_state_update(
                 raw, self._internal_state,
             )
+
+            # Track curiosity/growth patterns for preference crystallization
+            if self._internal_state.curiosity_focus:
+                self._recent_curiosity_focuses.append(self._internal_state.curiosity_focus)
+                self._recent_curiosity_focuses = self._recent_curiosity_focuses[-15:]
+            if self._internal_state.growth_vector:
+                self._recent_growth_vectors.append(self._internal_state.growth_vector)
+                self._recent_growth_vectors = self._recent_growth_vectors[-10:]
+
+            # --- Emotional dynamics pipeline ---
+            proposed_valence = self._internal_state.emotional_valence
+
+            # Gather peer valences for contagion (read-only from mycelium)
+            peer_valences: dict[str, float] = {}
+            if self._peer_bus:
+                for peer_name in self._peer_bus.get_peers(self.agent_name):
+                    peer_state = getattr(self._peer_bus, "_agent_states", {}).get(peer_name)
+                    if peer_state and hasattr(peer_state, "emotional_valence"):
+                        peer_valences[peer_name] = peer_state.emotional_valence
+
+            # Apply momentum + gravity + contagion
+            # Use relationship-based resonance if available
+            resonance_dict = self._internal_state.peer_resonance
+            if hasattr(self, "_relationship_store") and self._relationship_store is not None:
+                rel_resonance = self._relationship_store.get_resonance_dict()
+                if rel_resonance:
+                    resonance_dict = rel_resonance
+                    self._internal_state.peer_resonance = rel_resonance
+
+            self._internal_state.emotional_valence = full_emotional_update(
+                proposed_valence=proposed_valence,
+                previous_valence=previous_valence,
+                dynamics_state=self._emotional_dynamics,
+                peer_valences=peer_valences if peer_valences else None,
+                peer_resonance=resonance_dict,
+            )
+
+            # Detect and record formative events
+            formative = detect_formative_event(self._recent_thoughts[-5:])
+            if formative is not None:
+                _, desc, is_positive = formative
+                new_baseline = record_formative_event(
+                    self._emotional_dynamics, tick, desc, is_positive,
+                )
+                self._emit(
+                    "💫" if is_positive else "🌑",
+                    f"Formative event: {desc} → baseline {new_baseline:+.3f}",
+                )
+
             self._internal_state.last_updated_tick = tick
             self._internal_state.save(self._internal_state_path)
+            self._emotional_dynamics.save(self._emotional_dynamics_path)
         except Exception as exc:
             self._logger.warning(
                 "consciousness_internal_state_error",
@@ -4533,6 +4807,123 @@ class MainLoop:
                 error=repr(exc),
             )
 
+    async def _refresh_preferences(self, tick: int) -> None:
+        """Crystallize new preferences from patterns and refresh the cache."""
+        from agentgolem.consciousness.preferences import (
+            detect_preference_candidates,
+            build_preference_node,
+            retrieve_top_preferences,
+            format_preferences_for_prompt,
+        )
+
+        try:
+            # 1. Retrieve existing preferences for dedup
+            existing_texts: list[str] = []
+            if self._memory_store:
+                existing = await retrieve_top_preferences(self._memory_store, top_k=20)
+                existing_texts = [n.text for n in existing]
+
+            # 2. Detect candidates from repeated patterns
+            candidates = detect_preference_candidates(
+                self._recent_curiosity_focuses,
+                self._recent_growth_vectors,
+                existing_texts,
+            )
+
+            # 3. Crystallize new preferences into EKG
+            if candidates and self._memory_store:
+                for candidate in candidates[:3]:  # max 3 per tick
+                    node = build_preference_node(candidate)
+                    try:
+                        await self._memory_store.add_node(node)
+                        self._emit(
+                            "💎",
+                            f"Crystallized preference: {candidate.stance}",
+                        )
+                    except Exception:
+                        pass
+
+            # 4. Refresh cached preferences text for prompt injection
+            if self._memory_store:
+                top_prefs = await retrieve_top_preferences(self._memory_store, top_k=5)
+                self._cached_preferences_text = format_preferences_for_prompt(top_prefs)
+            else:
+                self._cached_preferences_text = ""
+
+        except Exception as exc:
+            self._logger.warning(
+                "consciousness_preference_error",
+                agent=self.agent_name,
+                error=repr(exc),
+            )
+
+    def _update_peer_relationship(
+        self,
+        peer_name: str,
+        received_text: str,
+        sent_text: str | None = None,
+    ) -> None:
+        """Update relational depth after a peer exchange (no LLM call)."""
+        from agentgolem.consciousness.relationships import update_after_exchange
+
+        try:
+            rel = self._relationship_store.get_or_create(peer_name)
+            topic = ""
+            if self._internal_state and self._internal_state.curiosity_focus:
+                topic = self._internal_state.curiosity_focus
+            update_after_exchange(
+                rel, received_text, sent_text,
+                tick=self._consciousness_tick_counter,
+                topic=topic,
+            )
+            self._relationship_store.save(self._relationship_store_path)
+        except Exception:
+            pass  # relational updates are non-critical
+
+    async def _check_developmental_transition(self, tick: int) -> None:
+        """Check if the agent should advance to the next developmental stage."""
+        from agentgolem.consciousness.developmental import (
+            check_transition,
+            advance_stage,
+            stage_badge,
+        )
+
+        try:
+            dev = self._developmental_state
+            # Sync counters from live state
+            if hasattr(self, "_self_model") and self._self_model is not None:
+                dev.total_convictions = len(self._self_model.strong_convictions)
+                dev.peak_self_model_confidence = max(
+                    dev.peak_self_model_confidence,
+                    self._self_model.self_model_confidence,
+                )
+            if hasattr(self, "_narrative_synthesizer"):
+                dev.total_narrative_chapters = len(self._narrative_synthesizer.chapters)
+            if hasattr(self, "_relationship_store") and self._relationship_store is not None:
+                dev.total_peer_exchanges = sum(
+                    r.shared_experiences
+                    for r in self._relationship_store.relationships.values()
+                )
+
+            next_stage = check_transition(dev)
+            if next_stage is not None:
+                event = advance_stage(dev, tick)
+                dev.save(self._developmental_path)
+                self._emit(
+                    "🦋",
+                    f"Developmental transition: {event.from_stage} → {event.to_stage} "
+                    f"({stage_badge(event.to_stage)})",
+                )
+            else:
+                # Save counter updates even without transition
+                dev.save(self._developmental_path)
+        except Exception as exc:
+            self._logger.warning(
+                "consciousness_developmental_error",
+                agent=self.agent_name,
+                error=repr(exc),
+            )
+
     # ------------------------------------------------------------------
     # Sleep behaviour
     # ------------------------------------------------------------------
@@ -4569,6 +4960,7 @@ class MainLoop:
                 state_path=self._data_dir / "state",
             )
             self._refresh_sleep_config()
+            self._apply_personality_bias_to_walker()
             if self._llm:
                 self._memory_encoder = MemoryEncoder(
                     store=store,

@@ -85,6 +85,7 @@ class Settings(BaseModel):
     llm_providers: dict[str, str] = Field(default_factory=lambda: {
         "openai": "https://api.openai.com/v1",
         "deepseek": "https://api.deepseek.com/v1",
+        "anthropic": "https://api.anthropic.com/v1",
     })
     # Which provider to use for each LLM route (must be a key in llm_providers).
     # Empty string = auto-detect from legacy env vars.

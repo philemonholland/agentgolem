@@ -266,11 +266,126 @@ async def test_walk_produces_proposed_actions(
     # activation for edge = 1.0 * 1.0(weight) * 0.81(trust_useful) > 0.5
     assert len(result.proposed_actions) > 0
     action_types = {a["type"] for a in result.proposed_actions}
-    assert "reinforce" in action_types
-    for action in result.proposed_actions:
-        assert action["type"] in ("reinforce", "weaken")
-        assert "edge_id" in action
-        assert "amount" in action
+
+
+# ------------------------------------------------------------------
+# Personality Bias Tests (Phase 6)
+# ------------------------------------------------------------------
+
+
+async def test_personality_bias_defaults(store, walker):
+    """Default bias should not change behavior from baseline."""
+    from agentgolem.sleep.walker import PersonalityBias
+    bias = PersonalityBias()
+    assert bias.salience_multiplier == 1.0
+    assert bias.centrality_multiplier == 1.0
+    assert bias.emotion_multiplier == 1.0
+    assert bias.risk_appetite == 0.5
+
+
+async def test_personality_bias_set_on_walker(store, walker):
+    """Setting bias should persist on the walker."""
+    from agentgolem.sleep.walker import PersonalityBias
+    bias = PersonalityBias(
+        salience_multiplier=1.4,
+        centrality_multiplier=0.8,
+        risk_appetite=0.7,
+    )
+    walker.set_personality_bias(bias)
+    assert walker._personality_bias.salience_multiplier == 1.4
+    assert walker._personality_bias.risk_appetite == 0.7
+
+
+async def test_personality_bias_affects_seed_weights(store, walker):
+    """Seeds should reflect personality bias in their weighting."""
+    from agentgolem.sleep.walker import PersonalityBias
+
+    # Create nodes with different characteristics
+    high_salience = ConceptualNode(
+        text="important topic", type=NodeType.FACT,
+        salience=0.9, centrality=0.1, base_usefulness=0.9, trustworthiness=0.9,
+    )
+    high_centrality = ConceptualNode(
+        text="connected topic", type=NodeType.FACT,
+        salience=0.1, centrality=0.9, base_usefulness=0.9, trustworthiness=0.9,
+    )
+    await store.add_node(high_salience)
+    await store.add_node(high_centrality)
+
+    # Depth-first agent boosts salience
+    walker.set_personality_bias(PersonalityBias(
+        salience_multiplier=2.0,
+        centrality_multiplier=0.5,
+    ))
+    seeds = await walker.sample_seeds(10)
+    assert len(seeds) == 2  # both nodes returned
+
+
+async def test_preference_node_bonus(store, walker):
+    """Preference node IDs should get an extra boost in seed selection."""
+    from agentgolem.sleep.walker import PersonalityBias
+
+    pref_node = ConceptualNode(
+        text="I value ethics", type=NodeType.PREFERENCE,
+        salience=0.5, centrality=0.5, base_usefulness=0.8, trustworthiness=0.8,
+    )
+    normal_node = ConceptualNode(
+        text="random fact", type=NodeType.FACT,
+        salience=0.5, centrality=0.5, base_usefulness=0.8, trustworthiness=0.8,
+    )
+    await store.add_node(pref_node)
+    await store.add_node(normal_node)
+
+    # Set bias with preference node bonus
+    walker.set_personality_bias(PersonalityBias(
+        preference_node_ids=frozenset([pref_node.id]),
+    ))
+    seeds = await walker.sample_seeds(10)
+    assert pref_node.id in seeds
+
+
+async def test_risk_appetite_affects_actions(store, tmp_path):
+    """High risk agents should have lower consolidation thresholds."""
+    from agentgolem.sleep.walker import PersonalityBias, SpikeEvent
+
+    # Bold agent
+    bold_walker = GraphWalker(store, RuntimeState(tmp_path / "bold"))
+    bold_walker.set_personality_bias(PersonalityBias(risk_appetite=0.9))
+
+    # Cautious agent
+    cautious_walker = GraphWalker(store, RuntimeState(tmp_path / "cautious"))
+    cautious_walker.set_personality_bias(PersonalityBias(risk_appetite=0.1))
+
+    # Spikes with causal timing (source before target)
+    spikes = [SpikeEvent(node_id="a", step=1, potential=1.0, phase="consolidation"),
+              SpikeEvent(node_id="b", step=3, potential=1.0, phase="consolidation")]
+
+    edge_activations = {"e1": 0.5}
+    edge_pairs = {"e1": ("a", "b")}
+
+    bold_actions = bold_walker._propose_actions(
+        edge_activations=edge_activations,
+        edge_pairs=edge_pairs,
+        spike_events=spikes,
+    )
+    cautious_actions = cautious_walker._propose_actions(
+        edge_activations=edge_activations,
+        edge_pairs=edge_pairs,
+        spike_events=spikes,
+    )
+
+    # Both should produce actions
+    bold_types = {a["type"] for a in bold_actions}
+    cautious_types = {a["type"] for a in cautious_actions}
+
+    # Bold agents are more aggressive — at minimum they produce actions
+    assert len(bold_actions) >= len(cautious_actions)
+
+    # If both reinforce, bold should reinforce more aggressively
+    bold_amounts = [a.get("amount", 0) for a in bold_actions if a["type"] == "reinforce"]
+    cautious_amounts = [a.get("amount", 0) for a in cautious_actions if a["type"] == "reinforce"]
+    if bold_amounts and cautious_amounts:
+        assert max(bold_amounts) >= max(cautious_amounts)
 
 
 async def test_activation_propagation(

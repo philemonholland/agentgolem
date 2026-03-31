@@ -13,6 +13,8 @@ class Secrets(BaseSettings):
     openai_base_url: str = "https://api.openai.com/v1"
     deepseek_api_key: SecretStr = SecretStr("")
     deepseek_base_url: str = "https://api.deepseek.com/v1"
+    anthropic_api_key: SecretStr = SecretStr("")
+    anthropic_base_url: str = "https://api.anthropic.com/v1"
     llm_discussion_api_key: SecretStr = SecretStr("")
     llm_discussion_base_url: str = ""
     llm_code_api_key: SecretStr = SecretStr("")
