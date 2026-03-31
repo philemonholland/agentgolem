@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
+import httpx
 import yaml
 from pydantic import BaseModel, Field, SecretStr
 
@@ -373,11 +374,14 @@ class MainLoop:
         # hold the conversational floor. One-off human interjections use the
         # per-agent _conversation_paused flag instead.
         self._human_speaking_event: threading.Event | None = None
+        self._shared_llm_failure_event: threading.Event | None = None
 
         # Conversation-only pause: when set, discussion/peer/autonomous speech
         # is suspended but consciousness ticks, memory walks, and internal
         # reflection continue running.  /speak sets this; /continue clears it.
         self._conversation_paused = False
+        self._llm_requests_suspended = False
+        self._llm_suspension_reason: str | None = None
 
         # Load Niscalajyoti reading progress from disk
         self._nj_state_path = self._data_dir / "niscalajyoti_reading.json"
@@ -1022,8 +1026,15 @@ class MainLoop:
         """
         if self._llm is None:
             raise RuntimeError("Discussion LLM is not configured.")
+        if self._llm_requests_suspended_active():
+            await self._suspend_for_llm_failure()
+            raise RuntimeError("LLM requests are suspended.")
         kwargs.setdefault("max_completion_tokens", self._discussion_max_completion_tokens)
-        return await self._llm.complete(messages, **kwargs)
+        try:
+            return await self._llm.complete(messages, **kwargs)
+        except httpx.HTTPError as exc:
+            await self._suspend_for_llm_failure(self._describe_llm_http_error(exc))
+            raise
 
     def _source_prompt_messages(self, prompt: str) -> list[Message]:
         """Wrap source-heavy prompts so extracted material is delivered as user content."""
@@ -1068,7 +1079,59 @@ class MainLoop:
         client = self._code_llm or self._llm
         if client is None:
             raise RuntimeError("Code LLM is not configured.")
-        return await client.complete(messages, **kwargs)
+        if self._llm_requests_suspended_active():
+            await self._suspend_for_llm_failure()
+            raise RuntimeError("LLM requests are suspended.")
+        try:
+            return await client.complete(messages, **kwargs)
+        except httpx.HTTPError as exc:
+            await self._suspend_for_llm_failure(self._describe_llm_http_error(exc))
+            raise
+
+    def _llm_requests_suspended_active(self) -> bool:
+        """Return whether this agent must refuse further LLM calls."""
+        return self._llm_requests_suspended or (
+            self._shared_llm_failure_event is not None and self._shared_llm_failure_event.is_set()
+        )
+
+    def _describe_llm_http_error(self, exc: httpx.HTTPError) -> str:
+        """Summarize an LLM HTTP/API failure for logs and operator feedback."""
+        if isinstance(exc, httpx.HTTPStatusError):
+            response = exc.response
+            detail = ""
+            with suppress(Exception):
+                body = response.text.strip()
+                if body:
+                    detail = f" — {body[:200]}"
+            return f"LLM API error {response.status_code}{detail}"
+        return f"LLM transport error: {exc}"
+
+    async def _suspend_for_llm_failure(self, reason: str | None = None) -> None:
+        """Stop future LLM usage and put the agent into a sleep state."""
+        detail = reason or self._llm_suspension_reason or "another council member hit an LLM API error"
+        first_time = not self._llm_requests_suspended
+        self._llm_requests_suspended = True
+        self._llm_suspension_reason = detail
+        if self._shared_llm_failure_event is not None:
+            self._shared_llm_failure_event.set()
+
+        self._conversation_paused = True
+        self._winding_down = False
+        self._wind_down_at = None
+        self._awoke_at = None
+        self._release_floor()
+
+        if self.runtime_state.mode != AgentMode.ASLEEP:
+            await self.runtime_state.transition(AgentMode.ASLEEP)
+        self._fell_asleep_at = datetime.now(UTC)
+
+        if first_time:
+            self._logger.error(
+                "llm_requests_suspended",
+                agent=self.agent_name,
+                reason=detail,
+            )
+            self._emit("💤", f"LLM requests suspended — sleeping immediately: {detail}")
 
     def _discussion_style_guidance(self) -> str:
         """Shared guidance for more natural peer-to-peer discussions."""
@@ -1489,6 +1552,10 @@ class MainLoop:
 
         mode = self.runtime_state.mode
 
+        if self._llm_requests_suspended_active() and mode != AgentMode.ASLEEP:
+            await self._suspend_for_llm_failure()
+            return
+
         if mode == AgentMode.PAUSED:
             self._logger.debug("agent_paused_waiting", agent=self.agent_name)
             await self.interrupt_manager.wait_for_resume()
@@ -1531,6 +1598,9 @@ class MainLoop:
             await self._tick_awake()
 
         elif mode == AgentMode.ASLEEP:
+            if self._llm_requests_suspended_active():
+                await self._tick_asleep()
+                return
             if self._fell_asleep_at and now - self._fell_asleep_at >= self._sleep_duration:
                 self._logger.info("auto_wake_transition", agent=self.agent_name)
                 self._wake_cycle_count += 1

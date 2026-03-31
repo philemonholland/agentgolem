@@ -2312,6 +2312,8 @@ async def run_agent(store: ParamStore) -> bool | Literal["evolution"]:
     # One-shot human interjections temporarily pause peer conversation until one
     # council member responds, then auto-resume.
     transient_pause_event = threading.Event()
+    # Shared circuit breaker for LLM/API failures such as exhausted credits.
+    llm_failure_event = threading.Event()
 
     agents: list[MainLoop] = []
     dbs: list[Any] = []
@@ -2419,6 +2421,7 @@ async def run_agent(store: ParamStore) -> bool | Literal["evolution"]:
 
         # Wire human-speaking pause event
         loop._human_speaking_event = human_speaking_event
+        loop._shared_llm_failure_event = llm_failure_event
 
         # Register on bus with speaking-order priority
         from agentgolem.runtime.bus import (

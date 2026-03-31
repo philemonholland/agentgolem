@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
+import httpx
 import pytest
 
 from agentgolem.config.secrets import Secrets
 from agentgolem.config.settings import Settings
+from agentgolem.llm.base import Message
 from agentgolem.runtime.bus import AgentMessage
 from agentgolem.runtime.loop import MainLoop
 from agentgolem.runtime.state import AgentMode
@@ -249,6 +252,82 @@ async def test_tick_awake_skips_peer_messages_when_conversation_paused(
 
     assert saw["consciousness"] is True
     assert saw["peer"] is False
+
+
+async def test_complete_discussion_sleeps_agent_on_http_error(
+    loop_env: tuple[Settings, Secrets, Path],
+) -> None:
+    settings, secrets, _ = loop_env
+    loop = MainLoop(settings=settings, secrets=secrets)
+    loop._shared_llm_failure_event = threading.Event()
+
+    request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+    response = httpx.Response(402, request=request, text='{"error":"out of credits"}')
+
+    class _FailingLLM:
+        async def complete(self, messages, **kwargs):
+            raise httpx.HTTPStatusError("payment required", request=request, response=response)
+
+    loop._llm = _FailingLLM()
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await loop._complete_discussion([Message(role="user", content="hello")])
+
+    assert loop._llm_requests_suspended is True
+    assert loop._shared_llm_failure_event.is_set() is True
+    assert loop.runtime_state.mode == AgentMode.ASLEEP
+    assert loop._llm_suspension_reason is not None
+    assert "402" in loop._llm_suspension_reason
+
+
+async def test_complete_discussion_refuses_calls_after_shared_llm_failure(
+    loop_env: tuple[Settings, Secrets, Path],
+) -> None:
+    settings, secrets, _ = loop_env
+    loop = MainLoop(settings=settings, secrets=secrets)
+    failure_event = threading.Event()
+    failure_event.set()
+    loop._shared_llm_failure_event = failure_event
+    called = {"value": False}
+
+    class _StubLLM:
+        async def complete(self, messages, **kwargs):
+            called["value"] = True
+            return "should not happen"
+
+    loop._llm = _StubLLM()
+
+    with pytest.raises(RuntimeError, match="LLM requests are suspended"):
+        await loop._complete_discussion([Message(role="user", content="hello")])
+
+    assert called["value"] is False
+    assert loop.runtime_state.mode == AgentMode.ASLEEP
+
+
+async def test_sleep_does_not_auto_wake_when_llm_requests_suspended(
+    loop_env: tuple[Settings, Secrets, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, secrets, _ = loop_env
+    sleeping_settings = Settings(
+        data_dir=settings.data_dir,
+        sleep_duration_minutes=0.001,
+    )
+    loop = MainLoop(settings=sleeping_settings, secrets=secrets)
+    loop._llm_requests_suspended = True
+    loop._fell_asleep_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+    await loop.runtime_state.transition(AgentMode.ASLEEP)
+    saw = {"tick_asleep": False}
+
+    async def fake_tick_asleep() -> None:
+        saw["tick_asleep"] = True
+
+    monkeypatch.setattr(loop, "_tick_asleep", fake_tick_asleep)
+
+    await loop._tick()
+
+    assert saw["tick_asleep"] is True
+    assert loop.runtime_state.mode == AgentMode.ASLEEP
 
 
 def test_main_loop_prefers_deepseek_for_discussion_and_openai_for_code(
