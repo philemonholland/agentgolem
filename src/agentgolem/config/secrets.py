@@ -26,3 +26,18 @@ class Secrets(BaseSettings):
     email_imap_password: SecretStr = SecretStr("")
     moltbook_api_key: SecretStr = SecretStr("")
     moltbook_base_url: str = ""
+
+    def get_provider_api_key(self, provider_name: str) -> SecretStr:
+        """Look up API key for a named provider.
+
+        Checks ``<provider>_api_key`` field first (case-insensitive),
+        then falls back to the ``<PROVIDER>_API_KEY`` environment variable.
+        """
+        field_name = f"{provider_name.lower()}_api_key"
+        if hasattr(self, field_name):
+            return getattr(self, field_name)
+        # Try reading from environment directly
+        import os
+
+        env_val = os.environ.get(f"{provider_name.upper()}_API_KEY", "")
+        return SecretStr(env_val)

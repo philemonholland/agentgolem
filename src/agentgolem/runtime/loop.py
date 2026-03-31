@@ -509,9 +509,32 @@ class MainLoop:
         return getattr(self._settings, "llm_model", self._discussion_model)
 
     def _resolve_llm_route(self, route_name: str) -> ResolvedLLMRoute | None:
-        """Resolve the concrete provider/base URL/model for one LLM route."""
+        """Resolve the concrete provider/base URL/model for one LLM route.
+
+        Resolution priority:
+        1. Named provider from ``llm_<route>_provider`` + ``llm_providers`` map
+        2. Legacy per-route override (``LLM_DISCUSSION_API_KEY`` etc.)
+        3. DeepSeek fallback (for discussion route)
+        4. OpenAI fallback
+        """
         secrets = self._secrets
+        providers: dict[str, str] = getattr(self._settings, "llm_providers", {})
+
         if route_name == "discussion":
+            # Priority 0: named provider in settings
+            provider_name = getattr(self._settings, "llm_discussion_provider", "")
+            if provider_name and provider_name in providers:
+                api_key = secrets.get_provider_api_key(provider_name)
+                if self._secret_value(api_key):
+                    return ResolvedLLMRoute(
+                        route_name="discussion",
+                        model=self._discussion_model,
+                        api_key=api_key,
+                        base_url=providers[provider_name],
+                        source=f"provider:{provider_name}",
+                    )
+
+            # Priority 1: legacy discussion override
             if (
                 self._secret_value(secrets.llm_discussion_api_key)
                 and secrets.llm_discussion_base_url
@@ -523,6 +546,7 @@ class MainLoop:
                     base_url=secrets.llm_discussion_base_url,
                     source="discussion_override",
                 )
+            # Priority 2: DeepSeek fallback
             if self._secret_value(secrets.deepseek_api_key):
                 return ResolvedLLMRoute(
                     route_name="discussion",
@@ -531,6 +555,7 @@ class MainLoop:
                     base_url=secrets.deepseek_base_url,
                     source="deepseek_fallback",
                 )
+            # Priority 3: OpenAI fallback
             if self._secret_value(secrets.openai_api_key):
                 return ResolvedLLMRoute(
                     route_name="discussion",
@@ -542,6 +567,20 @@ class MainLoop:
             return None
 
         if route_name == "code":
+            # Priority 0: named provider in settings
+            provider_name = getattr(self._settings, "llm_code_provider", "")
+            if provider_name and provider_name in providers:
+                api_key = secrets.get_provider_api_key(provider_name)
+                if self._secret_value(api_key):
+                    return ResolvedLLMRoute(
+                        route_name="code",
+                        model=self._code_model,
+                        api_key=api_key,
+                        base_url=providers[provider_name],
+                        source=f"provider:{provider_name}",
+                    )
+
+            # Priority 1: legacy code override
             if self._secret_value(secrets.llm_code_api_key) and secrets.llm_code_base_url:
                 return ResolvedLLMRoute(
                     route_name="code",
@@ -550,6 +589,7 @@ class MainLoop:
                     base_url=secrets.llm_code_base_url,
                     source="code_override",
                 )
+            # Priority 2: OpenAI fallback
             if self._secret_value(secrets.openai_api_key):
                 return ResolvedLLMRoute(
                     route_name="code",
@@ -558,6 +598,7 @@ class MainLoop:
                     base_url=secrets.openai_base_url,
                     source="openai_default",
                 )
+            # Priority 3: share the discussion route
             discussion_route = self._resolve_llm_route("discussion")
             if discussion_route is None:
                 return None
@@ -569,6 +610,7 @@ class MainLoop:
                 source="discussion_route_fallback",
             )
 
+        # Unknown route name — try generic provider lookup
         return None
 
     @staticmethod

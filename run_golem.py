@@ -438,6 +438,27 @@ PARAM_DEFS: list[ParamDef] = [
         "LLM",
         aliases=("code_model",),
     ),
+    param(
+        "llm_providers",
+        "LLM Provider Registry",
+        "Map of provider names to base URLs (API keys in .env as <PROVIDER>_API_KEY)",
+        "dict",
+        "LLM",
+    ),
+    param(
+        "llm_discussion_provider",
+        "LLM Discussion Provider",
+        "Named provider for discussion route (empty = auto-detect from legacy env vars)",
+        "str",
+        "LLM",
+    ),
+    param(
+        "llm_code_provider",
+        "LLM Code Provider",
+        "Named provider for code route (empty = auto-detect from legacy env vars)",
+        "str",
+        "LLM",
+    ),
     # --- Logging ---
     param(
         "log_level",

@@ -127,6 +127,15 @@ llm_model: "gpt-5"                     # Legacy fallback discussion model
 llm_discussion_model: "deepseek-reasoner"  # Primary discussion / reflection model
 llm_code_model: "gpt-5.4"              # Primary code model
 
+# Provider registry — map names to base URLs.
+# API keys are stored in .env as <PROVIDER>_API_KEY (e.g. OPENAI_API_KEY).
+# To switch models: change llm_discussion_provider + llm_discussion_model.
+llm_providers:
+  openai: "https://api.openai.com/v1"
+  deepseek: "https://api.deepseek.com/v1"
+llm_discussion_provider: ""            # Named provider for discussion (empty = auto-detect)
+llm_code_provider: ""                  # Named provider for code (empty = auto-detect)
+
 # --- Logging ---
 log_level: "INFO"                      # DEBUG | INFO | WARNING | ERROR
 

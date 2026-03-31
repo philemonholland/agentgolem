@@ -23,6 +23,19 @@ sleep_dream_noise: 0.18               # Associative noise injected during dream 
 llm_provider: openai
 llm_model: gpt-5
 llm_discussion_model: deepseek-reasoner   # regular discussion model when DEEPSEEK_API_KEY is set
+llm_code_model: gpt-5.4        # model used for codebase inspection & evolution (higher quality)
+
+# --- LLM Provider Registry ---
+# Map provider names to base URLs.  API keys go in .env as <PROVIDER>_API_KEY.
+# To switch models: just change llm_discussion_model and llm_discussion_provider.
+# Example: to use gpt-5.4-mini for discussion, set:
+#   llm_discussion_provider: openai
+#   llm_discussion_model: gpt-5.4-mini
+llm_providers:
+  openai: https://api.openai.com/v1
+  deepseek: https://api.deepseek.com/v1
+llm_discussion_provider: ""    # empty = auto-detect from legacy env vars
+llm_code_provider: ""          # empty = auto-detect from legacy env vars
 log_level: INFO
 email_enabled: false
 moltbook_enabled: false
@@ -48,7 +61,6 @@ autonomous_interval_seconds: 60.0
 name_discovery_cycles: 4
 peer_checkin_interval_minutes: 30.0
 peer_message_max_chars: 3000
-llm_code_model: gpt-5.4        # model used for codebase inspection & evolution (higher quality)
 repo_root: ""                  # workspace boundary (empty = auto-detect from install location)
 
 # Consciousness kernel

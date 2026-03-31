@@ -70,6 +70,18 @@ class Settings(BaseModel):
     internal_state_mycelium_share: bool = True
     metacognition_novelty_bias: float = 0.3
 
+    # LLM provider registry — map provider names to base URLs.
+    # API keys are stored in .env as <PROVIDER>_API_KEY (upper-cased).
+    # Example: {"openai": "https://api.openai.com/v1", "deepseek": "https://api.deepseek.com/v1"}
+    llm_providers: dict[str, str] = Field(default_factory=lambda: {
+        "openai": "https://api.openai.com/v1",
+        "deepseek": "https://api.deepseek.com/v1",
+    })
+    # Which provider to use for each LLM route (must be a key in llm_providers).
+    # Empty string = auto-detect from legacy env vars.
+    llm_discussion_provider: str = ""
+    llm_code_provider: str = ""
+
 
 def load_settings(config_path: Path = Path("config/settings.yaml")) -> Settings:
     """Load settings from YAML file, falling back to defaults."""
