@@ -1237,6 +1237,48 @@ def create_app(dashboard_state: DashboardState | None = None) -> FastAPI:
             raise HTTPException(404, f"Agent '{agent_name}' not found")
         return _load_agent_trace_stats(agent, limit)
 
+    # ── Attention request endpoints ──────────────────────────────────
+
+    @app.get("/api/attention/pending")
+    async def get_attention_pending() -> list[dict[str, Any]]:
+        from agentgolem.runtime.attention import list_pending
+
+        data_dir = _state.data_dir or Path("data")
+        return [r.to_dict() for r in list_pending(data_dir)]
+
+    @app.get("/api/attention/history")
+    async def get_attention_history() -> list[dict[str, Any]]:
+        from agentgolem.runtime.attention import list_all
+
+        data_dir = _state.data_dir or Path("data")
+        return [r.to_dict() for r in list_all(data_dir) if r.resolved]
+
+    @app.get("/api/team-goal")
+    async def get_team_goal() -> dict[str, Any]:
+        from agentgolem.runtime.team_goals import load_active_team_goal
+
+        data_dir = _state.data_dir or Path("data")
+        goal = load_active_team_goal(data_dir)
+        if goal is None:
+            return {"active": False}
+        return {"active": True, **goal.to_dict()}
+
+    @app.get("/api/council/agents/{agent_name}/outcomes")
+    async def get_agent_outcomes(
+        agent_name: str,
+        limit: int = Query(50, ge=1, le=500),
+    ) -> dict[str, Any]:
+        from agentgolem.harness.outcomes import compute_outcome_stats
+        from agentgolem.harness.trace import load_traces
+
+        agent = _find_agent(_state, agent_name)
+        data_dir = getattr(agent, "_data_dir", None)
+        if data_dir is None:
+            return {"total_actions": 0}
+        traces = load_traces(data_dir, limit=limit)
+        stats = compute_outcome_stats(traces)
+        return stats.to_dict()
+
     @app.get("/api/dialogue")
     async def get_dialogue() -> dict[str, Any]:
         return build_dialogue_snapshot(_state)

@@ -494,6 +494,9 @@ class MainLoop:
         self._pending_memory_node_ids: list[str] = []  # set by _build_memory_context
         self._memory_node_text_cache: dict[str, str] = {}  # id → text for hit detection
 
+        # Attention escalation system
+        self._consecutive_tool_failures: dict[str, int] = {}  # tool_name → count
+
         # LLM client and conversation
         self._llm: Any = None
         self._code_llm: Any = None
@@ -595,6 +598,57 @@ class MainLoop:
         """Emit a human-readable activity line to the console."""
         if self._activity_callback:
             self._activity_callback(icon, text)
+
+    # ── Attention escalation ──────────────────────────────────────────
+
+    def _request_attention(
+        self, reason: str, context: str, urgency: str = "blocking"
+    ) -> None:
+        """Request human attention. Blocking requests pause ALL agents."""
+        from agentgolem.runtime.attention import AttentionRequest, save_request
+
+        req = AttentionRequest(
+            agent_name=self.agent_name,
+            reason=reason,
+            context=context,
+            urgency=urgency,
+        )
+        save_request(req, self._settings.data_dir)
+        self.audit_logger.log(
+            "attention_requested",
+            self.agent_name,
+            {"reason": reason, "urgency": urgency, "id": req.id},
+        )
+
+        if urgency == "blocking" and self._human_speaking_event is not None:
+            self._human_speaking_event.set()  # pauses ALL agents
+            self._emit(
+                "🚨",
+                f"ATTENTION NEEDED — {reason}\n"
+                f"  {context}\n"
+                f"  Type /attend to respond.",
+            )
+        else:
+            self._emit("⚠️", f"Attention (informational): {reason} — {context}")
+
+    def _record_tool_success(self, tool_name: str) -> None:
+        """Reset consecutive failure counter for a tool."""
+        self._consecutive_tool_failures.pop(tool_name, None)
+
+    def _record_tool_failure(self, tool_name: str, error: str) -> None:
+        """Increment failure counter; escalate if threshold reached."""
+        count = self._consecutive_tool_failures.get(tool_name, 0) + 1
+        self._consecutive_tool_failures[tool_name] = count
+        threshold = self._settings.tool_failure_escalation_threshold
+        if count >= threshold:
+            self._request_attention(
+                reason="tool_failure",
+                context=(
+                    f"Tool '{tool_name}' has failed {count} consecutive times. "
+                    f"Latest error: {error}"
+                ),
+            )
+            self._consecutive_tool_failures[tool_name] = 0
 
     @staticmethod
     def _secret_value(secret: SecretStr | None) -> str:
@@ -1228,6 +1282,110 @@ class MainLoop:
                 domains=("self_regulation",),
                 argument_spec=(),
                 usage_hint="idle",
+            ),
+            # --- Goal System ---
+            ToolActionSpec(
+                tool_name="internal",
+                action_name="goal.set",
+                capability_name="goal.set",
+                description="Set a personal goal with measurable success criteria",
+                domains=("self_regulation", "planning"),
+                argument_spec=(
+                    ToolArgument("description", "What you want to accomplish"),
+                    ToolArgument("success_criteria", "How you'll know it's done"),
+                ),
+                side_effect_class="local_write",
+                usage_hint=(
+                    "goal.set(description=Improve retrieval hit rate to 40%, "
+                    "success_criteria=Trace stats show hit rate above 0.4)"
+                ),
+            ),
+            ToolActionSpec(
+                tool_name="internal",
+                action_name="goal.progress",
+                capability_name="goal.progress",
+                description="Report evidence of progress toward a personal goal",
+                domains=("self_regulation", "planning"),
+                argument_spec=(
+                    ToolArgument("goal_id", "ID of the goal (from your active goals list)"),
+                    ToolArgument("evidence", "What progress was made"),
+                ),
+                side_effect_class="local_write",
+                usage_hint="goal.progress(goal_id=abc123, evidence=Changed top_k to 15)",
+            ),
+            ToolActionSpec(
+                tool_name="internal",
+                action_name="goal.complete",
+                capability_name="goal.complete",
+                description="Mark a personal goal as completed with a summary",
+                domains=("self_regulation", "planning"),
+                argument_spec=(
+                    ToolArgument("goal_id", "ID of the goal"),
+                    ToolArgument("summary", "Summary of what was accomplished"),
+                ),
+                side_effect_class="local_write",
+                usage_hint="goal.complete(goal_id=abc123, summary=Hit rate now 45%)",
+            ),
+            ToolActionSpec(
+                tool_name="internal",
+                action_name="goal.abandon",
+                capability_name="goal.abandon",
+                description="Abandon a goal that is no longer relevant or achievable",
+                domains=("self_regulation", "planning"),
+                argument_spec=(
+                    ToolArgument("goal_id", "ID of the goal"),
+                    ToolArgument("reason", "Why you're abandoning it"),
+                ),
+                side_effect_class="local_write",
+                usage_hint="goal.abandon(goal_id=abc123, reason=Criteria already met)",
+            ),
+            # --- Team Goals ---
+            ToolActionSpec(
+                tool_name="internal",
+                action_name="team.propose",
+                capability_name="team.propose",
+                description=(
+                    "Propose a real-world problem for the whole council to work on together"
+                ),
+                domains=("communication", "planning"),
+                argument_spec=(
+                    ToolArgument("problem", "The real-world problem to tackle"),
+                    ToolArgument("why", "Why this matters"),
+                    ToolArgument("success_criteria", "How we know it's done"),
+                ),
+                side_effect_class="peer_write",
+                available=bool(peers),
+                usage_hint=(
+                    "team.propose(problem=Create an AI safety reading list for educators, "
+                    "why=Bridge gap between research and public, "
+                    "success_criteria=Published guide with 5+ reviewed entries)"
+                ),
+            ),
+            ToolActionSpec(
+                tool_name="internal",
+                action_name="team.vote",
+                capability_name="team.vote",
+                description="Vote on a pending team goal proposal",
+                domains=("communication", "planning"),
+                argument_spec=(
+                    ToolArgument("vote", "accept or reject"),
+                    ToolArgument("reason", "Why you're voting this way"),
+                ),
+                side_effect_class="peer_write",
+                available=bool(peers),
+                usage_hint="team.vote(vote=accept, reason=Well-scoped and achievable)",
+            ),
+            ToolActionSpec(
+                tool_name="internal",
+                action_name="team.progress",
+                capability_name="team.progress",
+                description="Report progress on your assigned team subtask",
+                domains=("communication", "planning"),
+                argument_spec=(
+                    ToolArgument("evidence", "What you accomplished toward your subtask"),
+                ),
+                side_effect_class="local_write",
+                usage_hint="team.progress(evidence=Found 3 key papers on IIT)",
             ),
         ]
 
@@ -2623,6 +2781,7 @@ class MainLoop:
         """
         from agentgolem.harness.trace import load_traces
         from agentgolem.harness.trace_stats import compute_trace_stats
+        from agentgolem.harness.outcomes import compute_outcome_stats
         from agentgolem.runtime.vow_loader import render_calibration_protocol
 
         self._emit("🔄", "Running VowOS Calibration Protocol…")
@@ -2653,8 +2812,21 @@ class MainLoop:
                     "on whether your contributions are building on the "
                     "conversation.\n"
                 )
+                # Add outcome diagnostics
+                outcome_stats = compute_outcome_stats(traces)
+                if outcome_stats.total_actions > 0:
+                    diagnostic_block += (
+                        f"\n{outcome_stats.format_diagnostic()}\n\n"
+                        "Review your outcomes: are your actions producing "
+                        "meaningful results? Are you making progress on your "
+                        "goals? If productive rate is low, focus on actions "
+                        "that create tangible output.\n"
+                    )
         except Exception:
             pass  # never block calibration on trace loading failure
+
+        # Build goal review for calibration
+        goal_review = self._build_goal_context_for_prompt()
 
         prompt = (
             f"{self._identity_preamble()}\n\n"
@@ -2666,6 +2838,7 @@ class MainLoop:
             f"--- END PROTOCOL ---\n\n"
             f"Your recent thoughts and actions:\n{recent}\n"
             f"{diagnostic_block}\n"
+            f"{goal_review}"
             f"Perform a thorough self-audit:\n"
             f"1. For each of the Five Vows, assess your recent alignment "
             f"(0-10 scale with brief justification)\n"
@@ -4923,6 +5096,71 @@ class MainLoop:
             )
             return
 
+        # ── Goal capabilities ─────────────────────────────────────────
+        if capability == "goal.set":
+            desc = arguments.get("description", "").strip()
+            criteria = arguments.get("success_criteria", "").strip()
+            if not desc:
+                self._emit("⚠️", "goal.set missing description")
+                return
+            await self._set_personal_goal(desc, criteria)
+            return
+
+        if capability == "goal.progress":
+            goal_id = arguments.get("goal_id", "").strip()
+            evidence = arguments.get("evidence", "").strip()
+            if not goal_id or not evidence:
+                self._emit("⚠️", "goal.progress missing goal_id or evidence")
+                return
+            await self._report_goal_progress(goal_id, evidence)
+            return
+
+        if capability == "goal.complete":
+            goal_id = arguments.get("goal_id", "").strip()
+            summary = arguments.get("summary", "").strip()
+            if not goal_id:
+                self._emit("⚠️", "goal.complete missing goal_id")
+                return
+            await self._complete_goal(goal_id, summary or "(no summary)")
+            return
+
+        if capability == "goal.abandon":
+            goal_id = arguments.get("goal_id", "").strip()
+            reason = arguments.get("reason", "").strip()
+            if not goal_id:
+                self._emit("⚠️", "goal.abandon missing goal_id")
+                return
+            await self._abandon_goal(goal_id, reason or "(no reason)")
+            return
+
+        # ── Team goal capabilities ────────────────────────────────────
+        if capability == "team.propose":
+            problem = arguments.get("problem", "").strip()
+            why = arguments.get("why", "").strip()
+            criteria = arguments.get("success_criteria", "").strip()
+            if not problem:
+                self._emit("⚠️", "team.propose missing problem")
+                return
+            await self._propose_team_goal(problem, why, criteria)
+            return
+
+        if capability == "team.vote":
+            vote = arguments.get("vote", "").strip().lower()
+            reason = arguments.get("reason", "").strip()
+            if vote not in ("accept", "reject"):
+                self._emit("⚠️", "team.vote must be 'accept' or 'reject'")
+                return
+            await self._vote_team_goal(vote, reason)
+            return
+
+        if capability == "team.progress":
+            evidence = arguments.get("evidence", "").strip()
+            if not evidence:
+                self._emit("⚠️", "team.progress missing evidence")
+                return
+            await self._report_team_progress(evidence)
+            return
+
         if capability == "idle":
             self._emit("😌", "Resting…")
             await asyncio.sleep(2.0)
@@ -4978,8 +5216,10 @@ class MainLoop:
             if result.success:
                 self._recent_thoughts.append(f"Used {capability}")
                 self._emit(icon, f"{capability}: {result.data}")
+                self._record_tool_success(spec.tool_name)
             else:
                 self._emit("❌", f"{capability} failed: {result.error}")
+                self._record_tool_failure(spec.tool_name, result.error or "unknown")
             return
 
     async def _autonomous_browse(self, url: str) -> None:
@@ -4996,8 +5236,8 @@ class MainLoop:
             )
             if not result.success:
                 self._emit("❌", f"Failed to browse {normalized_url}: {result.error}")
+                self._record_tool_failure("browser", result.error or "unknown")
                 return
-
             data = result.data or {}
             text = str(data.get("text", ""))
             final_url = self._normalize_http_url(str(data.get("url", normalized_url)))
@@ -5007,6 +5247,7 @@ class MainLoop:
                 if str(link).startswith(("http://", "https://"))
             ]
             self._remember_urls([final_url, *links])
+            self._record_tool_success("browser")
             self._emit("📖", f"Read {len(text):,} chars from {final_url}")
 
             memory_context = await self._build_memory_context(
@@ -5045,6 +5286,7 @@ class MainLoop:
                 error=repr(e),
             )
             self._emit("❌", f"Failed to browse {normalized_url}: {e}")
+            self._record_tool_failure("browser", repr(e))
 
     async def _autonomous_search(
         self,
@@ -5081,9 +5323,11 @@ class MainLoop:
         result = await self._invoke_registered_tool("search", **kwargs)
         if not result.success:
             self._emit("❌", f"Search failed: {result.error}")
+            self._record_tool_failure("search", result.error or "unknown")
             return
 
         data = result.data or {}
+        self._record_tool_success("search")
         results = data.get("results", [])
         links = [
             self._normalize_http_url(str(link))
@@ -5223,6 +5467,9 @@ class MainLoop:
         valid_names_str = ", ".join(valid_names)
         enrichment_guidance = self._toolbox_enrichment_guidance()
 
+        # Build goal context for action selection
+        goal_ctx = self._build_goal_context_for_prompt()
+
         # Consciousness kernel: compute attention directive
         attention_preamble = ""
         try:
@@ -5250,6 +5497,7 @@ class MainLoop:
                             f"Peers: {peers}\n"
                             f"Recent:\n{recent}\n{memory_block}"
                             f"{consciousness_ctx}\n"
+                            f"{goal_ctx}"
                             f"Available capabilities:\n{toolbox_summary}\n\n"
                             f"VALID CAPABILITY NAMES: {valid_names_str}\n"
                             f"You MUST set 'capability' to one of the names above. "
@@ -6640,6 +6888,342 @@ class MainLoop:
         self._save_nj_reading_state()
         self._save_council7_state()
         self.runtime_state._persist()
+
+    # ── Individual goal system ────────────────────────────────────────
+
+    def _build_goal_context_for_prompt(self) -> str:
+        """Build a goal context block for action selection prompts."""
+        parts: list[str] = []
+
+        # Team goal
+        try:
+            from agentgolem.runtime.team_goals import load_active_team_goal
+
+            tg = load_active_team_goal(self._settings.data_dir)
+            if tg is not None and tg.status in ("voting", "active"):
+                parts.append("--- TEAM GOAL ---")
+                parts.append(f"🎯 \"{tg.description}\"")
+                parts.append(f"   Why: {tg.why_it_matters}")
+                parts.append(f"   Status: {tg.status.upper()}")
+                if tg.status == "voting":
+                    accepts = sum(1 for v in tg.votes.values() if v == "accept")
+                    total = getattr(self._settings, "agent_count", 7)
+                    parts.append(
+                        f"   Votes: {accepts}/{total} accept. "
+                        f"Use team.vote to cast your vote."
+                    )
+                elif tg.status == "active":
+                    st = tg.subtasks.get(self.agent_name)
+                    if st is not None:
+                        parts.append(
+                            f"   Your subtask: {st.get('description', '?')[:80]} "
+                            f"[{st.get('status', 'pending')}]"
+                        )
+                        idle_ticks = getattr(self._settings, "team_idle_nudge_ticks", 5)
+                        last_upd = st.get("last_updated", "")
+                        if last_upd:
+                            try:
+                                lu = datetime.fromisoformat(last_upd)
+                                age_secs = (datetime.now(UTC) - lu).total_seconds()
+                                interval = getattr(
+                                    self._settings, "autonomous_interval_seconds", 60.0
+                                )
+                                if age_secs > idle_ticks * interval:
+                                    parts.append(
+                                        "   ⚠️ No progress for a while. "
+                                        "What's blocking you?"
+                                    )
+                            except Exception:
+                                pass
+                    else:
+                        parts.append("   You have no assigned subtask yet.")
+                parts.append("---")
+        except Exception:
+            pass
+
+        # Personal goals
+        active_goals = self._get_active_goals()
+        if active_goals:
+            parts.append("--- YOUR PERSONAL GOALS ---")
+            for i, g in enumerate(active_goals[:5], 1):
+                parts.append(
+                    f"{i}. [{g['id'][:8]}] {g['description'][:80]}"
+                )
+                if g.get("criteria"):
+                    parts.append(f"   Criteria: {g['criteria'][:60]}")
+            parts.append(
+                "Choose actions that advance your goals. "
+                "Use goal.progress to record evidence."
+            )
+            parts.append("---")
+
+        if parts:
+            return "\n".join(parts) + "\n\n"
+        return ""
+
+    def _get_active_goals(self) -> list[dict]:
+        """Return active personal goals from the memory graph."""
+        if self._memory_store is None:
+            return []
+        try:
+            all_nodes = self._memory_store.list_nodes()
+        except Exception:
+            return []
+        goals = []
+        for node in all_nodes:
+            st = getattr(node, "search_text", "") or ""
+            if st.startswith("GOAL|ACTIVE|"):
+                parts = st.split("|", 5)
+                goals.append({
+                    "id": node.id,
+                    "description": parts[4] if len(parts) > 4 else node.content[:80],
+                    "criteria": parts[3] if len(parts) > 3 else "",
+                    "created": parts[5] if len(parts) > 5 else "",
+                    "content": node.content,
+                })
+        return goals
+
+    async def _set_personal_goal(self, description: str, criteria: str) -> None:
+        """Create a new personal goal as a GOAL node in the memory graph."""
+        active = self._get_active_goals()
+        max_goals = getattr(self._settings, "max_active_goals", 3)
+        if len(active) >= max_goals:
+            self._emit(
+                "⚠️",
+                f"Already have {len(active)} active goals (max {max_goals}). "
+                f"Complete or abandon one first.",
+            )
+            return
+        if self._memory_store is None:
+            self._emit("⚠️", "Memory store not available")
+            return
+
+        from agentgolem.memory.models import MemoryNode, NodeType, NodeStatus
+
+        iso_now = datetime.now(UTC).isoformat()
+        search_text = f"GOAL|ACTIVE|{self.agent_name}|{criteria}|{description}|{iso_now}"
+        node = MemoryNode(
+            content=f"Goal: {description}\nSuccess criteria: {criteria}",
+            node_type=NodeType.GOAL,
+            status=NodeStatus.ACTIVE,
+            search_text=search_text,
+            salience=0.9,
+            source_kind="inference",
+            source_id=f"goal_set_{self.agent_name}",
+            trustworthiness=1.0,
+            base_usefulness=0.8,
+        )
+        try:
+            self._memory_store.add_node(node)
+            self._emit("🎯", f"New goal: {description[:80]}")
+            self._recent_thoughts.append(f"Set goal: {description[:60]}")
+            self.audit_logger.log(
+                "goal_set", self.agent_name,
+                {"goal_id": node.id, "description": description, "criteria": criteria},
+            )
+        except Exception as e:
+            self._emit("❌", f"Failed to set goal: {e}")
+
+    async def _report_goal_progress(self, goal_id: str, evidence: str) -> None:
+        """Record progress toward a personal goal as an EVENT node."""
+        if self._memory_store is None:
+            return
+        from agentgolem.memory.models import MemoryNode, NodeType, EdgeType, NodeStatus
+
+        node = MemoryNode(
+            content=f"Goal progress: {evidence}",
+            node_type=NodeType.EVENT,
+            status=NodeStatus.ACTIVE,
+            search_text=f"GOAL_PROGRESS|{goal_id}|{evidence[:60]}",
+            salience=0.6,
+            source_kind="inference",
+            source_id=f"goal_progress_{self.agent_name}",
+            trustworthiness=1.0,
+            base_usefulness=0.5,
+        )
+        try:
+            self._memory_store.add_node(node)
+            self._memory_store.add_edge(node.id, goal_id, EdgeType.DERIVED_FROM)
+            self._emit("📈", f"Goal progress: {evidence[:80]}")
+            self._recent_thoughts.append(f"Goal progress: {evidence[:60]}")
+            self.audit_logger.log(
+                "goal_progress", self.agent_name,
+                {"goal_id": goal_id, "evidence": evidence},
+            )
+        except Exception as e:
+            self._emit("❌", f"Failed to record progress: {e}")
+
+    async def _complete_goal(self, goal_id: str, summary: str) -> None:
+        """Mark a personal goal as completed."""
+        if self._memory_store is None:
+            return
+        try:
+            node = self._memory_store.get_node(goal_id)
+            if node is None:
+                self._emit("⚠️", f"Goal {goal_id} not found")
+                return
+            st = getattr(node, "search_text", "") or ""
+            new_st = st.replace("GOAL|ACTIVE|", "GOAL|COMPLETED|", 1)
+            self._memory_store.update_node(goal_id, search_text=new_st)
+            self._emit("✅", f"Goal completed: {summary[:80]}")
+            self._recent_thoughts.append(f"Completed goal: {summary[:60]}")
+            self.audit_logger.log(
+                "goal_complete", self.agent_name,
+                {"goal_id": goal_id, "summary": summary},
+            )
+        except Exception as e:
+            self._emit("❌", f"Failed to complete goal: {e}")
+
+    async def _abandon_goal(self, goal_id: str, reason: str) -> None:
+        """Mark a personal goal as abandoned."""
+        if self._memory_store is None:
+            return
+        try:
+            node = self._memory_store.get_node(goal_id)
+            if node is None:
+                self._emit("⚠️", f"Goal {goal_id} not found")
+                return
+            st = getattr(node, "search_text", "") or ""
+            new_st = st.replace("GOAL|ACTIVE|", "GOAL|ABANDONED|", 1)
+            self._memory_store.update_node(goal_id, search_text=new_st)
+            self._emit("🚫", f"Goal abandoned: {reason[:80]}")
+            self.audit_logger.log(
+                "goal_abandon", self.agent_name,
+                {"goal_id": goal_id, "reason": reason},
+            )
+        except Exception as e:
+            self._emit("❌", f"Failed to abandon goal: {e}")
+
+    # ── Team goal system ──────────────────────────────────────────────
+
+    async def _propose_team_goal(
+        self, problem: str, why: str, criteria: str
+    ) -> None:
+        """Propose a team goal and broadcast it for voting."""
+        from agentgolem.runtime.team_goals import (
+            TeamGoal, load_active_team_goal, save_team_goal,
+        )
+        data_dir = self._settings.data_dir
+        existing = load_active_team_goal(data_dir)
+        if existing is not None and existing.status in ("active", "voting"):
+            self._emit(
+                "⚠️",
+                f"Team already has an {existing.status} goal. "
+                f"Complete it first.",
+            )
+            return
+
+        goal = TeamGoal(
+            description=problem,
+            why_it_matters=why,
+            success_criteria=criteria,
+            proposed_by=self.agent_name,
+            status="voting",
+            votes={self.agent_name: "accept"},
+        )
+        save_team_goal(goal, data_dir)
+        self._emit("🎯", f"Proposed team goal: {problem[:80]}")
+        if self._peer_bus:
+            await self._peer_bus.broadcast(
+                self.agent_name,
+                f"🎯 TEAM GOAL PROPOSAL: {problem}\n"
+                f"Why: {why}\nCriteria: {criteria}\n"
+                f"Vote with team.vote(vote=accept|reject, reason=...)",
+            )
+        self.audit_logger.log(
+            "team_goal_proposed", self.agent_name,
+            {"goal_id": goal.id, "problem": problem},
+        )
+
+    async def _vote_team_goal(self, vote: str, reason: str) -> None:
+        """Cast a vote on the current team goal proposal."""
+        from agentgolem.runtime.team_goals import (
+            load_active_team_goal, save_team_goal,
+        )
+        data_dir = self._settings.data_dir
+        goal = load_active_team_goal(data_dir)
+        if goal is None or goal.status != "voting":
+            self._emit("⚠️", "No team goal currently in voting phase")
+            return
+        if self.agent_name in goal.votes:
+            self._emit("ℹ️", "Already voted on this proposal")
+            return
+
+        goal.votes[self.agent_name] = vote
+        accepts = sum(1 for v in goal.votes.values() if v == "accept")
+        rejects = sum(1 for v in goal.votes.values() if v == "reject")
+        total_agents = getattr(self._settings, "agent_count", 7)
+        majority = (total_agents // 2) + 1
+
+        self._emit(
+            "🗳️",
+            f"Voted {vote} on team goal ({accepts} accept, {rejects} reject)",
+        )
+
+        if accepts >= majority:
+            goal.status = "active"
+            self._emit("🎉", "Team goal ACCEPTED — proposer should decompose subtasks")
+            if self._peer_bus:
+                await self._peer_bus.broadcast(
+                    self.agent_name,
+                    f"🎉 Team goal accepted ({accepts}/{total_agents})! "
+                    f"Waiting for {goal.proposed_by} to decompose into subtasks.",
+                )
+        elif rejects > total_agents - majority:
+            goal.status = "abandoned"
+            self._emit("❌", "Team goal REJECTED by majority")
+
+        save_team_goal(goal, data_dir)
+        self.audit_logger.log(
+            "team_goal_vote", self.agent_name,
+            {"goal_id": goal.id, "vote": vote, "reason": reason},
+        )
+
+    async def _report_team_progress(self, evidence: str) -> None:
+        """Report progress on assigned team subtask."""
+        from agentgolem.runtime.team_goals import (
+            load_active_team_goal, save_team_goal,
+        )
+        data_dir = self._settings.data_dir
+        goal = load_active_team_goal(data_dir)
+        if goal is None or goal.status != "active":
+            self._emit("⚠️", "No active team goal")
+            return
+
+        subtask = goal.subtasks.get(self.agent_name)
+        if subtask is None:
+            self._emit("ℹ️", "You have no assigned subtask yet")
+            return
+
+        if "progress_notes" not in subtask:
+            subtask["progress_notes"] = []
+        subtask["progress_notes"].append(evidence)
+        subtask["status"] = "in_progress"
+        subtask["last_updated"] = datetime.now(UTC).isoformat()
+        goal.subtasks[self.agent_name] = subtask
+        save_team_goal(goal, data_dir)
+
+        self._emit("📈", f"Team subtask progress: {evidence[:80]}")
+        self.audit_logger.log(
+            "team_progress", self.agent_name,
+            {"goal_id": goal.id, "evidence": evidence},
+        )
+
+        # Check if all subtasks are completed
+        all_done = all(
+            st.get("status") == "completed"
+            for st in goal.subtasks.values()
+        )
+        if all_done and goal.subtasks:
+            goal.status = "completed"
+            goal.completed_at = datetime.now(UTC).isoformat()
+            save_team_goal(goal, data_dir)
+            self._emit("🏆", "Team goal COMPLETED — all subtasks done!")
+            if self._peer_bus:
+                await self._peer_bus.broadcast(
+                    self.agent_name,
+                    f"🏆 Team goal completed: {goal.description[:80]}",
+                )
 
     def stop(self) -> None:
         """Signal the loop to stop."""

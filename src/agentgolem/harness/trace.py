@@ -38,6 +38,11 @@ class ExecutionTrace:
     # Peer engagement: was our prior output echoed in an incoming message?
     peer_engagement_signal: bool | None = None
 
+    # Outcome tracking (Phase C)
+    outcome_type: str = ""   # search_results, browse_insight, goal_progress, etc.
+    outcome_value: str = ""  # compact description of what happened
+    goal_id: str = ""        # which goal this action served (if any)
+
     timestamp: str = field(
         default_factory=lambda: datetime.now(UTC).isoformat()
     )

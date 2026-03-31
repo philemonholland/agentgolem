@@ -744,6 +744,35 @@ PARAM_DEFS: list[ParamDef] = [
         "int",
         "Swarm",
     ),
+    # --- Autonomy & Goals ---
+    param(
+        "tool_failure_escalation_threshold",
+        "Tool Failure Threshold",
+        "Consecutive tool failures before escalating to human attention",
+        "int",
+        "Autonomy",
+    ),
+    param(
+        "max_active_goals",
+        "Max Active Goals",
+        "Maximum personal goals an agent can hold simultaneously",
+        "int",
+        "Autonomy",
+    ),
+    param(
+        "goal_stale_ticks",
+        "Goal Stale Ticks",
+        "Ticks without progress before suggesting goal review",
+        "int",
+        "Autonomy",
+    ),
+    param(
+        "team_idle_nudge_ticks",
+        "Team Idle Nudge Ticks",
+        "Ticks without subtask progress before injecting a nudge",
+        "int",
+        "Autonomy",
+    ),
     # --- Consciousness Kernel ---
     param(
         "metacognition_interval",
@@ -1779,6 +1808,13 @@ HELP_TEXT = f"""
   {C.CYAN}/reset-nj{C.RESET}                   Reset Niscalajyoti reading progress for all agents.
   {C.CYAN}/quit{C.RESET}  or  {C.CYAN}/exit{C.RESET}           Gracefully shut down all agents.
 
+  {C.BOLD}━━━ Autonomy & Goals ━━━{C.RESET}
+
+  {C.CYAN}/attend [message]{C.RESET}           Acknowledge the oldest blocking attention request.
+  {C.CYAN}/requests{C.RESET}                   List all pending attention requests.
+  {C.CYAN}/goals{C.RESET}                      Show active team goal and individual goals.
+  {C.CYAN}/outcomes{C.RESET}                   Show per-agent outcome summary.
+
   {C.BOLD}━━━ Talking to Agents ━━━{C.RESET}
 
   {C.DIM}Bare text joins the live conversation — one natural responder answers first:{C.RESET}
@@ -1917,6 +1953,17 @@ class RuntimeConsole:
                 self._cmd_restart()
             elif cmd == "/reset-nj":
                 self._cmd_reset_nj()
+            elif cmd == "/attend":
+                msg = parts[1] if len(parts) >= 2 else ""
+                if len(parts) >= 3:
+                    msg = raw.split(maxsplit=1)[1]
+                self._cmd_attend(msg)
+            elif cmd == "/requests":
+                self._cmd_requests()
+            elif cmd == "/goals":
+                self._cmd_goals()
+            elif cmd == "/outcomes":
+                self._cmd_outcomes()
             else:
                 cprint(f"  Unknown command: {cmd}  (type /help for the list)", C.RED)
         except Exception as e:
@@ -2235,6 +2282,116 @@ class RuntimeConsole:
             f"their initial reading tracks on the next wake cycle.",
             C.YELLOW,
         )
+
+    # ── autonomy commands ────────────────────────────────────────────
+
+    def _cmd_attend(self, message: str) -> None:
+        """Resolve the oldest blocking attention request."""
+        from agentgolem.runtime.attention import (
+            list_pending,
+            resolve_oldest_blocking,
+        )
+
+        data_dir = self._settings.data_dir
+        resolved = resolve_oldest_blocking(data_dir, message)
+        if resolved is None:
+            cprint("  No pending blocking attention requests.", C.DIM)
+            return
+
+        cprint(
+            f"  ✅ Resolved request from {resolved.agent_name}: "
+            f"{resolved.reason}",
+            C.GREEN,
+        )
+        if message:
+            cprint(f"  📨 Your message: {message}", C.DIM)
+            # Deliver as human message to the requesting agent
+            for agent in self._agents:
+                if agent.agent_name == resolved.agent_name:
+                    asyncio.run_coroutine_threadsafe(
+                        agent.interrupt_manager.send_message(
+                            f"[Attention response] {message}"
+                        ),
+                        self._loop,
+                    )
+                    break
+
+        # Clear pause if no more blocking requests remain
+        remaining = [
+            r for r in list_pending(data_dir) if r.urgency == "blocking"
+        ]
+        if not remaining:
+            self._human_speaking.clear()
+            self._transient_pause.clear()
+            for agent in self._agents:
+                agent._conversation_paused = False
+            cprint("  ▶ All blocking requests resolved. Agents resumed.", C.GREEN)
+        else:
+            cprint(
+                f"  ⚠ {len(remaining)} blocking request(s) still pending.",
+                C.YELLOW,
+            )
+
+    def _cmd_requests(self) -> None:
+        """List all pending attention requests."""
+        from agentgolem.runtime.attention import list_pending
+
+        pending = list_pending(self._settings.data_dir)
+        if not pending:
+            cprint("  No pending attention requests.", C.DIM)
+            return
+        cprint(f"\n  {C.BOLD}Pending Attention Requests ({len(pending)}){C.RESET}")
+        for req in pending:
+            icon = "🚨" if req.urgency == "blocking" else "ℹ️"
+            cprint(
+                f"  {icon} [{req.id}] {req.agent_name}: {req.reason}\n"
+                f"     {req.context[:120]}",
+                C.YELLOW if req.urgency == "blocking" else C.DIM,
+            )
+
+    def _cmd_goals(self) -> None:
+        """Show active team goal and individual goals."""
+        from agentgolem.runtime.team_goals import load_active_team_goal
+
+        tg = load_active_team_goal(self._settings.data_dir)
+        if tg is not None:
+            cprint(f"\n  {C.BOLD}🎯 Team Goal: {tg.description}{C.RESET}", C.CYAN)
+            cprint(f"     Status: {tg.status}", C.DIM)
+            for name, st in tg.subtasks.items():
+                icon = {"completed": "✅", "in_progress": "🔄", "blocked": "🚫"}.get(
+                    st.get("status", "pending"), "⏳"
+                )
+                cprint(
+                    f"     {icon} {name}: {st.get('description', '?')[:80]} "
+                    f"[{st.get('status', 'pending')}]",
+                    C.DIM,
+                )
+        else:
+            cprint("  No active team goal.", C.DIM)
+
+    def _cmd_outcomes(self) -> None:
+        """Show per-agent outcome summary."""
+        from agentgolem.harness.outcomes import compute_outcome_stats
+        from agentgolem.harness.trace import load_traces
+
+        cprint(f"\n  {C.BOLD}📊 Outcome Summary{C.RESET}", C.CYAN)
+        for agent in self._agents:
+            data_dir = getattr(agent, "_data_dir", None)
+            if data_dir is None:
+                continue
+            traces = load_traces(data_dir, limit=50)
+            if not traces:
+                cprint(f"  {agent.agent_name}: (no traces)", C.DIM)
+                continue
+            stats = compute_outcome_stats(traces)
+            cprint(
+                f"  {agent.agent_name}: "
+                f"productive={stats.productive_rate:.0%} "
+                f"goals={stats.goals_set}↑{stats.goals_progressed}→{stats.goals_completed}✓ "
+                f"failures={stats.tool_failures} "
+                f"idle={stats.idle_rate:.0%}",
+                C.DIM,
+            )
 
     # ── hot-reload engine ─────────────────────────────────────────────
 

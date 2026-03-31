@@ -127,6 +127,12 @@ class Settings(BaseModel):
     llm_discussion_provider: str = ""
     llm_code_provider: str = ""
 
+    # Autonomy: attention, goals, outcomes
+    tool_failure_escalation_threshold: int = 2
+    max_active_goals: int = 3
+    goal_stale_ticks: int = 10
+    team_idle_nudge_ticks: int = 5
+
     @model_validator(mode="before")
     @classmethod
     def _convert_legacy_retention_units(cls, value: object) -> object:

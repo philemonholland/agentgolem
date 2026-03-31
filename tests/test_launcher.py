@@ -543,6 +543,7 @@ class TestParamDefs:
             "Swarm",
             "Ethical Foundation",
             "LLM Inference",
+            "Autonomy",
         }
         assert groups == expected
 
