@@ -25,6 +25,10 @@ from agentgolem.benchmarks.metrics import (
     precision_at_k,
     reciprocal_rank,
 )
+from agentgolem.benchmarks.live_memory import (
+    interpret_live_memory_run_report,
+    run_live_memory_target,
+)
 from agentgolem.benchmarks.models import (
     BenchmarkReport,
     BenchmarkRunReport,
@@ -35,6 +39,7 @@ from agentgolem.benchmarks.models import (
     ErrorRecoveryBenchmarkReport,
     ErrorRecoveryCaseResult,
     ErrorRecoveryScenario,
+    LiveMemoryLifecycleRunReport,
     MetricSummary,
     RetrievalAggregateMetrics,
     RetrievalBenchmarkReport,
@@ -62,7 +67,7 @@ from agentgolem.tools.browser import BrowserTool, WebPage
 
 logger = structlog.get_logger(__name__)
 
-ReportPayload = BenchmarkReport | BenchmarkRunReport
+ReportPayload = BenchmarkReport | BenchmarkRunReport | LiveMemoryLifecycleRunReport
 
 
 def interpret_report(report: BenchmarkReport, output_path: Path | None = None) -> str:
@@ -267,6 +272,8 @@ def interpret_run_report(
 
 def interpret_payload(payload: ReportPayload, output_path: Path | None = None) -> str:
     """Return a human-readable summary for any benchmark report payload."""
+    if isinstance(payload, LiveMemoryLifecycleRunReport):
+        return interpret_live_memory_run_report(payload, output_path=output_path)
     if isinstance(payload, BenchmarkRunReport):
         return interpret_run_report(payload, output_path=output_path)
     return interpret_report(payload, output_path=output_path)
@@ -881,6 +888,8 @@ def load_suite(path: Path) -> BenchmarkSuite:
 def load_report(path: Path) -> ReportPayload:
     """Load a benchmark report payload from JSON."""
     data = json.loads(path.read_text(encoding="utf-8"))
+    if "agent_reports" in data and "aggregate" in data:
+        return LiveMemoryLifecycleRunReport.model_validate(data)
     if "suite_reports" in data:
         return BenchmarkRunReport.model_validate(data)
     return BenchmarkReport.model_validate(data)
@@ -896,9 +905,14 @@ def write_report(payload: ReportPayload, path: Path) -> None:
 
 
 async def _run_from_args(args: argparse.Namespace) -> int:
+    if args.live_data is not None and (args.preset or args.suite is not None):
+        raise ValueError("Cannot combine --live-data with a suite path or --preset.")
     if args.preset and args.suite is not None:
         raise ValueError("Cannot specify both suite path and --preset.")
-    if args.preset:
+
+    if args.live_data is not None:
+        payload = await run_live_memory_target(args.live_data, run_label=args.label)
+    elif args.preset:
         payload = await run_preset(args.preset, run_label=args.label)
     elif args.suite is not None:
         payload = await run_target(args.suite, run_label=args.label)
@@ -913,7 +927,17 @@ async def _run_from_args(args: argparse.Namespace) -> int:
         return 0
 
     if args.output is not None:
-        if isinstance(payload, BenchmarkRunReport):
+        if isinstance(payload, LiveMemoryLifecycleRunReport):
+            summary = {
+                "run_label": payload.run_label,
+                "output": str(args.output),
+                "agent_count": payload.agent_count,
+                "passed_agent_count": payload.passed_agent_count,
+                "mixed_agent_count": payload.mixed_agent_count,
+                "failed_agent_count": payload.failed_agent_count,
+                "overall_status": payload.overall_status.value,
+            }
+        elif isinstance(payload, BenchmarkRunReport):
             summary = {
                 "run_label": payload.run_label,
                 "output": str(args.output),
@@ -968,6 +992,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Optional named preset, such as 'robust'. Defaults to 'robust' "
             "when no suite path is given."
+        ),
+    )
+    parser.add_argument(
+        "--live-data",
+        type=Path,
+        default=None,
+        help=(
+            "Optional path to a live data root, an agent directory, or a "
+            "`graph.db` file for a read-only memory lifecycle audit."
         ),
     )
     parser.add_argument(

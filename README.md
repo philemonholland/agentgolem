@@ -229,7 +229,8 @@ The test suite covers the full runtime, memory, trust, sleep, and tooling stack.
 
 ## Benchmarking
 
-Run the offline benchmark harness against the robust preset or a labeled JSON suite:
+Run the benchmark tooling against either the robust offline preset or a live
+memory snapshot audit:
 
 ```powershell
 benchmark.bat
@@ -238,6 +239,8 @@ python -m agentgolem.benchmarks benchmarks
 python -m agentgolem.benchmarks benchmarks --output data\benchmarks\latest_run.json --interpret
 python -m agentgolem.benchmarks benchmarks --output data\benchmarks\gpt-5.4.json --label gpt-5.4
 python -m agentgolem.benchmarks benchmarks --output data\benchmarks\claude-sonnet-4.6.json --label claude-sonnet-4.6
+python -m agentgolem.benchmarks --live-data data --output data\benchmarks\live_memory.json --interpret
+python -m agentgolem.benchmarks --live-data data\council_3 --interpret
 python -m agentgolem.benchmarks.compare data\benchmarks\gpt-5.4.json data\benchmarks\claude-sonnet-4.6.json
 ```
 
@@ -255,8 +258,16 @@ preset currently includes:
 Reports now include bootstrap confidence intervals and delta-vs-baseline
 summaries so you can see whether a gain looks robust or just noisy.
 
+`--live-data` runs a read-only lifecycle audit over real `graph.db` snapshots.
+It copies each live database to a temporary file before probing traversal paths,
+so the audit does not bump `access_count` or mutate the running agents.
+
 The older JSON suites in `benchmarks\` still work and are useful as smoke tests
 or custom experiments, but they are no longer the default “real benchmark” path.
+
+`agentgolem.benchmarks.compare` is for offline benchmark reports only; live
+lifecycle audit reports use a different schema and are rejected there on
+purpose.
 
 For the suite format and planned extensions, see
 **[docs/benchmarking.md](docs/benchmarking.md)**.

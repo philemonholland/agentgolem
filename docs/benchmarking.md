@@ -5,9 +5,12 @@ the main question: does the system retrieve the right memories, assign useful
 trust scores, recover from failures, and beat stronger alternatives in a way
 that still looks robust once uncertainty is considered?
 
-The offline benchmark harness in `src\agentgolem\benchmarks\` turns that
-question into repeatable runs with labeled suites, deterministic presets, and
-JSON reports.
+The benchmark tooling in `src\agentgolem\benchmarks\` now covers two lanes:
+
+- an offline harness with labeled suites, deterministic presets, and JSON
+  reports;
+- a read-only live-memory lifecycle audit that inspects real `graph.db`
+  snapshots without mutating the running agents.
 
 ## What is implemented now
 
@@ -45,6 +48,32 @@ Aggregate reports now include:
 This is intentionally offline-first. The harness seeds an isolated temporary
 SQLite memory store, runs benchmark cases against it, and writes a stable JSON
 report without touching live agent state.
+
+The live-memory audit is complementary rather than a replacement. Instead of
+asking "does this benchmark suite beat a baseline?", it asks "what shape is the
+real memory graph in right now, and do core traversal paths still work on a
+snapshot of it?"
+
+## Live memory lifecycle audit
+
+The live audit scans one or more real memory graphs under a data root such as
+`data\council_*\memory\graph.db`.
+
+It is meant for fuller lifecycle checks that offline suites do not yet cover
+well:
+
+- provenance coverage across organically grown memories;
+- source density per node;
+- edge participation and graph connectedness;
+- trust-vs-source alignment gaps;
+- access distribution, including how much memory remains untouched;
+- canonical / archived rates in the current graph;
+- traversal integrity for neighborhoods, contradictions, and supersession chains.
+
+The runner never benchmarks the live DBs in place. It first copies each
+`graph.db` to a temporary snapshot, then runs all traversal checks on that
+snapshot so `access_count` and `last_accessed` in the real agent state are not
+changed.
 
 ## Existing measurable surfaces
 
@@ -99,6 +128,9 @@ benchmark.bat
 python -m agentgolem.benchmarks --preset robust
 python -m agentgolem.benchmarks --preset robust --output data\benchmarks\robust_run.json --interpret
 python -m agentgolem.benchmarks --preset robust --output data\benchmarks\gpt-5.4.json --label gpt-5.4
+python -m agentgolem.benchmarks --live-data data --output data\benchmarks\live_memory.json --interpret
+python -m agentgolem.benchmarks --live-data data\council_3 --interpret
+python -m agentgolem.benchmarks --live-data data\council_3\memory\graph.db --interpret
 python -m agentgolem.benchmarks benchmarks\sample_suite.json --output data\benchmarks\latest_report.json
 python -m agentgolem.benchmarks benchmarks
 python -m agentgolem.benchmarks benchmarks --output data\benchmarks\latest_run.json --interpret
@@ -112,10 +144,19 @@ human-readable interpretation before pausing so the result stays visible.
 Without `--interpret`, the Python CLI keeps its JSON-oriented behavior. With
 `--interpret`, it prints a concise verdict against the configured baselines.
 
+`--live-data` switches the CLI into lifecycle-audit mode. It accepts a data root
+(`data`), a single agent folder (`data\council_3`), or a direct database path
+(`data\council_3\memory\graph.db`). It cannot be combined with a suite path or
+`--preset`.
+
 The compare command is meant for labeled runs such as `gpt-5.4`,
 `claude-sonnet-4.6`, or `deepseek-reasoner`. It now shows raw point metrics
 plus delta-vs-baseline summaries, which makes cross-model runs less flattering
 when a model only beats a weak baseline by noise.
+
+The compare command is for offline benchmark reports only. Live lifecycle audit
+reports have a different schema and are intentionally rejected by
+`agentgolem.benchmarks.compare`.
 
 ## Report shape
 
@@ -131,6 +172,14 @@ Each report includes:
   actually means
 
 This makes it easy to diff benchmark runs across commits or settings snapshots.
+
+Live lifecycle reports instead include:
+
+- aggregate lifecycle metrics across every scanned agent graph;
+- per-agent graph metrics and notes;
+- traversal recall checks for neighborhoods, contradictions, and supersession;
+- pass / mixed / fail statuses based on memory-health thresholds rather than
+  baseline deltas.
 
 ## How to read the scores
 
@@ -166,6 +215,36 @@ Metric guide:
   - actual minus baseline
   - positive is better for retrieval and recovery metrics
   - negative is better for trust error metrics such as `Brier` and `ECE`
+
+Live lifecycle metric guide:
+
+- `Provenance coverage`
+  - fraction of nodes linked to at least one source
+  - higher is better; low values mean memory is growing without traceable origin
+- `Average sources per node`
+  - mean provenance density across the graph
+  - higher is usually better until it reflects redundant spam rather than richer grounding
+- `Edge participation`
+  - fraction of nodes that participate in at least one graph edge
+  - higher is better; very low values suggest the graph is becoming a flat pile of notes
+- `Trust/source alignment gap`
+  - mean absolute gap between node trustworthiness and linked source reliability
+  - lower is better; large gaps suggest trust is drifting away from evidence
+- `Zero-access rate`
+  - fraction of nodes that have never been revisited
+  - lower is generally healthier, though a growing graph can raise it temporarily
+- `Average access count`
+  - how often nodes are being revisited on average
+  - higher is usually better if it reflects useful recall rather than loops
+- `Canonical rate`
+  - fraction of nodes promoted to canonical memory
+  - context-dependent; near-zero can mean the system is not consolidating much
+- `Archived rate`
+  - fraction of nodes marked archived
+  - context-dependent; zero is normal in a very fresh graph
+- `Neighborhood / contradiction / supersession recall`
+  - whether the retriever can still walk the graph structure correctly on the snapshot
+  - higher is better; failures here suggest broken traversal integrity, not just weak ranking
 
 ## Known gaps and next layers
 

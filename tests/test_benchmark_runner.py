@@ -267,6 +267,12 @@ async def test_run_from_args_rejects_conflicting_suite_and_preset() -> None:
         await _run_from_args(args)
 
 
+async def test_run_from_args_rejects_live_data_with_preset() -> None:
+    args = build_parser().parse_args(["--live-data", "data", "--preset", "robust"])
+    with pytest.raises(ValueError, match="Cannot combine --live-data"):
+        await _run_from_args(args)
+
+
 async def test_load_suite_reads_json_file(tmp_path):
     suite_path = tmp_path / "suite.json"
     suite_path.write_text(json.dumps(_suite().model_dump(mode="json")), encoding="utf-8")

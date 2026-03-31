@@ -257,3 +257,66 @@ class BenchmarkRunReport(BaseModel):
     mixed_suite_count: int
     failed_suite_count: int
     suite_reports: list[BenchmarkReport]
+
+
+class LifecycleTraversalMetric(BaseModel):
+    """Traversal success rate plus the number of evaluated cases."""
+
+    case_count: int
+    success_rate: MetricSummary
+
+
+class LiveMemoryLifecycleAgentReport(BaseModel):
+    """Lifecycle audit for one live agent memory graph."""
+
+    agent_id: str
+    graph_path: str
+    node_count: int
+    edge_count: int
+    source_count: int
+    node_type_counts: dict[str, int]
+    edge_type_counts: dict[str, int]
+    provenance_coverage: MetricSummary
+    average_sources_per_node: MetricSummary
+    edge_participation_rate: MetricSummary
+    trust_source_alignment_gap: MetricSummary
+    zero_access_rate: MetricSummary
+    average_access_count: MetricSummary
+    canonical_rate: MetricSummary
+    archived_rate: MetricSummary
+    neighborhood_recall: LifecycleTraversalMetric | None = None
+    contradiction_recall: LifecycleTraversalMetric | None = None
+    supersession_recall: LifecycleTraversalMetric | None = None
+    overall_status: BenchmarkStatus = BenchmarkStatus.NOT_APPLICABLE
+    notes: list[str] = Field(default_factory=list)
+
+
+class LiveMemoryLifecycleAggregateReport(BaseModel):
+    """Aggregate lifecycle metrics across all scanned live memory graphs."""
+
+    provenance_coverage: MetricSummary
+    average_sources_per_node: MetricSummary
+    edge_participation_rate: MetricSummary
+    trust_source_alignment_gap: MetricSummary
+    zero_access_rate: MetricSummary
+    average_access_count: MetricSummary
+    canonical_rate: MetricSummary
+    archived_rate: MetricSummary
+    neighborhood_recall: LifecycleTraversalMetric | None = None
+    contradiction_recall: LifecycleTraversalMetric | None = None
+    supersession_recall: LifecycleTraversalMetric | None = None
+
+
+class LiveMemoryLifecycleRunReport(BaseModel):
+    """Read-only audit run over one or more live agent memory graphs."""
+
+    run_label: str = ""
+    target: str
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    agent_count: int
+    passed_agent_count: int
+    mixed_agent_count: int
+    failed_agent_count: int
+    overall_status: BenchmarkStatus = BenchmarkStatus.NOT_APPLICABLE
+    aggregate: LiveMemoryLifecycleAggregateReport
+    agent_reports: list[LiveMemoryLifecycleAgentReport]

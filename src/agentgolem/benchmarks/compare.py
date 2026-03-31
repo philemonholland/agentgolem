@@ -6,7 +6,12 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-from agentgolem.benchmarks.models import BenchmarkReport, BenchmarkRunReport, BenchmarkStatus
+from agentgolem.benchmarks.models import (
+    BenchmarkReport,
+    BenchmarkRunReport,
+    BenchmarkStatus,
+    LiveMemoryLifecycleRunReport,
+)
 from agentgolem.benchmarks.runner import load_report
 
 
@@ -16,6 +21,11 @@ def format_report_comparison(report_paths: list[Path]) -> str:
 
     for report_path in report_paths:
         payload = load_report(report_path)
+        if isinstance(payload, LiveMemoryLifecycleRunReport):
+            raise ValueError(
+                "Live memory lifecycle reports cannot be compared with "
+                "agentgolem.benchmarks.compare."
+            )
         for suite_report in _flatten_reports(payload):
             label = suite_report.run_label or report_path.stem
             grouped[suite_report.suite_name].append((label, suite_report))
