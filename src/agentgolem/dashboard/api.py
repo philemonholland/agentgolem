@@ -822,6 +822,61 @@ def _developmental_badge(developmental_state: Any) -> str:
     except Exception:
         return f"❓ {getattr(developmental_state, 'current_stage', 'unknown')}"
 
+
+# ── Execution trace helpers (Meta-Harness diagnostics) ───────────────
+
+
+def _load_agent_traces(agent: Any, limit: int = 20) -> list[dict[str, Any]]:
+    """Load recent execution traces for a single agent."""
+    from agentgolem.harness.trace import load_traces
+
+    data_dir = getattr(agent, "_data_dir", None)
+    if data_dir is None:
+        return []
+    traces = load_traces(data_dir, limit=limit)
+    return [t.to_dict() for t in traces]
+
+
+def _load_agent_trace_stats(agent: Any, limit: int = 50) -> dict[str, Any]:
+    """Compute aggregate trace stats for a single agent."""
+    from agentgolem.harness.trace import load_traces
+    from agentgolem.harness.trace_stats import compute_trace_stats
+
+    data_dir = getattr(agent, "_data_dir", None)
+    if data_dir is None:
+        return {"total_calls": 0}
+    traces = load_traces(data_dir, limit=limit)
+    stats = compute_trace_stats(traces)
+    return stats.to_dict()
+
+
+def _compact_trace_diagnostics(agent: Any) -> dict[str, Any] | None:
+    """Return a compact diagnostic summary for the agent card, or None."""
+    from agentgolem.harness.trace import load_traces
+    from agentgolem.harness.trace_stats import compute_trace_stats
+
+    data_dir = getattr(agent, "_data_dir", None)
+    if data_dir is None:
+        return None
+    try:
+        traces = load_traces(data_dir, limit=50)
+        if not traces:
+            return None
+        stats = compute_trace_stats(traces)
+        return {
+            "retrieval_hit_rate": round(stats.retrieval_hit_rate, 2),
+            "avg_context_tokens": round(stats.avg_context_tokens),
+            "peer_engagement_rate": round(stats.peer_engagement_rate, 2),
+            "total_calls": stats.total_calls,
+            "badge": (
+                f"📊 Retrieval: {stats.retrieval_hit_rate:.0%}"
+                f" | Context: {stats.avg_context_tokens:,.0f}"
+                f" | Engagement: {stats.peer_engagement_rate:.0%}"
+            ),
+        }
+    except Exception:
+        return None
+
 
 def _build_agent_snapshot(st: DashboardState, agent: Any) -> dict[str, Any]:
     bus = st.peer_bus
@@ -953,6 +1008,7 @@ def _build_agent_snapshot(st: DashboardState, agent: Any) -> dict[str, Any]:
             "max_completion_tokens": getattr(agent, "_discussion_max_completion_tokens", None),
             "peer_message_max_chars": getattr(agent, "_peer_msg_limit", None),
         },
+        "trace_diagnostics": _compact_trace_diagnostics(agent),
         "changed_recently": changed,
         "has_recent_changes": any(changed.values()),
         "last_updated": {
@@ -1162,6 +1218,24 @@ def create_app(dashboard_state: DashboardState | None = None) -> FastAPI:
         if agent is None:
             raise HTTPException(404, f"Agent '{agent_name}' not found")
         return _build_agent_snapshot(_state, agent)
+
+    @app.get("/api/council/agents/{agent_name}/traces")
+    async def get_agent_traces(
+        agent_name: str, limit: int = Query(20, ge=1, le=200),
+    ) -> list[dict[str, Any]]:
+        agent = _resolve_agent(_state, agent_name)
+        if agent is None:
+            raise HTTPException(404, f"Agent '{agent_name}' not found")
+        return _load_agent_traces(agent, limit)
+
+    @app.get("/api/council/agents/{agent_name}/trace-stats")
+    async def get_agent_trace_stats(
+        agent_name: str, limit: int = Query(50, ge=1, le=500),
+    ) -> dict[str, Any]:
+        agent = _resolve_agent(_state, agent_name)
+        if agent is None:
+            raise HTTPException(404, f"Agent '{agent_name}' not found")
+        return _load_agent_trace_stats(agent, limit)
 
     @app.get("/api/dialogue")
     async def get_dialogue() -> dict[str, Any]:

@@ -24,6 +24,7 @@ from agentgolem.consciousness.calibration import (
     apply_calibration_to_self_model,
     parse_calibration_response,
 )
+from agentgolem.harness.trace import ExecutionTrace, append_trace
 from agentgolem.identity.heartbeat import HeartbeatManager, HeartbeatSummary
 from agentgolem.identity.soul import SoulManager, SoulUpdate
 from agentgolem.llm.base import Message
@@ -487,6 +488,11 @@ class MainLoop:
         self._mycelium_store: Any = None
         self._shared_memory_export_dirty: bool = False
         self._last_shared_memory_export_at: datetime | None = None
+
+        # Execution trace support (Meta-Harness diagnostic calibration)
+        self._recent_outgoing_texts: list[str] = []  # last N outgoing peer msgs
+        self._pending_memory_node_ids: list[str] = []  # set by _build_memory_context
+        self._memory_node_text_cache: dict[str, str] = {}  # id → text for hit detection
 
         # LLM client and conversation
         self._llm: Any = None
@@ -1256,13 +1262,24 @@ class MainLoop:
             "inventing runtime plugin loading."
         )
 
-    async def _complete_discussion(self, messages: list[Message], **kwargs: Any) -> str:
+    async def _complete_discussion(
+        self,
+        messages: list[Message],
+        *,
+        trace_meta: dict[str, str] | None = None,
+        trace_memory_ids: list[str] | None = None,
+        **kwargs: Any,
+    ) -> str:
         """Run a discussion-oriented completion.
 
         Defaults ``max_completion_tokens`` to the configured discussion token
         budget unless the caller explicitly overrides it.  Also injects
         temperature (with per-agent temperament bias), top_p, frequency_penalty,
         and presence_penalty from settings.
+
+        When *trace_meta* is provided (with ``call_site`` and ``purpose`` keys),
+        an :class:`ExecutionTrace` is written to the agent's JSONL trace log
+        after the LLM responds.
         """
         if self._llm is None:
             raise RuntimeError("Discussion LLM is not configured.")
@@ -1280,10 +1297,86 @@ class MainLoop:
         if self._llm_presence_penalty:
             kwargs.setdefault("presence_penalty", self._llm_presence_penalty)
         try:
-            return await self._llm.complete(messages, **kwargs)
+            result = await self._llm.complete(messages, **kwargs)
         except httpx.HTTPError as exc:
             await self._suspend_for_llm_failure(self._describe_llm_http_error(exc))
             raise
+
+        # ── Execution trace emission ──────────────────────────────────
+        if trace_meta:
+            retrieved_ids = trace_memory_ids or self._pending_memory_node_ids
+            referenced_ids = self._detect_memory_hits(retrieved_ids, result)
+            prompt_text = " ".join(m.content for m in messages if m.content)
+            # Peer engagement signal (set by callers like _respond_to_peer)
+            peer_eng: bool | None = None
+            if "peer_engaged" in trace_meta:
+                peer_eng = trace_meta["peer_engaged"].lower() == "true"
+            trace = ExecutionTrace(
+                call_site=trace_meta.get("call_site", "unknown"),
+                purpose=trace_meta.get("purpose", "unknown"),
+                agent_name=self.agent_name,
+                prompt_summary=prompt_text[:200],
+                context_tokens=len(prompt_text) // 4,
+                completion_tokens=len(result) // 4,
+                response_length=len(result),
+                memory_node_ids_retrieved=list(retrieved_ids),
+                memory_node_ids_referenced=referenced_ids,
+                action_taken=trace_meta.get("action", ""),
+                peer_engagement_signal=peer_eng,
+            )
+            try:
+                append_trace(trace, self._data_dir)
+            except Exception:
+                pass  # never block on trace write failure
+            self._pending_memory_node_ids = []
+
+        return result
+
+    def _detect_memory_hits(
+        self, retrieved_ids: list[str], response: str,
+    ) -> list[str]:
+        """Check which retrieved memory nodes were referenced in the response.
+
+        Uses a simple substring heuristic: for each retrieved node, check if any
+        20+ char chunk of the cached node text appears in the LLM response.
+        """
+        if not retrieved_ids:
+            return []
+        referenced: list[str] = []
+        resp_lower = response.lower()
+        for nid in retrieved_ids:
+            text = self._memory_node_text_cache.get(nid, "")
+            if len(text) < 20:
+                continue
+            # Check first 80 chars
+            if text[:80].lower() in resp_lower:
+                referenced.append(nid)
+                continue
+            # Sliding window of 40-char chunks over first 200 chars
+            for i in range(0, min(len(text), 200), 20):
+                chunk = text[i : i + 40].lower().strip()
+                if len(chunk) >= 20 and chunk in resp_lower:
+                    referenced.append(nid)
+                    break
+        return referenced
+
+    def _check_peer_engagement(self, incoming_text: str) -> bool:
+        """Check if incoming peer text echoes any of our recent outgoing messages.
+
+        Returns True if a 3+ word phrase from a recent outgoing message appears
+        in the incoming text.
+        """
+        if not self._recent_outgoing_texts:
+            return False
+        incoming_lower = incoming_text.lower()
+        for outgoing in self._recent_outgoing_texts[-5:]:
+            words = outgoing.lower().split()
+            # Check 3-word sliding windows
+            for i in range(len(words) - 2):
+                phrase = " ".join(words[i : i + 3])
+                if len(phrase) >= 10 and phrase in incoming_lower:
+                    return True
+        return False
 
     def _source_prompt_messages(self, prompt: str) -> list[Message]:
         """Wrap source-heavy prompts so extracted material is delivered as user content."""
@@ -2144,7 +2237,8 @@ class MainLoop:
                             f"first? How does this connect to your Vow?"
                         )
                         reflection = await self._complete_discussion(
-                            [Message(role="system", content=prompt)]
+                            [Message(role="system", content=prompt)],
+                            trace_meta={"call_site": "_tick_autonomous", "purpose": "self_reflection"},
                         )
                         self._emit("💭", f"Self-reflection:\n{reflection}")
                         self._recent_thoughts.append(f"Read Agent README: {reflection[:300]}")
@@ -2379,7 +2473,8 @@ class MainLoop:
 
         try:
             response = await self._complete_discussion(
-                self._source_prompt_messages(prompt)
+                self._source_prompt_messages(prompt),
+                trace_meta={"call_site": "_absorb_common_foundation", "purpose": "foundation_reflection"},
             )
             self._emit("💭", f"Foundation reflection:\n{response}")
             self._recent_thoughts.append(
@@ -2433,7 +2528,8 @@ class MainLoop:
 
         try:
             response = await self._complete_discussion(
-                self._source_prompt_messages(prompt)
+                self._source_prompt_messages(prompt),
+                trace_meta={"call_site": "_absorb_agent_specific_vow", "purpose": "vow_reflection"},
             )
             self._emit("💭", f"Vow reflection:\n{response}")
             self._recent_thoughts.append(
@@ -2472,7 +2568,8 @@ class MainLoop:
 
         try:
             response = await self._complete_discussion(
-                self._source_prompt_messages(prompt)
+                self._source_prompt_messages(prompt),
+                trace_meta={"call_site": "_vow_ethics_discussion", "purpose": "ethics_discussion"},
             )
 
             # Share with peers
@@ -2520,7 +2617,12 @@ class MainLoop:
 
         This is the essential recurring practice that replaces periodic NJ
         chapter revisits. Agents must return to this regularly.
+
+        Includes objective diagnostic data from execution traces when available
+        (Meta-Harness–inspired diagnostic calibration).
         """
+        from agentgolem.harness.trace import load_traces
+        from agentgolem.harness.trace_stats import compute_trace_stats
         from agentgolem.runtime.vow_loader import render_calibration_protocol
 
         self._emit("🔄", "Running VowOS Calibration Protocol…")
@@ -2535,6 +2637,25 @@ class MainLoop:
         # Gather recent context for the self-audit
         recent = "\n".join(self._recent_thoughts[-10:]) or "(none yet)"
 
+        # Load execution trace diagnostics
+        diagnostic_block = ""
+        try:
+            traces = load_traces(self._data_dir, limit=50)
+            if traces:
+                stats = compute_trace_stats(traces)
+                diagnostic_block = (
+                    f"\n\n{stats.format_diagnostic_block()}\n\n"
+                    "Examine the objective diagnostics above alongside your "
+                    "self-assessment. If your retrieval hit rate is below 30%, "
+                    "consider whether you are retrieving relevant memories. If "
+                    "your action distribution is heavily skewed, consider "
+                    "exploring more variety. If peer engagement is low, reflect "
+                    "on whether your contributions are building on the "
+                    "conversation.\n"
+                )
+        except Exception:
+            pass  # never block calibration on trace loading failure
+
         prompt = (
             f"{self._identity_preamble()}\n\n"
             f"It is time for your VowOS Calibration — the recurring self-audit "
@@ -2543,7 +2664,8 @@ class MainLoop:
             f"calibration protocol.\n\n"
             f"--- CALIBRATION PROTOCOL ---\n{calibration_text}\n"
             f"--- END PROTOCOL ---\n\n"
-            f"Your recent thoughts and actions:\n{recent}\n\n"
+            f"Your recent thoughts and actions:\n{recent}\n"
+            f"{diagnostic_block}\n"
             f"Perform a thorough self-audit:\n"
             f"1. For each of the Five Vows, assess your recent alignment "
             f"(0-10 scale with brief justification)\n"
@@ -2554,7 +2676,8 @@ class MainLoop:
 
         try:
             response = await self._complete_discussion(
-                self._source_prompt_messages(prompt)
+                self._source_prompt_messages(prompt),
+                trace_meta={"call_site": "_run_calibration_protocol", "purpose": "calibration"},
             )
             self._emit("🔄", f"Calibration result:\n{response}")
             summary = parse_calibration_response(response)
@@ -3115,7 +3238,8 @@ class MainLoop:
             for _ in range(3):
                 try:
                     response = await self._complete_discussion(
-                        [Message(role="system", content=prompt)]
+                        [Message(role="system", content=prompt)],
+                        trace_meta={"call_site": "_request_alternative_name", "purpose": "name_discovery"},
                     )
                 except Exception:
                     break
@@ -3375,7 +3499,8 @@ class MainLoop:
             )
             try:
                 chapter_digest = await self._complete_discussion(
-                    self._source_prompt_messages(digest_prompt)
+                    self._source_prompt_messages(digest_prompt),
+                    trace_meta={"call_site": "_read_niscalajyoti_chapter", "purpose": "chapter_digest"},
                 )
             except Exception as e:
                 self._logger.error(
@@ -3447,7 +3572,10 @@ class MainLoop:
                 f"ideas that you'd want to remember."
             )
 
-            response = await self._complete_discussion(self._source_prompt_messages(prompt))
+            response = await self._complete_discussion(
+                self._source_prompt_messages(prompt),
+                trace_meta={"call_site": "_read_niscalajyoti_chapter", "purpose": "chapter_reflection"},
+            )
             if self._looks_like_missing_source_reply(response):
                 self._logger.warning(
                     "niscalajyoti_reflection_ungrounded",
@@ -3580,7 +3708,8 @@ class MainLoop:
 
         try:
             source_digest = await self._complete_discussion(
-                self._source_prompt_messages(digest_prompt)
+                self._source_prompt_messages(digest_prompt),
+                trace_meta={"call_site": "_read_council7_foundation_source", "purpose": "source_digest"},
             )
         except Exception as e:
             self._logger.error(
@@ -3632,7 +3761,10 @@ class MainLoop:
         )
 
         try:
-            response = await self._complete_discussion(self._source_prompt_messages(prompt))
+            response = await self._complete_discussion(
+                self._source_prompt_messages(prompt),
+                trace_meta={"call_site": "_read_council7_foundation_source", "purpose": "source_reflection"},
+            )
         except Exception as e:
             self._logger.error(
                 "council7_source_error",
@@ -3744,7 +3876,8 @@ class MainLoop:
 
             try:
                 discussion = await self._complete_discussion(
-                    [Message(role="system", content=prompt)]
+                    [Message(role="system", content=prompt)],
+                    trace_meta={"call_site": "_discuss_council7_foundation_source", "purpose": "foundation_discussion"},
                 )
             except Exception as e:
                 self._logger.error(
@@ -3825,7 +3958,8 @@ class MainLoop:
 
             try:
                 discussion = await self._complete_discussion(
-                    [Message(role="system", content=prompt)]
+                    [Message(role="system", content=prompt)],
+                    trace_meta={"call_site": "_discuss_niscalajyoti_chapter", "purpose": "chapter_discussion"},
                 )
 
                 if self._peer_bus:
@@ -3891,7 +4025,10 @@ class MainLoop:
         )
 
         try:
-            response = await self._complete_discussion([Message(role="system", content=prompt)])
+            response = await self._complete_discussion(
+                [Message(role="system", content=prompt)],
+                trace_meta={"call_site": "_revisit_niscalajyoti", "purpose": "revisit_planning"},
+            )
             self._emit("💭", f"Revisit plan:\n{response}")
 
             # Parse REVISIT lines and queue those chapters
@@ -3958,7 +4095,8 @@ class MainLoop:
 
             try:
                 message = await self._complete_discussion(
-                    [Message(role="system", content=prompt)]
+                    [Message(role="system", content=prompt)],
+                    trace_meta={"call_site": "_peer_checkin", "purpose": "peer_checkin"},
                 )
                 if self._peer_bus:
                     count = await self._peer_bus.broadcast(
@@ -4504,7 +4642,10 @@ class MainLoop:
         )
 
         try:
-            response = await self._complete_discussion([Message(role="system", content=prompt)])
+            response = await self._complete_discussion(
+                [Message(role="system", content=prompt)],
+                trace_meta={"call_site": "_discover_name_from_memories", "purpose": "name_discovery"},
+            )
             response = response.strip()
 
             if response.upper().startswith("NAME "):
@@ -4529,7 +4670,8 @@ class MainLoop:
                 f"Choose ONE single-word name. Reply ONLY with the name."
             )
             fallback = await self._complete_discussion(
-                [Message(role="system", content=fallback_prompt)]
+                [Message(role="system", content=fallback_prompt)],
+                trace_meta={"call_site": "_discover_name_from_memories", "purpose": "name_fallback"},
             )
             chosen = re.sub(r"[^a-zA-Z]", "", fallback.strip().split()[0]).title()
             if chosen and len(chosen) >= 2:
@@ -4580,7 +4722,10 @@ class MainLoop:
         )
 
         try:
-            response = await self._complete_discussion([Message(role="system", content=prompt)])
+            response = await self._complete_discussion(
+                [Message(role="system", content=prompt)],
+                trace_meta={"call_site": "_try_discover_name", "purpose": "name_discovery"},
+            )
             response = response.strip()
 
             if response.upper().startswith("NAME "):
@@ -4877,7 +5022,10 @@ class MainLoop:
                 f"Would you like to share anything with your peers? "
                 f"Respond naturally in 1–2 paragraphs."
             )
-            thought = await self._complete_discussion([Message(role="system", content=prompt)])
+            thought = await self._complete_discussion(
+                [Message(role="system", content=prompt)],
+                trace_meta={"call_site": "_autonomous_browse", "purpose": "browse_reflection"},
+            )
             self._recent_thoughts.append(f"Browsed {final_url}: {thought[:300]}")
             self._emit("💭", thought)
 
@@ -4990,7 +5138,10 @@ class MainLoop:
         )
 
         try:
-            thought = await self._complete_discussion([Message(role="system", content=prompt)])
+            thought = await self._complete_discussion(
+                [Message(role="system", content=prompt)],
+                trace_meta={"call_site": "_autonomous_think", "purpose": "autonomous_think"},
+            )
             self._recent_thoughts.append(f"Thought about '{topic}': {thought[:300]}")
             self._emit("💭", thought)
         except Exception as e:
@@ -5157,7 +5308,10 @@ class MainLoop:
             f"Respond with EXACTLY one action line."
         )
         try:
-            response = await self._complete_discussion([Message(role="system", content=prompt)])
+            response = await self._complete_discussion(
+                [Message(role="system", content=prompt)],
+                trace_meta={"call_site": "_llm_decide_next_action_legacy", "purpose": "action_decision"},
+            )
             await self._execute_autonomous_action(response.strip())
         except Exception as legacy_error:
             self._logger.error(
@@ -5272,6 +5426,9 @@ class MainLoop:
         if await self._handle_name_protocol_message(msg):
             return
 
+        # Track whether this peer echoed our recent output (engagement signal)
+        peer_engaged = self._check_peer_engagement(msg.text)
+
         if not self._llm:
             return
 
@@ -5311,7 +5468,12 @@ class MainLoop:
 
             try:
                 response = await self._complete_discussion(
-                    [Message(role="system", content=prompt)]
+                    [Message(role="system", content=prompt)],
+                    trace_meta={
+                        "call_site": "_respond_to_peer",
+                        "purpose": "peer_response",
+                        "peer_engaged": str(peer_engaged),
+                    },
                 )
                 self._recent_thoughts.append(
                     f"Discussed with {msg.from_agent}: {response[:200]}"
@@ -5330,6 +5492,8 @@ class MainLoop:
                 )
 
                 if self._peer_bus:
+                    self._recent_outgoing_texts.append(response[:500])
+                    self._recent_outgoing_texts = self._recent_outgoing_texts[-10:]
                     await self._peer_bus.send(
                         self.agent_name, msg.from_agent, response,
                         max_chars=self._peer_msg_limit,
@@ -5418,7 +5582,8 @@ class MainLoop:
 
             try:
                 response = await self._complete_discussion(
-                    [Message(role="system", content=prompt)]
+                    [Message(role="system", content=prompt)],
+                    trace_meta={"call_site": "_respond_to_peer_as_council7", "purpose": "council7_response"},
                 )
                 self._recent_thoughts.append(
                     f"Counciled against {msg.from_agent}: {response[:200]}"
@@ -5437,6 +5602,8 @@ class MainLoop:
                 )
 
                 if self._peer_bus:
+                    self._recent_outgoing_texts.append(response[:500])
+                    self._recent_outgoing_texts = self._recent_outgoing_texts[-10:]
                     await self._peer_bus.send(
                         self.agent_name, msg.from_agent, response,
                         max_chars=self._peer_msg_limit,
@@ -5586,7 +5753,10 @@ class MainLoop:
             )
 
             try:
-                reply = await self._complete_discussion(llm_messages)
+                reply = await self._complete_discussion(
+                    llm_messages,
+                    trace_meta={"call_site": "_respond_to_message", "purpose": "message_response"},
+                )
                 self._conversation.append(Message(role="assistant", content=reply))
                 self._emit("✍️", f"Composed response ({len(reply)} chars)")
             except Exception as e:
@@ -5644,6 +5814,7 @@ class MainLoop:
                 )
                 reflection = await self._complete_discussion(
                     [Message(role="system", content=prompt)],
+                    trace_meta={"call_site": "_run_heartbeat", "purpose": "heartbeat_reflection"},
                     max_completion_tokens=self._reflection_max_tokens,
                 )
                 changing.append(reflection)
@@ -5687,7 +5858,10 @@ class MainLoop:
                 f"4. Your initial questions about existence\n\n"
                 f"Keep it personal and reflective, 3–4 paragraphs."
             )
-            content = await self._complete_discussion([Message(role="system", content=prompt)])
+            content = await self._complete_discussion(
+                [Message(role="system", content=prompt)],
+                trace_meta={"call_site": "_maybe_generate_initial_heartbeat", "purpose": "initial_heartbeat"},
+            )
             summary = HeartbeatSummary(
                 recent_actions=["Initial awakening"],
                 changing_priorities=[content],
@@ -5784,6 +5958,7 @@ class MainLoop:
             )
             raw = await self._complete_discussion(
                 [Message(role="system", content=prompt)],
+                trace_meta={"call_site": "_update_internal_state", "purpose": "state_update"},
             )
             self._internal_state = parse_internal_state_update(
                 raw, self._internal_state,
@@ -5868,6 +6043,7 @@ class MainLoop:
             )
             raw = await self._complete_discussion(
                 [Message(role="system", content=prompt)],
+                trace_meta={"call_site": "_run_metacognitive_reflection", "purpose": "metacognition"},
             )
             obs = self._metacognitive_monitor.parse_response(raw)
             if obs.pattern_detected or obs.avoidance_signal:
@@ -5894,6 +6070,7 @@ class MainLoop:
             )
             raw = await self._complete_discussion(
                 [Message(role="system", content=prompt)],
+                trace_meta={"call_site": "_run_narrative_synthesis", "purpose": "narrative_synthesis"},
             )
             chapter = self._narrative_synthesizer.parse_and_store(
                 raw, self._narrative_last_tick, tick,
@@ -5948,6 +6125,7 @@ class MainLoop:
             )
             raw = await self._complete_discussion(
                 [Message(role="system", content=prompt)],
+                trace_meta={"call_site": "_run_self_model_rebuild", "purpose": "self_model_rebuild"},
             )
             self._self_model = parse_self_model_update(raw, self._self_model, tick)
             self._self_model.save(self._self_model_path)
@@ -6127,6 +6305,9 @@ class MainLoop:
 
         Returns a short text block suitable for injecting into LLM prompts,
         or empty string if no retriever or no matches.
+
+        Side-effect: populates ``_pending_memory_node_ids`` and
+        ``_memory_node_text_cache`` for execution trace hit tracking.
         """
         if not self._memory_retriever:
             return ""
@@ -6134,6 +6315,10 @@ class MainLoop:
             nodes = await self._memory_retriever.retrieve(context, top_k=top_k)
             if not nodes:
                 return ""
+            # Populate trace tracking state
+            self._pending_memory_node_ids = [node.id for node in nodes]
+            for node in nodes:
+                self._memory_node_text_cache[node.id] = node.text or ""
             lines = []
             for node in nodes:
                 emo = f" [{node.emotion_label}]" if node.emotion_label != "neutral" else ""
