@@ -292,6 +292,18 @@ def _resolve_agent(st: DashboardState, agent_name: str | None = None) -> Any | N
     return None
 
 
+def _get_data_dir(st: DashboardState) -> Path | None:
+    """Return the parent data directory (e.g. ``data/``) that contains agent subdirs."""
+    if st.data_dir is not None:
+        return st.data_dir
+    agents = _get_agents(st)
+    for agent in agents:
+        d = getattr(agent, "_data_dir", None)
+        if d is not None:
+            return d.parent
+    return None
+
+
 def _find_activity_log_path_for_agent(agent: Any) -> Path | None:
     data_dir = getattr(agent, "_data_dir", None)
     if data_dir is None:

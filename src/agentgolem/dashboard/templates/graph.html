@@ -1,0 +1,419 @@
+{% extends "base.html" %}
+{% block title %}AgentGolem — Memory Graph{% endblock %}
+{% block content %}
+<style>
+  /* Graph page overrides */
+  #graph-wrap { position: relative; width: 100%; height: 75vh; min-height: 500px;
+                border: 1px solid var(--ag-border); border-radius: 14px; overflow: hidden;
+                background: #0d1117; margin-top: 0.5rem; }
+  #graph-svg { display: block; width: 100%; height: 100%; }
+  #graph-controls { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center;
+                     margin-bottom: 0.5rem; }
+  #graph-controls select, #graph-controls input { background: rgba(15,23,42,0.55);
+    color: #e2e8f0; border: 1px solid var(--ag-border); padding: 0.3rem 0.5rem;
+    border-radius: 8px; font-size: 0.82rem; }
+  #graph-controls label { font-size: 0.78rem; color: var(--ag-muted); display: flex;
+                           align-items: center; gap: 0.3rem; }
+  .g-btn { padding: 0.25rem 0.6rem; border-radius: 8px; cursor: pointer; font-size: 0.78rem;
+           background: rgba(15,23,42,0.55); border: 1px solid var(--ag-border);
+           color: #cbd5e1; user-select: none; }
+  .g-btn:hover { border-color: rgba(59,130,246,0.5); color: #93c5fd; }
+  .g-btn.active { background: rgba(59,130,246,0.18); border-color: rgba(59,130,246,0.5); color: #93c5fd; }
+
+  /* Overlays */
+  #graph-stats { position: absolute; bottom: 10px; left: 10px; font-size: 0.72rem;
+                 color: #8b949e; background: #0d1117dd; padding: 6px 10px; border-radius: 6px;
+                 backdrop-filter: blur(4px); }
+  #graph-tooltip { position: absolute; background: #1c2129ee; border: 1px solid #30363d;
+                   border-radius: 6px; padding: 8px 12px; font-size: 0.78rem; pointer-events: none;
+                   max-width: 300px; z-index: 10; display: none;
+                   box-shadow: 0 2px 8px #00000044; line-height: 1.5; color: #c9d1d9; }
+  #graph-legend { position: absolute; top: 8px; left: 8px; background: #161b22dd;
+                  border: 1px solid #30363d; border-radius: 6px; padding: 8px 10px;
+                  font-size: 0.72rem; backdrop-filter: blur(4px); color: #c9d1d9; }
+  .legend-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .legend-item { display: flex; align-items: center; gap: 6px; padding: 1px 0; }
+  #graph-zoom { position: absolute; bottom: 10px; right: 10px; display: flex;
+                flex-direction: column; gap: 4px; }
+  #graph-zoom .g-btn { width: 28px; height: 28px; display: flex; align-items: center;
+                       justify-content: center; font-size: 14px; }
+
+  /* Detail sidebar */
+  #graph-sidebar { position: absolute; top: 0; right: 0; width: 360px; height: 100%;
+                   background: #161b22; border-left: 1px solid #30363d; overflow-y: auto;
+                   padding: 14px; display: none; z-index: 5; }
+  #graph-sidebar.open { display: block; }
+  #graph-sidebar h2 { font-size: 0.9rem; color: #58a6ff; margin-bottom: 8px; word-break: break-word; }
+  .gs-section { margin-bottom: 12px; }
+  .gs-section h3 { font-size: 0.68rem; color: #8b949e; text-transform: uppercase;
+                   margin-bottom: 4px; letter-spacing: 0.8px; }
+  .gs-section p, .gs-section li { font-size: 0.8rem; line-height: 1.6; }
+  .gs-section ul { list-style: none; padding: 0; }
+  .gs-section li { padding: 3px 0; border-bottom: 1px solid #21262d; }
+  .gs-close { float: right; cursor: pointer; color: #8b949e; font-size: 16px;
+              padding: 2px 6px; border-radius: 4px; background: none; border: none; }
+  .gs-close:hover { color: #f85149; background: #f8514922; }
+  .gs-badge { display: inline-block; padding: 1px 6px; border-radius: 10px; font-size: 0.68rem;
+              font-weight: 600; margin-right: 4px; }
+  .gs-badge-type { background: #1f6feb22; color: #58a6ff; border: 1px solid #1f6feb44; }
+  .gs-badge-status { background: #23862622; color: #3fb950; border: 1px solid #23862644; }
+  .gs-badge-edge { background: #30363d; color: #8b949e; border: 1px solid #484f58; }
+  .gs-link { color: #58a6ff; cursor: pointer; text-decoration: underline; }
+  .gs-link:hover { color: #79c0ff; }
+
+  /* Node / link styles */
+  .node-fact { fill: #58a6ff; }
+  .node-preference { fill: #d2a8ff; }
+  .node-event { fill: #79c0ff; }
+  .node-goal { fill: #3fb950; }
+  .node-risk { fill: #f85149; }
+  .node-interpretation { fill: #e3b341; }
+  .node-identity { fill: #f778ba; }
+  .node-rule { fill: #ffa657; }
+  .node-association { fill: #8b949e; }
+  .node-procedure { fill: #56d4dd; }
+  .link { stroke: #30363d; stroke-opacity: 0.6; }
+  .link-supports { stroke: #3fb950; }
+  .link-contradicts { stroke: #f85149; }
+  .link-supersedes { stroke: #e3b341; }
+  .link-same_as { stroke: #d2a8ff; }
+  .link-part_of { stroke: #58a6ff; }
+  .link-derived_from { stroke: #56d4dd; }
+  .link-merge_candidate { stroke: #ffa657; stroke-dasharray: 4 2; }
+  text.node-label { fill: #c9d1d9; font-size: 10px; pointer-events: none;
+                    text-anchor: middle; dominant-baseline: central;
+                    text-shadow: 0 0 3px #0d1117, 0 0 6px #0d1117; }
+</style>
+
+<h2>🧠 Memory Graph</h2>
+
+<div id="graph-controls">
+  <label>Agent:
+    <select id="g-agent">
+      {% for name in graph_agent_names %}
+      <option value="{{ name }}" {% if name == selected_agent_name %}selected{% endif %}>{{ name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Type:
+    <select id="g-type">
+      <option value="">All</option>
+      <option value="fact">fact</option>
+      <option value="preference">preference</option>
+      <option value="event">event</option>
+      <option value="goal">goal</option>
+      <option value="risk">risk</option>
+      <option value="interpretation">interpretation</option>
+      <option value="identity">identity</option>
+      <option value="rule">rule</option>
+      <option value="association">association</option>
+      <option value="procedure">procedure</option>
+    </select>
+  </label>
+  <label>Status:
+    <select id="g-status">
+      <option value="">All</option>
+      <option value="active" selected>Active</option>
+      <option value="archived">Archived</option>
+      <option value="purged">Purged</option>
+    </select>
+  </label>
+  <label>Search: <input type="text" id="g-search" placeholder="text…" size="16"></label>
+  <label>Limit: <input type="number" id="g-limit" value="500" min="10" max="2000" style="width:60px"></label>
+  <span class="g-btn" onclick="loadGraph()">🔄 Refresh</span>
+  <span class="g-btn" id="g-live-btn" onclick="toggleLive()">▶ Live</span>
+  <span class="g-btn" onclick="fitToScreen()">⊞ Fit</span>
+  <span class="g-btn active" id="g-labels-btn" onclick="toggleLabels()">Aa Labels</span>
+</div>
+
+<div id="graph-wrap">
+  <svg id="graph-svg"></svg>
+  <div id="graph-stats"></div>
+  <div id="graph-tooltip"></div>
+
+  <div id="graph-legend">
+    <div style="margin-bottom:4px; color:#58a6ff; cursor:pointer;" onclick="this.parentElement.classList.toggle('collapsed')">◆ Legend</div>
+    <div class="legend-body">
+      <div class="legend-item"><span class="legend-dot" style="background:#58a6ff"></span> fact</div>
+      <div class="legend-item"><span class="legend-dot" style="background:#d2a8ff"></span> preference</div>
+      <div class="legend-item"><span class="legend-dot" style="background:#79c0ff"></span> event</div>
+      <div class="legend-item"><span class="legend-dot" style="background:#3fb950"></span> goal</div>
+      <div class="legend-item"><span class="legend-dot" style="background:#f85149"></span> risk</div>
+      <div class="legend-item"><span class="legend-dot" style="background:#e3b341"></span> interpretation</div>
+      <div class="legend-item"><span class="legend-dot" style="background:#f778ba"></span> identity</div>
+      <div class="legend-item"><span class="legend-dot" style="background:#ffa657"></span> rule</div>
+      <div class="legend-item"><span class="legend-dot" style="background:#8b949e"></span> association</div>
+      <div class="legend-item"><span class="legend-dot" style="background:#56d4dd"></span> procedure</div>
+    </div>
+  </div>
+
+  <div id="graph-zoom">
+    <span class="g-btn" onclick="zoomIn()">+</span>
+    <span class="g-btn" onclick="zoomOut()">−</span>
+    <span class="g-btn" onclick="fitToScreen()">⊞</span>
+  </div>
+
+  <div id="graph-sidebar">
+    <button class="gs-close" onclick="closeSidebar()">✕</button>
+    <div id="gs-content"></div>
+  </div>
+</div>
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+(function() {
+  let simulation = null, currentZoom = null, graphG = null;
+  let allNodeData = [], allNodeCircles = null;
+  let labelsVisible = true, liveActive = false, liveInterval = null, lastHash = '';
+
+  function currentAgent() { return document.getElementById('g-agent').value; }
+
+  // ── Load graph data ──
+  window.loadGraph = async function() {
+    const agent = currentAgent();
+    if (!agent) return;
+    const params = new URLSearchParams({
+      agent,
+      type: document.getElementById('g-type').value,
+      status: document.getElementById('g-status').value,
+      search: document.getElementById('g-search').value,
+      limit: document.getElementById('g-limit').value,
+    });
+    try {
+      const r = await fetch('/dashboard/api/graph?' + params);
+      const data = await r.json();
+      lastHash = `${data.stats._total_nodes}:${data.stats._total_edges}:${data.stats._latest_ts||''}`;
+      renderGraph(data);
+      renderStats(data.stats);
+    } catch(e) {
+      document.getElementById('graph-stats').textContent = 'Error: ' + e.message;
+    }
+  };
+
+  function renderStats(stats) {
+    const parts = Object.entries(stats).filter(([k])=>!k.startsWith('_'))
+                    .map(([k,v])=>`${k}: ${v}`).join(' · ');
+    document.getElementById('graph-stats').textContent =
+      `${stats._total_nodes||0} nodes · ${stats._total_edges||0} edges — ${parts}`;
+  }
+
+  function renderGraph(data) {
+    const svg = d3.select('#graph-svg');
+    svg.selectAll('*').remove();
+    const container = document.getElementById('graph-wrap');
+    const width = container.clientWidth;
+    const height = container.clientHeight;
+    svg.attr('width', width).attr('height', height);
+    if (!data.nodes || !data.nodes.length) {
+      svg.append('text').attr('x',width/2).attr('y',height/2)
+        .attr('text-anchor','middle').attr('fill','#8b949e').attr('font-size','15px')
+        .text('No nodes found.');
+      return;
+    }
+    graphG = svg.append('g');
+    allNodeData = data.nodes;
+
+    currentZoom = d3.zoom().scaleExtent([0.05,15])
+      .on('zoom', e => { graphG.attr('transform', e.transform); });
+    svg.call(currentZoom);
+
+    const nodeMap = new Map(data.nodes.map(n=>[n.id,n]));
+    const edges = data.edges.filter(e=>nodeMap.has(e.source_id)&&nodeMap.has(e.target_id))
+                    .map(e=>({...e, source:e.source_id, target:e.target_id}));
+
+    const link = graphG.append('g').selectAll('line').data(edges).enter().append('line')
+      .attr('class', d=>`link link-${d.edge_type}`)
+      .attr('stroke-width', d=>Math.max(0.5, d.weight*1.5));
+
+    allNodeCircles = graphG.append('g').selectAll('circle').data(data.nodes).enter().append('circle')
+      .attr('class', d=>`node-${d.type}`)
+      .attr('r', d=>Math.max(4, 3+d.centrality*20))
+      .attr('stroke','#0d1117').attr('stroke-width',1)
+      .style('cursor','pointer')
+      .on('click', (e,d)=>{ e.stopPropagation(); showNodeDetail(d); })
+      .on('dblclick', (e,d)=>{ e.stopPropagation(); focusNode(d); })
+      .on('mouseover', showTooltip).on('mouseout', hideTooltip)
+      .call(d3.drag().on('start',dragStart).on('drag',dragging).on('end',dragEnd));
+
+    const labels = graphG.append('g').attr('class','labels-group').selectAll('text')
+      .data(data.nodes).enter().append('text')
+      .attr('class','node-label')
+      .text(d=>d.text.length>35?d.text.slice(0,33)+'…':d.text)
+      .attr('dy', d=>Math.max(4, 3+d.centrality*20)+12);
+
+    if (!labelsVisible) graphG.select('.labels-group').style('display','none');
+
+    svg.on('click', ()=> closeSidebar());
+
+    if (simulation) simulation.stop();
+    simulation = d3.forceSimulation(data.nodes)
+      .force('link', d3.forceLink(edges).id(d=>d.id).distance(80).strength(d=>d.weight*0.3))
+      .force('charge', d3.forceManyBody().strength(-120).distanceMax(400))
+      .force('center', d3.forceCenter(width/2, height/2))
+      .force('collision', d3.forceCollide(14))
+      .on('tick', ()=>{
+        link.attr('x1',d=>d.source.x).attr('y1',d=>d.source.y)
+            .attr('x2',d=>d.target.x).attr('y2',d=>d.target.y);
+        allNodeCircles.attr('cx',d=>d.x).attr('cy',d=>d.y);
+        labels.attr('x',d=>d.x).attr('y',d=>d.y);
+      });
+
+    // Auto-fit after settle
+    setTimeout(()=> fitToScreen(), 1500);
+  }
+
+  // ── Zoom ──
+  window.zoomIn = function() { d3.select('#graph-svg').transition().duration(300).call(currentZoom.scaleBy,1.5); };
+  window.zoomOut = function() { d3.select('#graph-svg').transition().duration(300).call(currentZoom.scaleBy,0.67); };
+  window.fitToScreen = function() {
+    if (!allNodeData.length||!graphG) return;
+    const svg = d3.select('#graph-svg');
+    const c = document.getElementById('graph-wrap');
+    const w = c.clientWidth, h = c.clientHeight;
+    let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+    allNodeData.forEach(n=>{ if(n.x!=null&&n.y!=null){ minX=Math.min(minX,n.x);minY=Math.min(minY,n.y);maxX=Math.max(maxX,n.x);maxY=Math.max(maxY,n.y);}});
+    if (!isFinite(minX)) return;
+    const pad=60, gw=maxX-minX+pad*2, gh=maxY-minY+pad*2;
+    const scale=Math.min(w/gw,h/gh,2);
+    const tx=w/2-(minX+maxX)/2*scale, ty=h/2-(minY+maxY)/2*scale;
+    svg.transition().duration(500).call(currentZoom.transform, d3.zoomIdentity.translate(tx,ty).scale(scale));
+  };
+  function focusNode(d) {
+    if (!currentZoom) return;
+    const c = document.getElementById('graph-wrap');
+    const svg = d3.select('#graph-svg');
+    svg.transition().duration(500).call(currentZoom.transform,
+      d3.zoomIdentity.translate(c.clientWidth/2-d.x*2, c.clientHeight/2-d.y*2).scale(2));
+  }
+
+  // ── Labels ──
+  window.toggleLabels = function() {
+    labelsVisible = !labelsVisible;
+    document.getElementById('g-labels-btn').classList.toggle('active',labelsVisible);
+    if (graphG) graphG.select('.labels-group').style('display',labelsVisible?null:'none');
+  };
+
+  // ── Tooltip ──
+  function esc(s){ const d=document.createElement('div');d.textContent=s;return d.innerHTML; }
+  function showTooltip(event, d) {
+    const tt = document.getElementById('graph-tooltip');
+    const tu = (d.trust_useful!=null)?Number(d.trust_useful).toFixed(2):
+      (Number(d.trustworthiness||0)*Number(d.base_usefulness||0)).toFixed(2);
+    tt.innerHTML = `<strong>${esc(d.text)}</strong><br>
+      <span class="gs-badge gs-badge-type">${d.type}</span>
+      <span class="gs-badge gs-badge-status">${d.status}</span><br>
+      trust_useful: ${tu} · centrality: ${d.centrality?.toFixed(2)}<br>
+      accessed: ${d.access_count}×<br>
+      <span style="color:#484f58">click for detail · dbl-click to zoom</span>`;
+    tt.style.display = 'block';
+    tt.style.left = Math.min(event.pageX+14, window.innerWidth-320)+'px';
+    tt.style.top = (event.pageY-10)+'px';
+  }
+  function hideTooltip(){ document.getElementById('graph-tooltip').style.display='none'; }
+
+  // ── Sidebar detail ──
+  async function showNodeDetail(nodeOrId) {
+    const nodeId = typeof nodeOrId==='object'?(nodeOrId.node_id||nodeOrId.id):nodeOrId;
+    const agent = currentAgent();
+    const params = new URLSearchParams({agent, id:nodeId});
+    const r = await fetch('/dashboard/api/graph/node?'+params);
+    const data = await r.json();
+    if (data.error) return;
+    const n = data.node;
+    const tu = (n.trust_useful!=null)?Number(n.trust_useful).toFixed(3):
+      (Number(n.trustworthiness||0)*Number(n.base_usefulness||0)).toFixed(3);
+    let html = `<h2>${esc(n.text)}</h2>
+      <div class="gs-section"><h3>Properties</h3>
+        <p><span class="gs-badge gs-badge-type">${n.type}</span>
+           <span class="gs-badge gs-badge-status">${n.status}</span>
+           ${n.canonical?'⭐ canonical':''}</p>
+        <p>trust_useful: ${tu}</p>
+        <p>Centrality: ${n.centrality?.toFixed(3)} · Accessed: ${n.access_count}×</p>
+        <p>Emotion: ${n.emotion_label} (${n.emotion_score?.toFixed(2)})</p>
+        <p style="font-size:0.68rem;color:#484f58">Created: ${n.created_at}<br>ID: ${n.id}</p>
+      </div>`;
+    if (data.edges_out&&data.edges_out.length) {
+      html += `<div class="gs-section"><h3>→ Out (${data.edges_out.length})</h3><ul>`;
+      data.edges_out.forEach(e=>{
+        html += `<li><span class="gs-badge gs-badge-edge">${e.edge_type}</span>
+          <span class="gs-link" onclick="showNodeDetail('${e.target_id}')">${esc(e.target_text)}</span></li>`;
+      });
+      html += '</ul></div>';
+    }
+    if (data.edges_in&&data.edges_in.length) {
+      html += `<div class="gs-section"><h3>← In (${data.edges_in.length})</h3><ul>`;
+      data.edges_in.forEach(e=>{
+        html += `<li><span class="gs-badge gs-badge-edge">${e.edge_type}</span>
+          <span class="gs-link" onclick="showNodeDetail('${e.source_id}')">${esc(e.source_text)}</span></li>`;
+      });
+      html += '</ul></div>';
+    }
+    if (data.sources&&data.sources.length) {
+      html += `<div class="gs-section"><h3>📎 Sources (${data.sources.length})</h3><ul>`;
+      data.sources.forEach(s=>{
+        const origin = s.origin&&s.origin.startsWith('http')?
+          `<a href="${esc(s.origin)}" target="_blank" style="color:#58a6ff">${esc(s.origin)}</a>`:esc(s.origin);
+        html += `<li><span class="gs-badge gs-badge-type">${s.kind}</span> ${origin}</li>`;
+      });
+      html += '</ul></div>';
+    }
+    document.getElementById('gs-content').innerHTML = html;
+    document.getElementById('graph-sidebar').classList.add('open');
+  }
+  window.showNodeDetail = showNodeDetail;
+  window.closeSidebar = function(){ document.getElementById('graph-sidebar').classList.remove('open'); };
+
+  // ── Drag ──
+  function dragStart(e,d){ if(!e.active) simulation.alphaTarget(0.3).restart(); d.fx=d.x;d.fy=d.y; }
+  function dragging(e,d){ d.fx=e.x;d.fy=e.y; }
+  function dragEnd(e,d){ if(!e.active) simulation.alphaTarget(0); d.fx=null;d.fy=null; }
+
+  // ── Live refresh ──
+  window.toggleLive = function() {
+    liveActive = !liveActive;
+    const btn = document.getElementById('g-live-btn');
+    if (liveActive) {
+      btn.textContent = '⏸ Live'; btn.classList.add('active');
+      liveRefresh();
+      liveInterval = setInterval(liveRefresh, 5000);
+    } else {
+      btn.textContent = '▶ Live'; btn.classList.remove('active');
+      if (liveInterval) { clearInterval(liveInterval); liveInterval=null; }
+    }
+  };
+  async function liveRefresh() {
+    const agent = currentAgent();
+    if (!agent) return;
+    const params = new URLSearchParams({
+      agent,
+      type: document.getElementById('g-type').value,
+      status: document.getElementById('g-status').value,
+      search: document.getElementById('g-search').value,
+      limit: document.getElementById('g-limit').value,
+    });
+    try {
+      const r = await fetch('/dashboard/api/graph?'+params);
+      const data = await r.json();
+      const hash = `${data.stats._total_nodes}:${data.stats._total_edges}:${data.stats._latest_ts||''}`;
+      if (hash !== lastHash) {
+        lastHash = hash;
+        renderGraph(data);
+        renderStats(data.stats);
+      }
+    } catch(e) { /* ignore */ }
+  }
+
+  // ── Filter debounce ──
+  let timer;
+  function onFilter(){ clearTimeout(timer); timer=setTimeout(loadGraph,400); }
+  document.getElementById('g-agent').addEventListener('change', loadGraph);
+  document.getElementById('g-type').addEventListener('change', onFilter);
+  document.getElementById('g-status').addEventListener('change', onFilter);
+  document.getElementById('g-search').addEventListener('input', onFilter);
+  document.getElementById('g-limit').addEventListener('change', onFilter);
+
+  // Init
+  loadGraph();
+})();
+</script>
+{% endblock %}

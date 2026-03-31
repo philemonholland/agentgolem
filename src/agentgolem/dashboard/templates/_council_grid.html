@@ -59,6 +59,57 @@
         <p><strong>Priority:</strong> {{ "%.2f"|format(agent.discussion_priority) if agent.discussion_priority is not none else "—" }}</p>
         <p><strong>Wake cycles:</strong> {{ agent.wake_cycle_count }}</p>
 
+        {# --- Personality Profile (always visible, not inside details) --- #}
+        {% if agent.temperament %}
+        <div class="cog-section" style="margin-top:0.5rem;">
+            <div class="cog-section-label">🧬 Personality</div>
+            <div style="display:flex; flex-wrap:wrap; gap:0.3rem; margin-bottom:0.3rem;">
+                <span class="badge badge-muted" title="Cognitive style">🧠 {{ agent.temperament.get("cognitive_style", "?") }}</span>
+                <span class="badge badge-muted" title="Communication tone">💬 {{ agent.temperament.get("communication_tone", "?") }}</span>
+                <span class="badge badge-muted" title="Social orientation">👥 {{ agent.temperament.get("social_orientation", "?") }}</span>
+                <span class="badge badge-muted" title="Curiosity style">🔍 {{ agent.temperament.get("curiosity_style", "?") }}</span>
+                <span class="badge badge-muted" title="Conflict response">⚔️ {{ agent.temperament.get("conflict_response", "?") }}</span>
+            </div>
+            {% set risk = agent.temperament.get("risk_appetite", 0.5) %}
+            <div class="cog-row">
+                <span class="cog-label">Risk appetite</span>
+                <div class="cog-bar-track"><div class="cog-bar-fill cog-bar-fill--amber" style="width:{{ (risk * 100) | int }}%"></div></div>
+                <span class="cog-val">{{ "%.0f"|format(risk * 100) }}%</span>
+            </div>
+            {% set ebl = agent.emotional_baseline %}
+            <div class="cog-row">
+                <span class="cog-label">Emo baseline</span>
+                <div class="cog-bar-track"><div class="cog-bar-fill cog-bar-fill--{{ 'green' if ebl >= 0 else 'red' }}" style="width:{{ ((ebl + 0.5) / 1.0 * 100) | int }}%"></div></div>
+                <span class="cog-val">{{ "%+.2f"|format(ebl) }}</span>
+            </div>
+            {% if agent.formative_events_count > 0 %}
+            <div class="cog-row">
+                <span class="cog-label">Formative events</span>
+                <span class="cog-val">{{ agent.formative_events_count }}</span>
+            </div>
+            {% endif %}
+        </div>
+        {% endif %}
+
+        {# --- Peer Relationships (always visible) --- #}
+        {% if agent.relationships %}
+        <div class="cog-section">
+            <div class="cog-section-label">🤝 Relationships</div>
+            {% for peer_name, peer in agent.relationships.items() %}
+            {% if peer is mapping %}
+            {% set trust = peer.get("trust", 0.5) %}
+            <div class="cog-row">
+                <span class="cog-label" style="min-width:6rem;">{{ peer_name | truncate(12, True, "…") }}</span>
+                <div class="cog-bar-track" title="Trust: {{ '%.0f'|format(trust * 100) }}%">
+                    <div class="cog-bar-fill cog-bar-fill--{{ 'green' if trust > 0.6 else ('red' if trust < 0.4 else 'blue') }}" style="width:{{ (trust * 100) | int }}%"></div>
+                </div>
+                <span class="cog-val" title="Interactions: {{ peer.get('interaction_count', 0) }}">{{ peer.get("interaction_count", 0) }}×</span>
+            </div>
+            {% endif %}
+            {% endfor %}
+        </div>
+        {% endif %}
+
         <details
             data-persist-key="inner-state:{{ agent.name }}"
             {% if agent.name == selected_agent_name %}open{% endif %}
@@ -297,7 +348,8 @@
             <a href="/dashboard/soul?agent={{ agent.name }}">Soul</a> ·
             <a href="/dashboard/heartbeat?agent={{ agent.name }}">Heartbeat</a> ·
             <a href="/dashboard/logs?agent={{ agent.name }}">Logs</a> ·
-            <a href="/dashboard/memory?agent={{ agent.name }}">Memory</a>
+            <a href="/dashboard/memory?agent={{ agent.name }}">Memory</a> ·
+            <a href="/dashboard/graph?agent={{ agent.name }}">Graph</a>
         </footer>
     </article>
     {% else %}

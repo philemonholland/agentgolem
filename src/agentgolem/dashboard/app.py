@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from agentgolem.dashboard import api as api_mod
@@ -487,6 +487,196 @@ def create_dashboard_app() -> FastAPI:
                 "sources": [],
             },
         )
+
+    # ── Graph visualizer (embedded D3.js) ──
+
+    @app.get("/dashboard/graph", response_class=HTMLResponse)
+    async def graph_page(
+        request: Request,
+        agent: str | None = Query(None),
+    ) -> HTMLResponse:
+        overview = api_mod.build_council_overview(ds)
+        selected_name = _selected_agent_name(agent, overview)
+        agent_names = [a["name"] for a in overview.get("agents", [])]
+        return templates.TemplateResponse(
+            request,
+            "graph.html",
+            {
+                **_common_context(request, overview, selected_agent_name=selected_name),
+                "graph_agent_names": agent_names,
+            },
+        )
+
+    @app.get("/dashboard/api/graph", response_class=JSONResponse)
+    async def graph_api(
+        agent: str = Query(""),
+        type: str = Query(""),
+        status: str = Query(""),
+        search: str = Query(""),
+        limit: int = Query(500),
+    ) -> JSONResponse:
+        """Return graph data (nodes, edges, clusters, stats) for D3 rendering."""
+        import asyncio
+        import sqlite3
+        from functools import partial
+
+        data_dir = api_mod._get_data_dir(ds)
+        if data_dir is None:
+            return JSONResponse({"nodes": [], "edges": [], "clusters": [], "stats": {}})
+
+        def _sync_graph() -> dict:
+            db_path = data_dir / agent / "memory" / "graph.db"
+            if not db_path.is_file():
+                return {"nodes": [], "edges": [], "clusters": [], "stats": {}}
+
+            conn = sqlite3.connect(str(db_path))
+            conn.execute("PRAGMA query_only = ON")
+            conn.row_factory = sqlite3.Row
+
+            def _q(sql: str, params: tuple = ()) -> list[dict]:
+                return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+            try:
+                clauses, params_list = [], []
+                if type:
+                    clauses.append("type = ?")
+                    params_list.append(type)
+                if status:
+                    clauses.append("status = ?")
+                    params_list.append(status)
+                if search:
+                    clauses.append("text LIKE ?")
+                    params_list.append(f"%{search}%")
+                where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+                safe_limit = min(limit, 2000)
+
+                nodes = _q(
+                    f"SELECT * FROM nodes{where} ORDER BY centrality DESC LIMIT ?",
+                    (*params_list, safe_limit),
+                )
+                for n in nodes:
+                    n["owner_agent"] = agent
+                    n["node_id"] = n["id"]
+                    n["is_peer_ghost"] = False
+                    n["trust_useful"] = float(n.get("base_usefulness", 0.0)) * float(
+                        n.get("trustworthiness", 0.0)
+                    )
+
+                node_ids = {n["id"] for n in nodes}
+                edges = []
+                if node_ids:
+                    ph = ",".join("?" for _ in node_ids)
+                    edges = _q(
+                        f"SELECT * FROM edges WHERE source_id IN ({ph}) AND target_id IN ({ph})",
+                        (*node_ids, *node_ids),
+                    )
+
+                clusters = []
+                if node_ids:
+                    ph = ",".join("?" for _ in node_ids)
+                    cluster_rows = _q(
+                        f"SELECT DISTINCT c.* FROM clusters c "
+                        f"JOIN cluster_members cm ON c.id = cm.cluster_id "
+                        f"WHERE cm.node_id IN ({ph})",
+                        tuple(node_ids),
+                    )
+                    for c in cluster_rows:
+                        members = _q(
+                            "SELECT node_id FROM cluster_members WHERE cluster_id = ?",
+                            (c["id"],),
+                        )
+                        c["node_ids"] = [m["node_id"] for m in members if m["node_id"] in node_ids]
+                        clusters.append(c)
+
+                stats: dict[str, Any] = {}
+                for row in _q("SELECT type, COUNT(*) as cnt FROM nodes GROUP BY type"):
+                    stats[row["type"]] = row["cnt"]
+                total_edges = _q("SELECT COUNT(*) as cnt FROM edges")[0]["cnt"]
+                stats["_total_edges"] = total_edges
+                stats["_total_nodes"] = sum(v for k, v in stats.items() if not k.startswith("_"))
+                try:
+                    latest = _q("SELECT MAX(updated_at) as ts FROM nodes")
+                    stats["_latest_ts"] = latest[0]["ts"] if latest else ""
+                except Exception:
+                    stats["_latest_ts"] = ""
+
+                return {"nodes": nodes, "edges": edges, "clusters": clusters, "stats": stats}
+            finally:
+                conn.close()
+
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, _sync_graph)
+        return JSONResponse(result)
+
+    @app.get("/dashboard/api/graph/node", response_class=JSONResponse)
+    async def graph_node_api(
+        agent: str = Query(""),
+        id: str = Query(""),
+    ) -> JSONResponse:
+        """Return detailed info for a single node (edges, sources, clusters)."""
+        import asyncio
+        import sqlite3
+
+        data_dir = api_mod._get_data_dir(ds)
+        if data_dir is None:
+            return JSONResponse({"error": "no data dir"}, status_code=404)
+
+        def _sync_node() -> dict:
+            db_path = data_dir / agent / "memory" / "graph.db"
+            if not db_path.is_file():
+                return {"error": "no graph.db"}
+
+            conn = sqlite3.connect(str(db_path))
+            conn.execute("PRAGMA query_only = ON")
+            conn.row_factory = sqlite3.Row
+
+            def _q(sql: str, params: tuple = ()) -> list[dict]:
+                return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+            try:
+                rows = _q("SELECT * FROM nodes WHERE id = ?", (id,))
+                if not rows:
+                    return {"error": "node not found"}
+                node = rows[0]
+                node["owner_agent"] = agent
+
+                edges_out_raw = _q("SELECT * FROM edges WHERE source_id = ?", (id,))
+                edges_in_raw = _q("SELECT * FROM edges WHERE target_id = ?", (id,))
+
+                for e in edges_out_raw:
+                    target = _q("SELECT text FROM nodes WHERE id = ?", (e["target_id"],))
+                    e["target_text"] = target[0]["text"] if target else ""
+                for e in edges_in_raw:
+                    source = _q("SELECT text FROM nodes WHERE id = ?", (e["source_id"],))
+                    e["source_text"] = source[0]["text"] if source else ""
+
+                sources = _q(
+                    "SELECT s.* FROM sources s "
+                    "JOIN node_sources ns ON s.id = ns.source_id "
+                    "WHERE ns.node_id = ?",
+                    (id,),
+                )
+
+                clusters = _q(
+                    "SELECT c.* FROM clusters c "
+                    "JOIN cluster_members cm ON c.id = cm.cluster_id "
+                    "WHERE cm.node_id = ?",
+                    (id,),
+                )
+
+                return {
+                    "node": node,
+                    "edges_out": edges_out_raw,
+                    "edges_in": edges_in_raw,
+                    "sources": sources,
+                    "clusters": clusters,
+                }
+            finally:
+                conn.close()
+
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, _sync_node)
+        return JSONResponse(result, status_code=200 if "error" not in result else 404)
 
     @app.get("/dashboard/approvals", response_class=HTMLResponse)
     async def approvals_page(

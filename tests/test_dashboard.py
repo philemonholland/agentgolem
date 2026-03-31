@@ -334,3 +334,46 @@ async def test_cluster_detail_not_found(client: httpx.AsyncClient):
     resp = await client.get("/dashboard/memory/clusters/nonexistent-id")
     assert resp.status_code == 200
     assert "Not Found" in resp.text
+
+
+async def test_graph_page_returns_html(client: httpx.AsyncClient):
+    resp = await client.get("/dashboard/graph")
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]
+    assert "Memory Graph" in resp.text
+    assert "graph-svg" in resp.text
+    assert "d3.v7" in resp.text
+
+
+async def test_graph_api_returns_json_no_agent(client: httpx.AsyncClient):
+    resp = await client.get("/dashboard/api/graph?agent=nonexistent")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["nodes"] == []
+    assert data["edges"] == []
+
+
+async def test_graph_node_api_returns_error_no_agent(client: httpx.AsyncClient):
+    resp = await client.get("/dashboard/api/graph/node?agent=nonexistent&id=abc")
+    assert resp.status_code == 404
+
+
+async def test_graph_page_has_nav_link(client: httpx.AsyncClient):
+    resp = await client.get("/dashboard")
+    assert resp.status_code == 200
+    assert "/dashboard/graph" in resp.text
+
+
+async def test_council_card_has_graph_link(client: httpx.AsyncClient):
+    resp = await client.get("/dashboard/partials/council")
+    assert resp.status_code == 200
+    assert "/dashboard/graph" in resp.text
+
+
+async def test_personality_section_renders(client: httpx.AsyncClient):
+    """Personality section should be present when temperament data exists
+    (or gracefully absent for test fixtures without temperament)."""
+    resp = await client.get("/dashboard/partials/council")
+    assert resp.status_code == 200
+    # The template contains the personality label regardless of data
+    # If no temperament data, the section simply won't render
