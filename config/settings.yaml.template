@@ -61,6 +61,8 @@ autonomous_interval_seconds: 60.0
 name_discovery_cycles: 4
 peer_checkin_interval_minutes: 30.0
 peer_message_max_chars: 3000
+discussion_max_completion_tokens: 1024    # token room for discussion / reflection completions
+discussion_transcript_max_entries: 30     # rolling transcript memory for council dialogue
 repo_root: ""                  # workspace boundary (empty = auto-detect from install location)
 
 # Consciousness kernel
@@ -70,3 +72,10 @@ self_model_rebuild_interval: 10      # ticks between self-model reconstruction
 attention_influence_weight: 0.7      # how strongly attention directive biases action (0-1)
 internal_state_mycelium_share: true  # share internal state read-only via mycelium
 metacognition_novelty_bias: 0.3      # how much "stuck" detection pushes toward novelty
+
+# Dashboard tuning
+dashboard_refresh_interval_seconds: 5   # polling interval for live dashboard refresh
+dashboard_recent_change_seconds: 60     # how long a signal is marked as "recently changed"
+dashboard_dialogue_limit: 10            # how many recent dialogue turns to show
+dashboard_activity_limit: 6             # how many recent thoughts/actions to show per agent
+dashboard_settings_history_limit: 25    # how many recent setting-change events to show

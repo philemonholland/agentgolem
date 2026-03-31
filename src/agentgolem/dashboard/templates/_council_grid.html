@@ -1,0 +1,96 @@
+<div class="summary-grid">
+    <article class="summary-card">
+        <small>Agents</small>
+        <strong>{{ overview.agent_count }}</strong>
+    </article>
+    <article class="summary-card">
+        <small>Awake</small>
+        <strong>{{ overview.awake_count }}</strong>
+    </article>
+    <article class="summary-card">
+        <small>Paused</small>
+        <strong>{{ overview.paused_count }}</strong>
+    </article>
+    <article class="summary-card">
+        <small>Asleep</small>
+        <strong>{{ overview.asleep_count }}</strong>
+    </article>
+    <article class="summary-card">
+        <small>Floor holder</small>
+        <strong>{{ overview.floor_holder or "Open" }}</strong>
+    </article>
+    <article class="summary-card">
+        <small>Pending approvals</small>
+        <strong>{{ overview.pending_approvals }}</strong>
+    </article>
+</div>
+
+<div class="card-grid">
+    {% for agent in overview.agents %}
+    <article class="agent-card {% if agent.name == selected_agent_name %}selected-card{% endif %} {% if agent.has_recent_changes %}recent-card{% endif %}">
+        <header>
+            <div style="display: flex; justify-content: space-between; gap: 1rem; align-items: center; flex-wrap: wrap;">
+                <div>
+                    <strong>{{ agent.name }}</strong>
+                    {% if agent.ethical_vector %}
+                    <div class="muted">{{ agent.ethical_vector }}</div>
+                    {% endif %}
+                </div>
+                <span class="badge badge-{{ agent.mode }}">{{ agent.mode | upper }}</span>
+            </div>
+        </header>
+
+        <div>
+            {% if agent.is_speaking %}<span class="badge badge-danger">On the floor</span>{% endif %}
+            {% if agent.is_waiting_to_speak %}<span class="badge badge-info">Waiting to speak</span>{% endif %}
+            {% if agent.conversation_paused %}<span class="badge badge-warning">Conversation paused</span>{% endif %}
+            {% if agent.heartbeat_due %}<span class="badge badge-warning">Heartbeat due</span>{% endif %}
+            {% if agent.has_recent_changes %}<span class="badge recent-pill">Changed recently</span>{% endif %}
+        </div>
+
+        <p><strong>Task:</strong> {{ agent.current_task or "Idle" }}</p>
+        <p><strong>Queues:</strong> human {{ agent.human_messages_pending }}, peer {{ agent.peer_messages_pending }}</p>
+        <p><strong>Priority:</strong> {{ "%.2f"|format(agent.discussion_priority) if agent.discussion_priority is not none else "—" }}</p>
+        <p><strong>Wake cycles:</strong> {{ agent.wake_cycle_count }}</p>
+
+        <details {% if agent.name == selected_agent_name %}open{% endif %}>
+            <summary>Inner state</summary>
+            <p><strong>Internal:</strong> {{ agent.internal_state_summary }}</p>
+            <p><strong>Metacognition:</strong> {{ agent.metacognition_summary }}</p>
+            {% if agent.attention_directive_summary %}
+            <p><strong>Attention:</strong> {{ agent.attention_directive_summary }}</p>
+            {% endif %}
+            <p><strong>Self-model:</strong> {{ agent.self_model_summary }}</p>
+            <p><strong>Narrative:</strong> {{ agent.narrative_summary }}</p>
+
+            <div>
+                {% for key, changed in agent.changed_recently.items() %}
+                    {% if changed %}
+                    <span class="badge recent-pill">{{ key.replace("_", " ") }}</span>
+                    {% endif %}
+                {% endfor %}
+            </div>
+
+            {% if agent.recent_thoughts %}
+            <h4>Recent thoughts</h4>
+            <ul class="tight-list mono">
+                {% for thought in agent.recent_thoughts %}
+                <li>{{ thought }}</li>
+                {% endfor %}
+            </ul>
+            {% endif %}
+        </details>
+
+        <footer>
+            <a href="/dashboard/soul?agent={{ agent.name }}">Soul</a> ·
+            <a href="/dashboard/heartbeat?agent={{ agent.name }}">Heartbeat</a> ·
+            <a href="/dashboard/logs?agent={{ agent.name }}">Logs</a> ·
+            <a href="/dashboard/memory?agent={{ agent.name }}">Memory</a>
+        </footer>
+    </article>
+    {% else %}
+    <article class="agent-card">
+        <p>No agents are available.</p>
+    </article>
+    {% endfor %}
+</div>

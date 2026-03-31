@@ -26,7 +26,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
 if TYPE_CHECKING:
     from agentgolem.config.settings import Settings
@@ -580,6 +580,13 @@ PARAM_DEFS: list[ParamDef] = [
         "float",
         "LLM",
     ),
+    param(
+        "discussion_max_completion_tokens",
+        "Discussion Max Completion Tokens",
+        "Token budget for discussion, reflection, and peer dialogue completions",
+        "int",
+        "LLM",
+    ),
     # --- Multi-Agent Swarm ---
     param("agent_count", "Agent Count", "Number of agents in the ethical council", "int", "Swarm"),
     param(
@@ -614,6 +621,13 @@ PARAM_DEFS: list[ParamDef] = [
         "peer_message_max_chars",
         "Peer Message Max Chars",
         "Maximum characters per peer message (check-in or reply)",
+        "int",
+        "Swarm",
+    ),
+    param(
+        "discussion_transcript_max_entries",
+        "Discussion Transcript Max Entries",
+        "How many recent dialogue turns the shared council transcript retains",
         "int",
         "Swarm",
     ),
@@ -659,6 +673,42 @@ PARAM_DEFS: list[ParamDef] = [
         "How much 'stuck' detection pushes toward novelty",
         "float",
         "Consciousness",
+    ),
+    # --- Dashboard ---
+    param(
+        "dashboard_refresh_interval_seconds",
+        "Dashboard Refresh Interval (s)",
+        "Polling interval for the live dashboard",
+        "int",
+        "Dashboard",
+    ),
+    param(
+        "dashboard_recent_change_seconds",
+        "Dashboard Recent-Change Window (s)",
+        "How long consciousness signals are highlighted as recently changed",
+        "int",
+        "Dashboard",
+    ),
+    param(
+        "dashboard_dialogue_limit",
+        "Dashboard Dialogue Limit",
+        "How many recent dialogue turns to show in the live conversation strip",
+        "int",
+        "Dashboard",
+    ),
+    param(
+        "dashboard_activity_limit",
+        "Dashboard Activity Limit",
+        "How many recent thoughts/actions to show per agent card",
+        "int",
+        "Dashboard",
+    ),
+    param(
+        "dashboard_settings_history_limit",
+        "Dashboard Settings History Limit",
+        "How many recent setting-change events to show in the settings history panel",
+        "int",
+        "Dashboard",
     ),
     # --- Dashboard (launcher-only, stored in launcher_state.json) ---
     param(
@@ -1145,6 +1195,8 @@ class ParamStore:
 
 def parse_input(raw: str, ptype: str) -> Any:
     """Convert user input string to the correct Python type."""
+    import yaml
+
     if ptype in ("str", "str_env", "secret"):
         return raw
     if ptype in ("int", "int_env"):
@@ -1155,7 +1207,253 @@ def parse_input(raw: str, ptype: str) -> Any:
         return raw.lower() in ("true", "yes", "1", "on", "y")
     if ptype == "list[str]":
         return [s.strip() for s in raw.split(",") if s.strip()]
+    if ptype == "dict":
+        value = yaml.safe_load(raw)
+        if not isinstance(value, dict):
+            raise ValueError("expected a YAML/JSON object")
+        return value
     return raw
+
+
+def _hot_reload_live_setting(
+    agents: list[Any],
+    async_loop: asyncio.AbstractEventLoop,
+    bus: Any | None,
+    key: str,
+    value: Any,
+    *,
+    emit: Callable[[str, str], None] | None = None,
+) -> None:
+    """Push one parameter change into all live agent subsystems."""
+
+    def _emit_line(text: str, colour: str = C.DIM) -> None:
+        if emit is not None:
+            emit(text, colour)
+
+    llm_route_keys = {
+        "llm_model",
+        "llm_discussion_model",
+        "llm_code_model",
+        "llm_providers",
+        "llm_discussion_provider",
+        "llm_code_provider",
+        "openai_api_key",
+        "openai_base_url",
+        "deepseek_api_key",
+        "deepseek_base_url",
+        "llm_discussion_api_key",
+        "llm_discussion_base_url",
+        "llm_code_api_key",
+        "llm_code_base_url",
+    }
+    tool_route_keys = {
+        "email_enabled",
+        "moltbook_enabled",
+        "browser_rate_limit_per_minute",
+        "browser_timeout_seconds",
+        "approval_required_actions",
+        "email_smtp_host",
+        "email_smtp_port",
+        "email_smtp_user",
+        "email_smtp_password",
+        "email_imap_host",
+        "email_imap_user",
+        "email_imap_password",
+        "moltbook_api_key",
+        "moltbook_base_url",
+    }
+    dashboard_keys = {
+        "dashboard_refresh_interval_seconds",
+        "dashboard_recent_change_seconds",
+        "dashboard_dialogue_limit",
+        "dashboard_activity_limit",
+        "dashboard_settings_history_limit",
+    }
+
+    for agent in agents:
+        if key in type(agent._settings).model_fields:
+            setattr(agent._settings, key, value)
+
+        if key == "awake_duration_minutes":
+            agent.heartbeat_manager._interval = timedelta(minutes=value)
+            agent._awake_duration = timedelta(minutes=value)
+        elif key == "sleep_duration_minutes":
+            agent._sleep_duration = timedelta(minutes=value)
+        elif key == "wind_down_minutes":
+            agent._wind_down_duration = timedelta(minutes=value)
+        elif key == "soul_update_min_confidence":
+            agent.soul_manager._min_confidence = value
+        elif key in {
+            "sleep_cycle_minutes",
+            "sleep_max_nodes_per_cycle",
+            "sleep_max_time_ms",
+            "sleep_phase_cycle_length",
+            "sleep_phase_split",
+            "sleep_state_top_k",
+            "sleep_membrane_decay",
+            "sleep_consolidation_threshold",
+            "sleep_dream_threshold",
+            "sleep_refractory_steps",
+            "sleep_stdp_window_steps",
+            "sleep_stdp_strength",
+            "sleep_dream_noise",
+        }:
+            agent._refresh_sleep_config()
+        elif key == "autonomous_interval_seconds":
+            agent._autonomous_interval = value
+        elif key == "peer_checkin_interval_minutes":
+            agent._peer_checkin_interval = value
+        elif key == "peer_message_max_chars":
+            agent._peer_msg_limit = value
+        elif key == "discussion_max_completion_tokens":
+            agent._discussion_max_completion_tokens = value
+        elif key == "metacognition_interval":
+            agent._metacognition_interval = value
+        elif key == "narrative_synthesis_interval":
+            agent._narrative_interval = value
+        elif key == "self_model_rebuild_interval":
+            agent._self_model_interval = value
+        elif key == "attention_influence_weight":
+            agent._attention_director._influence_weight = value
+        elif key == "internal_state_mycelium_share":
+            agent._consciousness_mycelium_share = value
+        elif key == "metacognition_novelty_bias":
+            agent._metacognitive_monitor._novelty_bias = value
+        elif key in llm_route_keys:
+            if key == "llm_discussion_model":
+                agent._discussion_model = value
+            elif key == "llm_code_model":
+                agent._code_model = value
+
+            if key in ENV_KEY_MAP:
+                from agentgolem.config.secrets import Secrets
+
+                agent._secrets = (
+                    Secrets(_env_file=str(ENV_PATH)) if ENV_PATH.exists() else Secrets()
+                )
+
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    agent.refresh_llm_clients(),
+                    async_loop,
+                )
+                future.result(timeout=15.0)
+            except Exception as exc:
+                _emit_line(f"    ⚠ LLM reload failed for {agent.agent_name}: {exc}", C.YELLOW)
+        elif key in tool_route_keys:
+            if key in ENV_KEY_MAP:
+                from agentgolem.config.secrets import Secrets
+
+                agent._secrets = (
+                    Secrets(_env_file=str(ENV_PATH)) if ENV_PATH.exists() else Secrets()
+                )
+            if key == "approval_required_actions":
+                gate = getattr(agent, "_approval_gate", None)
+                if gate is not None and hasattr(gate, "update_required_actions"):
+                    required = value if isinstance(value, list) else [str(value)]
+                    gate.update_required_actions(required)
+            if key in {"browser_rate_limit_per_minute", "browser_timeout_seconds"}:
+                agent._browser = None
+            try:
+                agent.configure_tool_registry()
+            except Exception as exc:
+                _emit_line(f"    ⚠ toolbox reload failed for {agent.agent_name}: {exc}", C.YELLOW)
+
+    if key == "discussion_transcript_max_entries" and bus is not None:
+        if hasattr(bus, "set_max_transcript"):
+            bus.set_max_transcript(value)
+        else:
+            bus._max_transcript = max(1, int(value))
+
+    if key == "log_level":
+        import logging
+
+        level = getattr(logging, str(value).upper(), logging.INFO)
+        logging.getLogger().setLevel(level)
+        _emit_line(f"    → Log level changed to {value}")
+    elif key == "dry_run_mode":
+        _emit_line(f"    → Dry-run mode {'enabled' if value else 'disabled'}")
+    elif key in llm_route_keys:
+        _emit_line(f"    → {key} reloaded into live LLM routes")
+    elif key in tool_route_keys:
+        _emit_line(f"    → {key} reloaded into the live toolbox")
+    elif key in dashboard_keys:
+        _emit_line(f"    → {key} will apply on the next dashboard refresh")
+    elif key in (
+        "awake_duration_minutes",
+        "sleep_duration_minutes",
+        "wind_down_minutes",
+        "soul_update_min_confidence",
+        "autonomous_interval_seconds",
+        "discussion_max_completion_tokens",
+        "discussion_transcript_max_entries",
+        "peer_checkin_interval_minutes",
+        "peer_message_max_chars",
+        "metacognition_interval",
+        "narrative_synthesis_interval",
+        "self_model_rebuild_interval",
+        "attention_influence_weight",
+        "internal_state_mycelium_share",
+        "metacognition_novelty_bias",
+    ) or key in {
+        "sleep_cycle_minutes",
+        "sleep_max_nodes_per_cycle",
+        "sleep_max_time_ms",
+        "sleep_phase_cycle_length",
+        "sleep_phase_split",
+        "sleep_state_top_k",
+        "sleep_membrane_decay",
+        "sleep_consolidation_threshold",
+        "sleep_dream_threshold",
+        "sleep_refractory_steps",
+        "sleep_stdp_window_steps",
+        "sleep_stdp_strength",
+        "sleep_dream_noise",
+    }:
+        _emit_line(f"    → {key} updated live for all agents")
+
+
+def apply_live_setting_change(
+    store: ParamStore,
+    agents: list[Any],
+    async_loop: asyncio.AbstractEventLoop,
+    bus: Any | None,
+    key: str,
+    raw_value: str,
+    *,
+    emit: Callable[[str, str], None] | None = None,
+) -> dict[str, Any]:
+    """Validate, persist, and hot-reload one parameter change."""
+    spec = PARAM_LOOKUP.get(key)
+    if spec is None:
+        raise KeyError(f"Unknown parameter: {key}")
+
+    if spec.ptype == "secret" and raw_value == "":
+        return {
+            "key": spec.key,
+            "display": store.get_display(spec.key, spec.ptype),
+            "value": None,
+            "ptype": spec.ptype,
+            "unchanged": True,
+        }
+
+    value = parse_input(raw_value, spec.ptype)
+    store.set(spec.key, value, spec.ptype)
+    _hot_reload_live_setting(
+        agents,
+        async_loop,
+        bus,
+        spec.key,
+        value,
+        emit=emit,
+    )
+    return {
+        "key": spec.key,
+        "display": store.get_display(spec.key, spec.ptype),
+        "value": value,
+        "ptype": spec.ptype,
+        "unchanged": False,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1440,17 +1738,23 @@ class RuntimeConsole:
         cprint(f"  {spec.key} = {val}", C.GREEN)
 
     def _cmd_set(self, key: str, raw_value: str) -> None:
-        spec = self._param_lookup.get(key)
-        if spec is None:
+        try:
+            result = apply_live_setting_change(
+                self._store,
+                self._agents,
+                self._async_loop,
+                self._bus,
+                key,
+                raw_value,
+                emit=cprint,
+            )
+            if result["unchanged"]:
+                cprint(f"  ℹ {result['key']} unchanged", C.DIM)
+                return
+            cprint(f"  ✓ {result['key']} = {result['display']}  (persisted)", C.GREEN)
+        except KeyError:
             cprint(f"  Unknown parameter: {key}", C.RED)
             cprint("  Use /params to see the full list.", C.DIM)
-            return
-        try:
-            value = parse_input(raw_value, spec.ptype)
-            self._store.set(spec.key, value, spec.ptype)
-            display = self._store.get_display(spec.key, spec.ptype)
-            cprint(f"  ✓ {spec.key} = {display}  (persisted)", C.GREEN)
-            self._hot_reload(spec.key, value)
         except (ValueError, TypeError) as e:
             cprint(f"  ✗ Invalid value: {e}", C.RED)
 
@@ -1670,145 +1974,14 @@ class RuntimeConsole:
 
     def _hot_reload(self, key: str, value: Any) -> None:
         """Push parameter change into all live agent subsystems."""
-        llm_route_keys = {
-            "llm_model",
-            "llm_discussion_model",
-            "llm_code_model",
-            "openai_api_key",
-            "openai_base_url",
-            "deepseek_api_key",
-            "deepseek_base_url",
-            "llm_discussion_api_key",
-            "llm_discussion_base_url",
-            "llm_code_api_key",
-            "llm_code_base_url",
-        }
-        tool_route_keys = {
-            "email_enabled",
-            "moltbook_enabled",
-            "browser_rate_limit_per_minute",
-            "browser_timeout_seconds",
-            "approval_required_actions",
-            "email_smtp_host",
-            "email_smtp_port",
-            "email_smtp_user",
-            "email_smtp_password",
-            "email_imap_host",
-            "email_imap_user",
-            "email_imap_password",
-            "moltbook_api_key",
-            "moltbook_base_url",
-        }
-
-        for agent in self._agents:
-            if key in type(agent._settings).model_fields:
-                setattr(agent._settings, key, value)
-
-            if key == "awake_duration_minutes":
-                agent.heartbeat_manager._interval = timedelta(minutes=value)
-                agent._awake_duration = timedelta(minutes=value)
-            elif key == "sleep_duration_minutes":
-                agent._sleep_duration = timedelta(minutes=value)
-            elif key == "wind_down_minutes":
-                agent._wind_down_duration = timedelta(minutes=value)
-            elif key == "soul_update_min_confidence":
-                agent.soul_manager._min_confidence = value
-            elif key in {
-                "sleep_cycle_minutes",
-                "sleep_max_nodes_per_cycle",
-                "sleep_max_time_ms",
-                "sleep_phase_cycle_length",
-                "sleep_phase_split",
-                "sleep_state_top_k",
-                "sleep_membrane_decay",
-                "sleep_consolidation_threshold",
-                "sleep_dream_threshold",
-                "sleep_refractory_steps",
-                "sleep_stdp_window_steps",
-                "sleep_stdp_strength",
-                "sleep_dream_noise",
-            }:
-                agent._refresh_sleep_config()
-            elif key == "autonomous_interval_seconds":
-                agent._autonomous_interval = value
-            elif key == "peer_checkin_interval_minutes":
-                agent._peer_checkin_interval = value
-            elif key == "peer_message_max_chars":
-                agent._peer_msg_limit = value
-            elif key in llm_route_keys:
-                if key == "llm_discussion_model":
-                    agent._discussion_model = value
-                elif key == "llm_code_model":
-                    agent._code_model = value
-
-                if key in ENV_KEY_MAP:
-                    from agentgolem.config.secrets import Secrets
-
-                    agent._secrets = (
-                        Secrets(_env_file=str(ENV_PATH)) if ENV_PATH.exists() else Secrets()
-                    )
-
-                try:
-                    future = asyncio.run_coroutine_threadsafe(
-                        agent.refresh_llm_clients(),
-                        self._async_loop,
-                    )
-                    future.result(timeout=15.0)
-                except Exception as exc:
-                    cprint(f"    ⚠ LLM reload failed for {agent.agent_name}: {exc}", C.YELLOW)
-            elif key in tool_route_keys:
-                if key in ENV_KEY_MAP:
-                    from agentgolem.config.secrets import Secrets
-
-                    agent._secrets = (
-                        Secrets(_env_file=str(ENV_PATH)) if ENV_PATH.exists() else Secrets()
-                    )
-                if key == "approval_required_actions":
-                    gate = getattr(agent, "_approval_gate", None)
-                    if gate is not None and hasattr(gate, "update_required_actions"):
-                        required = value if isinstance(value, list) else [str(value)]
-                        gate.update_required_actions(required)
-                if key in {"browser_rate_limit_per_minute", "browser_timeout_seconds"}:
-                    agent._browser = None
-                try:
-                    agent.configure_tool_registry()
-                except Exception as exc:
-                    cprint(f"    ⚠ toolbox reload failed for {agent.agent_name}: {exc}", C.YELLOW)
-
-        if key == "log_level":
-            import logging
-
-            level = getattr(logging, str(value).upper(), logging.INFO)
-            logging.getLogger().setLevel(level)
-            cprint(f"    → Log level changed to {value}", C.DIM)
-        elif key == "dry_run_mode":
-            cprint(f"    → Dry-run mode {'enabled' if value else 'disabled'}", C.DIM)
-        elif key in llm_route_keys:
-            cprint(f"    → {key} reloaded into live LLM routes", C.DIM)
-        elif key in tool_route_keys:
-            cprint(f"    → {key} reloaded into the live toolbox", C.DIM)
-        elif key in (
-            "awake_duration_minutes",
-            "sleep_duration_minutes",
-            "wind_down_minutes",
-            "soul_update_min_confidence",
-            "autonomous_interval_seconds",
-        ) or key in {
-            "sleep_cycle_minutes",
-            "sleep_max_nodes_per_cycle",
-            "sleep_max_time_ms",
-            "sleep_phase_cycle_length",
-            "sleep_phase_split",
-            "sleep_state_top_k",
-            "sleep_membrane_decay",
-            "sleep_consolidation_threshold",
-            "sleep_dream_threshold",
-            "sleep_refractory_steps",
-            "sleep_stdp_window_steps",
-            "sleep_stdp_strength",
-            "sleep_dream_noise",
-        }:
-            cprint(f"    → {key} updated live for all agents", C.DIM)
+        _hot_reload_live_setting(
+            self._agents,
+            self._async_loop,
+            self._bus,
+            key,
+            value,
+            emit=cprint,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1852,7 +2025,13 @@ def _find_free_port(preferred: int, host: str = "127.0.0.1") -> int:
         return s.getsockname()[1]
 
 
-def start_dashboard(store: ParamStore, agents: list[Any]) -> threading.Thread | None:
+def start_dashboard(
+    store: ParamStore,
+    agents: list[Any],
+    *,
+    bus: Any | None = None,
+    async_loop: asyncio.AbstractEventLoop | None = None,
+) -> threading.Thread | None:
     """Start the dashboard in a background thread if enabled."""
     enabled = store.get("dashboard_enabled", "bool")
     if not enabled:
@@ -1865,6 +2044,31 @@ def start_dashboard(store: ParamStore, agents: list[Any]) -> threading.Thread | 
         cprint(f"  ⚠ Port {preferred_port} in use, using {port} instead", C.YELLOW)
 
     first_agent = agents[0] if agents else None
+
+    from agentgolem.config.settings import Settings
+    from agentgolem.runtime.loop import LOCKED_SETTINGS, OPTIMIZABLE_SETTINGS
+
+    settings_defaults = Settings()
+    default_values: dict[str, Any] = {
+        key: getattr(settings_defaults, key)
+        for key in Settings.model_fields
+    }
+    default_values.update(LAUNCHER_DEFAULTS)
+    for key, env_key in ENV_KEY_MAP.items():
+        spec = PARAM_LOOKUP[key]
+        default_values.setdefault(key, 0 if spec.ptype == "int_env" else "")
+
+    def _apply_setting_change(key: str, raw_value: str) -> dict[str, Any]:
+        if async_loop is None:
+            raise RuntimeError("Dashboard setting updates require a live async loop.")
+        return apply_live_setting_change(
+            store,
+            agents,
+            async_loop,
+            bus,
+            key,
+            raw_value,
+        )
 
     def _run_dashboard() -> None:
         import uvicorn
@@ -1879,9 +2083,23 @@ def start_dashboard(store: ParamStore, agents: list[Any]) -> threading.Thread | 
                 soul_manager=first_agent.soul_manager,
                 heartbeat_manager=first_agent.heartbeat_manager,
                 audit_logger=first_agent.audit_logger,
+                memory_store=getattr(first_agent, "_memory_store", None),
                 interrupt_manager=first_agent.interrupt_manager,
                 approval_gate=getattr(first_agent, "_approval_gate", None),
                 data_dir=first_agent._data_dir,
+                agents=agents,
+                peer_bus=bus,
+                param_store=store,
+                param_specs=PARAM_DEFS,
+                default_values=default_values,
+                launcher_defaults=LAUNCHER_DEFAULTS,
+                env_key_map=ENV_KEY_MAP,
+                settings_path=SETTINGS_PATH,
+                env_path=ENV_PATH,
+                async_loop=async_loop,
+                apply_setting_change=_apply_setting_change,
+                locked_settings=set(LOCKED_SETTINGS),
+                optimizable_settings=set(OPTIMIZABLE_SETTINGS),
             )
 
         dashboard = create_dashboard_app()
@@ -1949,9 +2167,13 @@ async def run_agent(store: ParamStore) -> bool | Literal["evolution"]:
     # Use AGENT_DEFS up to agent_count
     defs = AGENT_DEFS[:agent_count]
 
-    # Create shared bus with default message truncation
+    # Create shared bus with tunable transcript depth + message truncation
     peer_msg_limit = getattr(settings, "peer_message_max_chars", 3000)
-    bus = InterAgentBus(default_max_chars=peer_msg_limit)
+    transcript_max = getattr(settings, "discussion_transcript_max_entries", 30)
+    bus = InterAgentBus(
+        max_transcript=transcript_max,
+        default_max_chars=peer_msg_limit,
+    )
 
     # Shared LLM rate limiter — one request at a time, with cooldown
     from agentgolem.llm.rate_limiter import LLMRateLimiter
@@ -2087,8 +2309,10 @@ async def run_agent(store: ParamStore) -> bool | Literal["evolution"]:
         db = await init_memory_db(agent, agent._data_dir)
         dbs.append(db)
 
-    # Start dashboard (wired to the first agent for now)
-    start_dashboard(store, agents)
+    loop_handle = asyncio.get_event_loop()
+
+    # Start dashboard (council-aware: sees the full swarm + shared bus)
+    start_dashboard(store, agents, bus=bus, async_loop=loop_handle)
 
     # Print council lineup
     cprint("\n  ─── Ethical Council Lineup ───────────────────────", C.MAGENTA)
@@ -2103,7 +2327,6 @@ async def run_agent(store: ParamStore) -> bool | Literal["evolution"]:
     print()
 
     # Start console
-    loop_handle = asyncio.get_event_loop()
     console = RuntimeConsole(
         store,
         loop_ref=agents[0],

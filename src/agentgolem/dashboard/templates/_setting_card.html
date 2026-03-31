@@ -1,0 +1,54 @@
+<article id="setting-card-{{ entry.key }}" class="setting-card">
+    <header>
+        <strong>{{ entry.display_name }}</strong>
+        <div class="mono muted">{{ entry.key }}</div>
+    </header>
+
+    <p>{{ entry.description }}</p>
+
+    <div class="setting-meta">
+        <span class="badge badge-muted">{{ entry.group }}</span>
+        <span class="badge badge-info">Source: {{ entry.source_kind }}</span>
+        <span class="badge badge-muted">{{ entry.storage }}</span>
+        {% if entry.is_env %}<span class="badge badge-warning">Env-backed</span>{% endif %}
+        {% if entry.is_launcher %}<span class="badge badge-warning">Launcher</span>{% endif %}
+        {% if entry.is_optimizable %}<span class="badge badge-success">Agent-optimizable</span>{% endif %}
+        {% if entry.is_locked %}<span class="badge badge-danger">Agent-locked</span>{% endif %}
+        {% if entry.runtime_override %}<span class="badge recent-pill">Live override</span>{% endif %}
+        {% if entry.is_secret %}<span class="badge badge-warning">Secret</span>{% endif %}
+    </div>
+
+    <p><strong>Current:</strong> <code>{{ entry.current_display }}</code></p>
+    <p><strong>Operator baseline:</strong> <code>{{ entry.operator_display }}</code></p>
+    <p><strong>Default:</strong> <code>{{ entry.default_display }}</code></p>
+
+    {% if entry.agent_overrides %}
+    <p><strong>Agent overrides:</strong></p>
+    <ul class="tight-list">
+        {% for override in entry.agent_overrides %}
+        <li><span class="mono">{{ override.agent }}</span>: <code>{{ override.value }}</code></li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+
+    {% if error %}
+    <div class="flash-danger">{{ error }}</div>
+    {% endif %}
+
+    <form hx-post="/dashboard/settings/{{ entry.key }}" hx-target="#setting-card-{{ entry.key }}" hx-swap="outerHTML">
+        <label>
+            Update value
+            {% if entry.ptype == "dict" %}
+            <textarea name="value" class="textarea-small">{{ entry.editable_value }}</textarea>
+            {% else %}
+            <input
+                type="text"
+                name="value"
+                value="{{ entry.editable_value }}"
+                {% if entry.is_secret %}placeholder="Leave blank to keep the current secret"{% endif %}
+            >
+            {% endif %}
+        </label>
+        <button type="submit">Save</button>
+    </form>
+</article>

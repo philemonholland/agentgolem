@@ -4,31 +4,48 @@
 
 {% block content %}
 <h1>Approval Queue</h1>
+<p class="muted">Pending outbound actions that still need operator approval.</p>
+
+<section class="panel">
+    <form method="get" action="/dashboard/approvals" class="inline-filter">
+        <label>
+            Agent
+            <select name="agent">
+                {% for agent_name in agent_names %}
+                <option value="{{ agent_name }}" {% if agent_name == selected_agent_name %}selected{% endif %}>{{ agent_name }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <button type="submit">Switch</button>
+    </form>
+</section>
 
 {% if approvals %}
 {% for item in approvals %}
-<article>
+<article class="panel" id="approval-{{ item.request_id }}">
     <header>
         <strong>{{ item.action }}</strong>
         <span class="badge badge-warning">pending</span>
+        <span class="badge badge-muted">{{ item.agent_name }}</span>
     </header>
     <p class="mono">ID: {{ item.request_id }}</p>
     <p><strong>Context:</strong> {{ item.context | string | truncate(200) }}</p>
     <p><small>Requested: {{ item.timestamp | default("—") }}</small></p>
-    <div role="group">
-        <button hx-post="/api/approvals/{{ item.request_id }}/approve"
-                hx-target="#result-{{ item.request_id }}"
-                hx-swap="innerHTML"
-                class="outline">✅ Approve</button>
-        <button hx-post="/api/approvals/{{ item.request_id }}/deny"
-                hx-target="#result-{{ item.request_id }}"
-                hx-swap="innerHTML"
-                class="outline secondary">❌ Deny</button>
+    <div class="button-row">
+        <form hx-post="/dashboard/approvals/{{ item.request_id }}/approve" hx-target="#approval-{{ item.request_id }}" hx-swap="outerHTML">
+            <input type="hidden" name="agent" value="{{ selected_agent_name }}">
+            <button type="submit" class="outline">Approve</button>
+        </form>
+        <form hx-post="/dashboard/approvals/{{ item.request_id }}/deny" hx-target="#approval-{{ item.request_id }}" hx-swap="outerHTML">
+            <input type="hidden" name="agent" value="{{ selected_agent_name }}">
+            <button type="submit" class="outline secondary">Deny</button>
+        </form>
     </div>
-    <div id="result-{{ item.request_id }}"></div>
 </article>
 {% endfor %}
 {% else %}
-<p>No pending approvals.</p>
+<section class="panel">
+    <p>No pending approvals.</p>
+</section>
 {% endif %}
 {% endblock %}

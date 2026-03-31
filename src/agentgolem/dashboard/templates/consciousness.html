@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+
+{% block title %}Consciousness — AgentGolem{% endblock %}
+
+{% block content %}
+<h1>Consciousness Console</h1>
+<p class="muted">Live council state, dialogue flow, and recent settings activity.</p>
+
+<section class="panel">
+    <form method="get" action="/dashboard" class="inline-filter">
+        <label>
+            Focus agent
+            <select name="agent">
+                {% for agent_name in agent_names %}
+                <option value="{{ agent_name }}" {% if agent_name == selected_agent_name %}selected{% endif %}>{{ agent_name }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <button type="submit">Focus</button>
+    </form>
+</section>
+
+<section class="panel">
+    <h2>Conversation Controls</h2>
+    <div class="button-row">
+        {% for action in ["wake", "sleep", "pause", "resume"] %}
+        <form hx-post="/dashboard/actions/mode/{{ action }}" hx-target="#control-result" hx-swap="innerHTML">
+            <input type="hidden" name="agent" value="{{ selected_agent_name or '' }}">
+            <button type="submit" class="outline">{{ action | title }}</button>
+        </form>
+        {% endfor %}
+    </div>
+    <form class="inline-filter" hx-post="/dashboard/actions/message" hx-target="#control-result" hx-swap="innerHTML">
+        <label style="min-width: 220px;">
+            Deliver to
+            <select name="agent">
+                <option value="">All agents</option>
+                {% for agent_name in agent_names %}
+                <option value="{{ agent_name }}" {% if agent_name == selected_agent_name %}selected{% endif %}>{{ agent_name }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label style="flex: 1 1 420px;">
+            Human message
+            <input type="text" name="text" placeholder="Type a message…" required>
+        </label>
+        <button type="submit">Send</button>
+    </form>
+    <div id="control-result"></div>
+</section>
+
+<section>
+    <div
+        id="council-grid"
+        hx-get="/dashboard/partials/council{% if selected_agent_name %}?agent={{ selected_agent_name }}{% endif %}"
+        hx-trigger="load, every {{ refresh_interval }}s"
+        hx-swap="innerHTML"
+    >
+        {% include "_council_grid.html" %}
+    </div>
+</section>
+
+<section>
+    <div
+        id="dialogue-panel"
+        hx-get="/dashboard/partials/dialogue"
+        hx-trigger="load, every {{ refresh_interval }}s"
+        hx-swap="innerHTML"
+    >
+        {% include "_dialogue_panel.html" %}
+    </div>
+</section>
+
+<section class="panel">
+    <div style="display: flex; justify-content: space-between; gap: 1rem; align-items: baseline; flex-wrap: wrap;">
+        <h2>Recent Settings Activity</h2>
+        <a href="/dashboard/settings">Open Settings Control Center</a>
+    </div>
+    {% include "_settings_history.html" %}
+</section>
+{% endblock %}

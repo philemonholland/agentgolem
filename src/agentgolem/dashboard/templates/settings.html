@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+
+{% block title %}Settings — AgentGolem{% endblock %}
+
+{% block content %}
+<h1>Settings Control Center</h1>
+<p class="muted">Live operator controls, provenance, and agent optimization history.</p>
+
+<section class="panel">
+    <form method="get" action="/dashboard/settings" class="inline-filter">
+        <label>
+            Group
+            <select name="group">
+                <option value="">All groups</option>
+                {% for group_item in groups %}
+                <option value="{{ group_item.name }}" {% if group_item.name == selected_group %}selected{% endif %}>{{ group_item.name }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label style="min-width: 280px;">
+            Search
+            <input type="text" name="q" value="{{ search }}" placeholder="Search settings…">
+        </label>
+        <button type="submit">Filter</button>
+    </form>
+</section>
+
+<section
+    id="settings-history"
+    hx-get="/dashboard/settings/history"
+    hx-trigger="load, every {{ refresh_interval }}s"
+    hx-swap="innerHTML"
+>
+    {% include "_settings_history.html" %}
+</section>
+
+{% for group_item in groups %}
+<section class="panel">
+    <h2>{{ group_item.name }}</h2>
+    <div class="card-grid">
+        {% for entry in group_item.entries %}
+            {% include "_setting_card.html" %}
+        {% endfor %}
+    </div>
+</section>
+{% else %}
+<section class="panel">
+    <p>No settings matched your filter.</p>
+</section>
+{% endfor %}
+{% endblock %}

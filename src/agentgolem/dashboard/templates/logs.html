@@ -4,33 +4,40 @@
 
 {% block content %}
 <h1>Log Viewer</h1>
+<p class="muted">Audit and activity logs for the selected agent.</p>
 
-<section>
-    <form hx-get="/dashboard/logs" hx-target="#log-results" hx-swap="innerHTML" hx-push-url="true">
-        <div class="grid">
-            <label>
-                Type
-                <select name="type">
-                    <option value="audit" {% if log_type == "audit" %}selected{% endif %}>Audit</option>
-                    <option value="activity" {% if log_type == "activity" %}selected{% endif %}>Activity</option>
-                </select>
-            </label>
-            <label>
-                Search
-                <input type="text" name="q" value="{{ search }}" placeholder="Search logs…">
-            </label>
-            <label>
-                Limit
-                <input type="number" name="limit" value="{{ limit }}" min="1" max="500">
-            </label>
-        </div>
-        <button type="submit">Search</button>
+<section class="panel">
+    <form method="get" action="/dashboard/logs" class="inline-filter">
+        <label>
+            Agent
+            <select name="agent">
+                {% for agent_name in agent_names %}
+                <option value="{{ agent_name }}" {% if agent_name == selected_agent_name %}selected{% endif %}>{{ agent_name }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label>
+            Type
+            <select name="type">
+                <option value="audit" {% if log_type == "audit" %}selected{% endif %}>Audit</option>
+                <option value="activity" {% if log_type == "activity" %}selected{% endif %}>Activity</option>
+            </select>
+        </label>
+        <label>
+            Search
+            <input type="text" name="q" value="{{ search }}" placeholder="Search logs…">
+        </label>
+        <label>
+            Limit
+            <input type="number" name="limit" value="{{ limit }}" min="1" max="500">
+        </label>
+        <button type="submit">Apply</button>
     </form>
 </section>
 
-<section id="log-results">
+<section class="panel">
     {% if entries %}
-    <table>
+    <table class="compact-table">
         <thead>
             <tr>
                 <th>Timestamp</th>
@@ -42,8 +49,8 @@
             {% for entry in entries %}
             <tr>
                 <td class="mono">{{ entry.timestamp | default("—") }}</td>
-                <td>{{ entry.mutation_type | default(entry.get("event", "—") if entry.get is defined else "—") }}</td>
-                <td class="mono">{{ entry | string | truncate(120) }}</td>
+                <td>{{ entry.mutation_type | default(entry.action | default("—")) }}</td>
+                <td class="mono">{{ entry | string | truncate(160) }}</td>
             </tr>
             {% endfor %}
         </tbody>

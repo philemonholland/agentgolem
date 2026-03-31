@@ -4,25 +4,42 @@
 
 {% block content %}
 <h1>Heartbeat Viewer</h1>
+<p class="muted">Current heartbeat plus recent persisted heartbeat history.</p>
 
-<section>
+<section class="panel">
+    <form method="get" action="/dashboard/heartbeat" class="inline-filter">
+        <label>
+            Agent
+            <select name="agent">
+                {% for agent_name in agent_names %}
+                <option value="{{ agent_name }}" {% if agent_name == selected_agent_name %}selected{% endif %}>{{ agent_name }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <button type="submit">Switch</button>
+    </form>
+</section>
+
+<section class="panel">
     <h2>Current Heartbeat</h2>
     <pre>{{ content }}</pre>
 </section>
 
-<section>
+<section class="panel">
     <h2>History</h2>
     {% if history %}
-    <table>
+    <table class="compact-table">
         <thead>
             <tr>
                 <th>Timestamp</th>
+                <th>Path</th>
             </tr>
         </thead>
         <tbody>
             {% for entry in history %}
             <tr>
                 <td class="mono">{{ entry.timestamp }}</td>
+                <td class="mono">{{ entry.path }}</td>
             </tr>
             {% endfor %}
         </tbody>

@@ -7,25 +7,113 @@
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
     <script src="https://unpkg.com/htmx.org@1.9.10"></script>
     <style>
-        nav { margin-bottom: 1rem; }
-        .badge { display: inline-block; padding: 0.2em 0.6em; font-size: 0.75em; border-radius: 4px; }
-        .badge-warning { background: #f0ad4e; color: #fff; }
-        .badge-success { background: #5cb85c; color: #fff; }
-        .badge-danger { background: #d9534f; color: #fff; }
-        .badge-info { background: #5bc0de; color: #fff; }
-        .quarantined { border-left: 4px solid #f0ad4e; padding-left: 0.5rem; }
-        .canonical { border-left: 4px solid #5cb85c; padding-left: 0.5rem; }
-        .mono { font-family: monospace; font-size: 0.9em; }
-        pre { background: #f4f4f4; padding: 1rem; overflow-x: auto; }
+        :root {
+            --ag-border: rgba(148, 163, 184, 0.25);
+            --ag-bg: rgba(15, 23, 42, 0.04);
+            --ag-muted: #64748b;
+            --ag-recent: rgba(59, 130, 246, 0.12);
+            --ag-success: #0f766e;
+            --ag-warning: #b45309;
+            --ag-danger: #b91c1c;
+        }
+
+        body { background: #0f172a; color: #e2e8f0; }
+        main.container, nav.container, footer.container { max-width: 1500px; }
+        nav, article, section, table, details, pre, textarea, input, select {
+            background: rgba(15, 23, 42, 0.55);
+            border-color: var(--ag-border);
+        }
+        nav { margin: 1rem auto; border-radius: 14px; padding: 0.75rem 1rem; }
+        nav a { color: #cbd5e1; }
+        nav strong { color: #f8fafc; }
+        h1, h2, h3, h4, strong { color: #f8fafc; }
+        small, .muted { color: var(--ag-muted); }
+        .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+        .panel { padding: 1rem; border-radius: 14px; background: rgba(15, 23, 42, 0.45); }
+        .card-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 1rem;
+        }
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 0.75rem;
+            margin-bottom: 1rem;
+        }
+        .summary-card, .agent-card, .setting-card, .transcript-entry {
+            border: 1px solid var(--ag-border);
+            border-radius: 14px;
+            padding: 1rem;
+            background: rgba(15, 23, 42, 0.48);
+        }
+        .summary-card strong { display: block; font-size: 1.5rem; margin-top: 0.35rem; }
+        .selected-card {
+            border-color: rgba(59, 130, 246, 0.55);
+            box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.25);
+        }
+        .recent-card {
+            background: linear-gradient(180deg, rgba(59, 130, 246, 0.12), rgba(15, 23, 42, 0.48));
+        }
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.3rem;
+            padding: 0.2rem 0.55rem;
+            border-radius: 999px;
+            font-size: 0.75rem;
+            border: 1px solid transparent;
+            margin-right: 0.35rem;
+            margin-bottom: 0.35rem;
+        }
+        .badge-awake { background: rgba(34, 197, 94, 0.16); color: #86efac; border-color: rgba(34, 197, 94, 0.25); }
+        .badge-asleep { background: rgba(56, 189, 248, 0.16); color: #7dd3fc; border-color: rgba(56, 189, 248, 0.25); }
+        .badge-paused { background: rgba(245, 158, 11, 0.16); color: #fcd34d; border-color: rgba(245, 158, 11, 0.25); }
+        .badge-danger { background: rgba(239, 68, 68, 0.16); color: #fca5a5; border-color: rgba(239, 68, 68, 0.25); }
+        .badge-info { background: rgba(59, 130, 246, 0.16); color: #93c5fd; border-color: rgba(59, 130, 246, 0.25); }
+        .badge-success { background: rgba(16, 185, 129, 0.16); color: #99f6e4; border-color: rgba(16, 185, 129, 0.25); }
+        .badge-warning { background: rgba(245, 158, 11, 0.16); color: #fde68a; border-color: rgba(245, 158, 11, 0.25); }
+        .badge-muted { background: rgba(148, 163, 184, 0.12); color: #cbd5e1; border-color: rgba(148, 163, 184, 0.22); }
+        .recent-pill { background: var(--ag-recent); color: #bfdbfe; border-color: rgba(59, 130, 246, 0.3); }
+        .button-row {
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        .button-row form { margin: 0; }
+        .stack { display: grid; gap: 0.75rem; }
+        .tight-list { margin: 0.5rem 0 0; padding-left: 1.25rem; }
+        .compact-table td, .compact-table th { padding: 0.45rem 0.6rem; }
+        .setting-meta { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.75rem; }
+        .setting-card form { margin-top: 0.75rem; }
+        .flash-success, .flash-danger {
+            border-radius: 12px;
+            padding: 0.75rem 1rem;
+            margin-top: 0.75rem;
+        }
+        .flash-success { background: rgba(16, 185, 129, 0.16); border: 1px solid rgba(16, 185, 129, 0.28); }
+        .flash-danger { background: rgba(239, 68, 68, 0.16); border: 1px solid rgba(239, 68, 68, 0.28); }
+        .textarea-small { min-height: 7rem; }
+        .inline-filter { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: end; }
+        pre {
+            white-space: pre-wrap;
+            word-break: break-word;
+            border-radius: 12px;
+            padding: 1rem;
+        }
+        footer { margin: 2rem auto; text-align: center; color: var(--ag-muted); }
     </style>
 </head>
 <body>
     <nav class="container">
         <ul>
-            <li><strong>🧠 AgentGolem</strong></li>
+            <li><strong>AgentGolem</strong></li>
+            <li><small>Consciousness console</small></li>
         </ul>
         <ul>
-            <li><a href="/dashboard">Status</a></li>
+            <li><a href="/dashboard">Consciousness</a></li>
+            <li><a href="/dashboard/settings">Settings</a></li>
             <li><a href="/dashboard/soul">Soul</a></li>
             <li><a href="/dashboard/heartbeat">Heartbeat</a></li>
             <li><a href="/dashboard/memory">Memory</a></li>
@@ -37,8 +125,7 @@
         {% block content %}{% endblock %}
     </main>
     <footer class="container">
-        <small>AgentGolem Dashboard — <span hx-get="/api/status" hx-trigger="every 5s" hx-target="#live-mode" hx-swap="innerHTML">
-        </span> <span id="live-mode">...</span></small>
+        <small>Live refresh: every {{ refresh_interval | default(5) }}s</small>
     </footer>
 </body>
 </html>

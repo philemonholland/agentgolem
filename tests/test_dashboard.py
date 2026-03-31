@@ -37,6 +37,11 @@ def _ensure_api_module() -> types.ModuleType:
         audit_logger: Any = None
         approval_gate: Any = None
         interrupt_manager: Any = None
+        param_store: Any = None
+        param_specs: list[Any] = field(default_factory=list)
+        default_values: dict[str, Any] = field(default_factory=dict)
+        optimizable_settings: set[str] = field(default_factory=set)
+        apply_setting_change: Any = None
 
     mod = types.ModuleType("agentgolem.dashboard.api")
     mod.DashboardState = DashboardState  # type: ignore[attr-defined]
@@ -53,6 +58,31 @@ DashboardState = _api_mod.DashboardState
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+@dataclass
+class FakeParamSpec:
+    key: str
+    display_name: str
+    description: str
+    ptype: str
+    group: str
+    aliases: tuple[str, ...] = ()
+
+
+class FakeParamStore:
+    def __init__(self, values: dict[str, Any]) -> None:
+        self.values = dict(values)
+        self.settings = self.values
+        self.launcher: dict[str, Any] = {}
+        self.env: dict[str, str] = {}
+        self._runtime_overrides: dict[str, Any] = {}
+
+    def get(self, key: str, ptype: str) -> Any:
+        return self.values[key]
+
+    def get_display(self, key: str, ptype: str) -> str:
+        return str(self.get(key, ptype))
 
 @pytest.fixture()
 def app_with_state(tmp_path: Path):
@@ -82,7 +112,44 @@ def app_with_state(tmp_path: Path):
         audit_logger=AuditLogger(tmp_path),
         approval_gate=ApprovalGate(tmp_path / "approvals", ["email_send"]),
         interrupt_manager=InterruptManager(),
+        param_store=FakeParamStore(
+            {
+                "discussion_max_completion_tokens": 2048,
+                "dashboard_refresh_interval_seconds": 5,
+            }
+        ),
+        param_specs=[
+            FakeParamSpec(
+                "discussion_max_completion_tokens",
+                "Discussion Max Tokens",
+                "Maximum completion tokens for discussion wrap-up.",
+                "int",
+                "Dialogue",
+            ),
+            FakeParamSpec(
+                "dashboard_refresh_interval_seconds",
+                "Dashboard Refresh",
+                "Refresh cadence for live panels.",
+                "int",
+                "Dashboard",
+            ),
+        ],
+        default_values={
+            "discussion_max_completion_tokens": 1024,
+            "dashboard_refresh_interval_seconds": 5,
+        },
+        optimizable_settings={"discussion_max_completion_tokens"},
     )
+
+    ds.apply_setting_change = lambda key, raw_value: ds.param_store.values.__setitem__(
+        key, int(raw_value)
+    ) or {
+        "key": key,
+        "display": str(ds.param_store.values[key]),
+        "value": ds.param_store.values[key],
+        "ptype": "int",
+        "unchanged": False,
+    }
 
     api_mod = sys.modules["agentgolem.dashboard.api"]
     old_state = getattr(api_mod, "state", None)
@@ -160,6 +227,7 @@ async def test_approvals_returns_html(client: httpx.AsyncClient):
     "path",
     [
         "/dashboard",
+        "/dashboard/settings",
         "/dashboard/soul",
         "/dashboard/heartbeat",
         "/dashboard/logs",
@@ -171,6 +239,7 @@ async def test_pages_include_navigation_links(client: httpx.AsyncClient, path: s
     resp = await client.get(path)
     html = resp.text
     assert 'href="/dashboard"' in html
+    assert 'href="/dashboard/settings"' in html
     assert 'href="/dashboard/soul"' in html
     assert 'href="/dashboard/heartbeat"' in html
     assert 'href="/dashboard/memory"' in html
@@ -182,6 +251,7 @@ async def test_pages_include_navigation_links(client: httpx.AsyncClient, path: s
     "path",
     [
         "/dashboard",
+        "/dashboard/settings",
         "/dashboard/soul",
         "/dashboard/heartbeat",
         "/dashboard/logs",
@@ -207,6 +277,19 @@ async def test_status_page_includes_message_input(client: httpx.AsyncClient):
     resp = await client.get("/dashboard")
     assert 'name="text"' in resp.text
     assert "Send" in resp.text
+
+
+async def test_settings_page_returns_html_with_setting_content(client: httpx.AsyncClient):
+    resp = await client.get("/dashboard/settings")
+    assert resp.status_code == 200
+    assert "Settings Control Center" in resp.text
+    assert "Discussion Max Tokens" in resp.text
+
+
+async def test_dialogue_partial_returns_html(client: httpx.AsyncClient):
+    resp = await client.get("/dashboard/partials/dialogue")
+    assert resp.status_code == 200
+    assert "Dialogue Strip" in resp.text
 
 
 async def test_node_detail_not_found(client: httpx.AsyncClient):

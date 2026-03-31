@@ -103,6 +103,16 @@ class InterAgentBus:
         """Return the discussion priority for *agent_name*."""
         return self._agent_priority.get(agent_name, DISCUSSION_PRIORITY_DEFAULT)
 
+    def get_waiting_speakers(self) -> list[str]:
+        """Return the current floor wait queue in priority-agnostic arrival order."""
+        return list(self._floor_wait_queue)
+
+    def set_max_transcript(self, max_transcript: int) -> None:
+        """Update the rolling transcript retention limit."""
+        self._max_transcript = max(1, int(max_transcript))
+        if len(self._transcript) > self._max_transcript:
+            self._transcript = self._transcript[-self._max_transcript :]
+
     # ------------------------------------------------------------------
     # Messaging
     # ------------------------------------------------------------------

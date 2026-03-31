@@ -1,0 +1,37 @@
+<div class="panel">
+    <h2>Settings History</h2>
+    {% if settings_history %}
+    <table class="compact-table">
+        <thead>
+            <tr>
+                <th>Timestamp</th>
+                <th>Agent</th>
+                <th>Setting</th>
+                <th>Event</th>
+                <th>Change</th>
+                <th>Reason</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for item in settings_history %}
+            <tr>
+                <td class="mono">{{ item.timestamp or "—" }}</td>
+                <td>{{ item.agent }}</td>
+                <td class="mono">{{ item.key }}</td>
+                <td>{{ item.mutation_type }}</td>
+                <td class="mono">
+                    {% if item.mutation_type == "setting_change_blocked" %}
+                    attempted {{ item.attempted_value }}
+                    {% else %}
+                    {{ item.old_value }} → {{ item.new_value }}
+                    {% endif %}
+                </td>
+                <td>{{ item.reason or "—" }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p>No setting optimizations have been recorded yet.</p>
+    {% endif %}
+</div>

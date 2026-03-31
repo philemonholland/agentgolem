@@ -86,6 +86,7 @@ OPTIMIZABLE_SETTINGS: dict[str, dict[str, Any]] = {
     "browser_timeout_seconds": {"type": int, "min": 5, "max": 120},
     "peer_checkin_interval_minutes": {"type": float, "min": 1.0, "max": 120.0},
     "peer_message_max_chars": {"type": int, "min": 500, "max": 10000},
+    "discussion_max_completion_tokens": {"type": int, "min": 128, "max": 8192},
     "log_level": {"type": str, "choices": ["DEBUG", "INFO", "WARNING", "ERROR"]},
     "dry_run_mode": {"type": bool},
 }
@@ -352,6 +353,9 @@ class MainLoop:
         self._autonomous_interval = getattr(settings, "autonomous_interval_seconds", 60.0)
         self._peer_checkin_interval = getattr(settings, "peer_checkin_interval_minutes", 30.0)
         self._peer_msg_limit: int = getattr(settings, "peer_message_max_chars", 3000)
+        self._discussion_max_completion_tokens: int = getattr(
+            settings, "discussion_max_completion_tokens", 1024,
+        )
         self._last_peer_checkin: datetime | None = None
         self._browser: Any = None  # lazy WebBrowser
         self._discussion_model: str = getattr(settings, "llm_discussion_model", settings.llm_model)
@@ -1011,12 +1015,12 @@ class MainLoop:
     async def _complete_discussion(self, messages: list[Message], **kwargs: Any) -> str:
         """Run a discussion-oriented completion.
 
-        Defaults ``max_completion_tokens`` to 1024 (enough for 2-4 concise
-        paragraphs) unless the caller explicitly overrides it.
+        Defaults ``max_completion_tokens`` to the configured discussion token
+        budget unless the caller explicitly overrides it.
         """
         if self._llm is None:
             raise RuntimeError("Discussion LLM is not configured.")
-        kwargs.setdefault("max_completion_tokens", 1024)
+        kwargs.setdefault("max_completion_tokens", self._discussion_max_completion_tokens)
         return await self._llm.complete(messages, **kwargs)
 
     async def _complete_code(self, messages: list[Message], **kwargs: Any) -> str:
@@ -4574,6 +4578,8 @@ class MainLoop:
         # Also update cached derived values that read from settings at init
         if key == "autonomous_interval_seconds":
             self._autonomous_interval = value
+        elif key == "discussion_max_completion_tokens":
+            self._discussion_max_completion_tokens = value
         elif key.startswith("sleep_") and key != "sleep_duration_minutes":
             self._refresh_sleep_config()
         elif key == "browser_rate_limit_per_minute" and self._browser:

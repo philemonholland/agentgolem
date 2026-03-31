@@ -396,6 +396,19 @@ class TestDerivedValues:
 
         assert loop._autonomous_interval == 30.0
 
+    def test_discussion_completion_tokens_updates(self, tmp_path: Path) -> None:
+        loop = _make_loop(tmp_path)
+        assert loop._discussion_max_completion_tokens == loop._settings.discussion_max_completion_tokens
+
+        asyncio.get_event_loop().run_until_complete(
+            loop._optimize_setting(
+                "discussion_max_completion_tokens", "2048", "allow longer wrap-up"
+            )
+        )
+
+        assert loop._settings.discussion_max_completion_tokens == 2048
+        assert loop._discussion_max_completion_tokens == 2048
+
 
 # ------------------------------------------------------------------
 # Coverage: every optimizable key has valid metadata

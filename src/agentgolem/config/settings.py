@@ -57,6 +57,8 @@ class Settings(BaseModel):
     name_discovery_cycles: int = 4
     peer_checkin_interval_minutes: float = 30.0
     peer_message_max_chars: int = 3000
+    discussion_max_completion_tokens: int = 1024
+    discussion_transcript_max_entries: int = 30
     llm_code_model: str = "gpt-5.4"
 
     # Workspace boundary (empty = auto-detect from module location)
@@ -69,6 +71,13 @@ class Settings(BaseModel):
     attention_influence_weight: float = 0.7
     internal_state_mycelium_share: bool = True
     metacognition_novelty_bias: float = 0.3
+
+    # Dashboard tuning
+    dashboard_refresh_interval_seconds: int = 5
+    dashboard_recent_change_seconds: int = 60
+    dashboard_dialogue_limit: int = 10
+    dashboard_activity_limit: int = 6
+    dashboard_settings_history_limit: int = 25
 
     # LLM provider registry — map provider names to base URLs.
     # API keys are stored in .env as <PROVIDER>_API_KEY (upper-cased).

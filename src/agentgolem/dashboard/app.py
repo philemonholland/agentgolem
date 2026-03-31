@@ -8,90 +8,322 @@ from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
+from agentgolem.dashboard import api as api_mod
+
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 
 def _get_state() -> Any:
-    """Lazy import of the shared dashboard state from the API module."""
-    from agentgolem.dashboard.api import state  # noqa: PLC0415
+    """Lazy access to the shared dashboard state."""
+    return api_mod.state
 
-    return state
 
+def _common_context(
+    request: Request,
+    overview: dict[str, Any],
+    *,
+    selected_agent_name: str | None = None,
+) -> dict[str, Any]:
+    agent_names = [agent["name"] for agent in overview.get("agents", [])]
+    if selected_agent_name is None and agent_names:
+        selected_agent_name = agent_names[0]
+    return {
+        "request": request,
+        "overview": overview,
+        "agent_names": agent_names,
+        "selected_agent_name": selected_agent_name,
+        "refresh_interval": api_mod.dashboard_refresh_interval_seconds(_get_state()),
+    }
+
+
+def _selected_snapshot(
+    overview: dict[str, Any], selected_agent_name: str | None
+) -> dict[str, Any] | None:
+    agents = overview.get("agents", [])
+    if not agents:
+        return None
+    if selected_agent_name:
+        for agent in agents:
+            if agent["name"] == selected_agent_name:
+                return agent
+    return agents[0]
+
+
+def _selected_agent_name(
+    request_agent: str | None,
+    overview: dict[str, Any],
+) -> str | None:
+    agents = overview.get("agents", [])
+    if request_agent:
+        for agent in agents:
+            if agent["name"].lower() == request_agent.lower():
+                return agent["name"]
+    return agents[0]["name"] if agents else None
+
+
+def _approval_items(ds: Any, agent_name: str | None = None) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    if agent_name:
+        resolved = api_mod._resolve_agent(ds, agent_name)
+        gate = getattr(resolved, "_approval_gate", None) if resolved is not None else None
+        if gate is None:
+            return []
+        for item in gate.get_pending():
+            items.append({**item, "agent_name": getattr(resolved, "agent_name", "")})
+        return items
+
+    for agent in api_mod._get_agents(ds):
+        gate = getattr(agent, "_approval_gate", None)
+        if gate is None:
+            continue
+        for item in gate.get_pending():
+            items.append({**item, "agent_name": getattr(agent, "agent_name", "")})
+    return items
 
 def create_dashboard_app() -> FastAPI:
-    """Create and configure the full dashboard FastAPI application.
-
-    Returns a FastAPI app with:
-    - HTML page routes served via Jinja2 + HTMX
-    - The API router from ``api.py`` (if available) mounted automatically
-    """
-    app = FastAPI(title="AgentGolem Dashboard")
+    """Create the combined dashboard HTML + API app."""
+    ds = _get_state()
+    app = api_mod.create_app(ds)
+    app.title = "AgentGolem Dashboard"
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
-
-    # Mount the API router/sub-app from api.py when available.
-    try:
-        from agentgolem.dashboard.api import router as api_router  # noqa: PLC0415
-
-        app.include_router(api_router)
-    except (ImportError, AttributeError):
-        pass
-
-    # ------------------------------------------------------------------
-    # Page routes (serve HTML — no secrets exposed)
-    # ------------------------------------------------------------------
 
     @app.get("/", response_class=HTMLResponse)
     async def root() -> RedirectResponse:
         return RedirectResponse(url="/dashboard")
 
     @app.get("/dashboard", response_class=HTMLResponse)
-    async def dashboard_page(request: Request) -> HTMLResponse:
-        ds = _get_state()
-        status: dict[str, Any] = {}
-        if ds.runtime_state:
-            status = ds.runtime_state.to_dict()
-
-        pending_approvals_count = 0
-        if ds.approval_gate:
-            pending_approvals_count = len(ds.approval_gate.get_pending())
-
+    @app.get("/dashboard/consciousness", response_class=HTMLResponse)
+    async def dashboard_page(
+        request: Request,
+        agent: str | None = Query(None),
+    ) -> HTMLResponse:
+        overview = api_mod.build_council_overview(ds)
+        selected_name = _selected_agent_name(agent, overview)
+        dialogue = api_mod.build_dialogue_snapshot(ds)
+        settings_history = api_mod._setting_history(ds, limit=5)
         return templates.TemplateResponse(
             request,
-            "status.html",
+            "consciousness.html",
             {
-                "status": status,
-                "pending_approvals_count": pending_approvals_count,
+                **_common_context(request, overview, selected_agent_name=selected_name),
+                "selected_snapshot": _selected_snapshot(overview, selected_name),
+                "dialogue": dialogue,
+                "settings_history": settings_history,
             },
         )
 
+    @app.get("/dashboard/partials/council", response_class=HTMLResponse)
+    async def dashboard_council_partial(
+        request: Request,
+        agent: str | None = Query(None),
+    ) -> HTMLResponse:
+        overview = api_mod.build_council_overview(ds)
+        selected_name = _selected_agent_name(agent, overview)
+        return templates.TemplateResponse(
+            request,
+            "_council_grid.html",
+            {
+                **_common_context(request, overview, selected_agent_name=selected_name),
+                "selected_snapshot": _selected_snapshot(overview, selected_name),
+            },
+        )
+
+    @app.get("/dashboard/partials/dialogue", response_class=HTMLResponse)
+    async def dashboard_dialogue_partial(request: Request) -> HTMLResponse:
+        overview = api_mod.build_council_overview(ds)
+        dialogue = api_mod.build_dialogue_snapshot(ds)
+        return templates.TemplateResponse(
+            request,
+            "_dialogue_panel.html",
+            {
+                **_common_context(request, overview),
+                "dialogue": dialogue,
+            },
+        )
+
+    @app.post("/dashboard/actions/mode/{action}", response_class=HTMLResponse)
+    async def dashboard_mode_action(
+        request: Request,
+        action: str,
+    ) -> HTMLResponse:
+        form = await request.form()
+        target_agent = str(form.get("agent", "")).strip() or None
+        mapping = {
+            "wake": "awake",
+            "sleep": "asleep",
+            "pause": "paused",
+            "resume": "awake",
+        }
+        if action not in mapping:
+            return templates.TemplateResponse(
+                request,
+                "_flash.html",
+                {"kind": "danger", "message": f"Unknown action: {action}"},
+            )
+
+        agents = await api_mod._transition_agents(ds, mapping[action], target_agent)
+        return templates.TemplateResponse(
+            request,
+            "_flash.html",
+            {
+                "kind": "success",
+                "message": f"{action.title()} queued for {', '.join(agents) or 'no agents'}.",
+            },
+        )
+
+    @app.post("/dashboard/actions/message", response_class=HTMLResponse)
+    async def dashboard_send_message(request: Request) -> HTMLResponse:
+        form = await request.form()
+        text = str(form.get("text", "")).strip()
+        target_agent = str(form.get("agent", "")).strip() or None
+        if not text:
+            return templates.TemplateResponse(
+                request,
+                "_flash.html",
+                {"kind": "danger", "message": "Message text is required."},
+            )
+        recipients = await api_mod._queue_message(ds, text, target_agent)
+        return templates.TemplateResponse(
+            request,
+            "_flash.html",
+            {
+                "kind": "success",
+                "message": f"Queued human message for {', '.join(recipients)}.",
+            },
+        )
+
+    @app.get("/dashboard/settings", response_class=HTMLResponse)
+    async def settings_page(
+        request: Request,
+        group: str | None = Query(None),
+        q: str = Query(""),
+    ) -> HTMLResponse:
+        overview = api_mod.build_council_overview(ds)
+        groups = api_mod.group_settings_entries(ds)
+        if group:
+            groups = [item for item in groups if item["name"].lower() == group.lower()]
+        if q:
+            search = q.lower()
+            filtered_groups = []
+            for item in groups:
+                entries = [
+                    entry
+                    for entry in item["entries"]
+                    if search in entry["display_name"].lower()
+                    or search in entry["key"].lower()
+                    or search in entry["description"].lower()
+                ]
+                if entries:
+                    filtered_groups.append({"name": item["name"], "entries": entries})
+            groups = filtered_groups
+
+        return templates.TemplateResponse(
+            request,
+            "settings.html",
+            {
+                **_common_context(request, overview),
+                "groups": groups,
+                "selected_group": group or "",
+                "search": q,
+                "settings_history": api_mod._setting_history(ds),
+            },
+        )
+
+    @app.get("/dashboard/settings/history", response_class=HTMLResponse)
+    async def settings_history_partial(request: Request) -> HTMLResponse:
+        overview = api_mod.build_council_overview(ds)
+        return templates.TemplateResponse(
+            request,
+            "_settings_history.html",
+            {
+                **_common_context(request, overview),
+                "settings_history": api_mod._setting_history(ds),
+            },
+        )
+
+    @app.post("/dashboard/settings/{key}", response_class=HTMLResponse)
+    async def update_setting(request: Request, key: str) -> HTMLResponse:
+        form = await request.form()
+        raw_value = str(form.get("value", ""))
+        try:
+            if ds.apply_setting_change is None:
+                raise ValueError("Live setting updates are not available.")
+            ds.apply_setting_change(key, raw_value)
+            entry = next(item for item in api_mod.build_settings_entries(ds) if item["key"] == key)
+            return templates.TemplateResponse(
+                request,
+                "_setting_card.html",
+                {"entry": entry},
+            )
+        except StopIteration:
+            return templates.TemplateResponse(
+                request,
+                "_flash.html",
+                {"kind": "danger", "message": f"Unknown setting: {key}"},
+            )
+        except Exception as exc:
+            entry = next(
+                (item for item in api_mod.build_settings_entries(ds) if item["key"] == key),
+                None,
+            )
+            if entry is None:
+                return templates.TemplateResponse(
+                    request,
+                    "_flash.html",
+                    {"kind": "danger", "message": str(exc)},
+                )
+            return templates.TemplateResponse(
+                request,
+                "_setting_card.html",
+                {"entry": entry, "error": str(exc)},
+            )
+
     @app.get("/dashboard/soul", response_class=HTMLResponse)
-    async def soul_page(request: Request) -> HTMLResponse:
-        ds = _get_state()
+    async def soul_page(
+        request: Request,
+        agent: str | None = Query(None),
+    ) -> HTMLResponse:
+        overview = api_mod.build_council_overview(ds)
+        selected_name = _selected_agent_name(agent, overview)
+        soul_manager = api_mod._selected_soul_manager(ds, selected_name)
         content = ""
         versions: list[Any] = []
-        if ds.soul_manager:
-            content = await ds.soul_manager.read()
-            versions = await ds.soul_manager.get_version_history()
+        if soul_manager is not None:
+            content = await api_mod._run_on_agent_loop(ds, soul_manager.read())
+            versions = await api_mod._run_on_agent_loop(ds, soul_manager.get_version_history())
 
         return templates.TemplateResponse(
             request,
             "soul.html",
-            {"content": content, "versions": versions},
+            {
+                **_common_context(request, overview, selected_agent_name=selected_name),
+                "content": content,
+                "versions": versions,
+            },
         )
 
     @app.get("/dashboard/heartbeat", response_class=HTMLResponse)
-    async def heartbeat_page(request: Request) -> HTMLResponse:
-        ds = _get_state()
+    async def heartbeat_page(
+        request: Request,
+        agent: str | None = Query(None),
+    ) -> HTMLResponse:
+        overview = api_mod.build_council_overview(ds)
+        selected_name = _selected_agent_name(agent, overview)
+        heartbeat_manager = api_mod._selected_heartbeat_manager(ds, selected_name)
         content = ""
         history: list[Any] = []
-        if ds.heartbeat_manager:
-            content = await ds.heartbeat_manager.read()
-            history = await ds.heartbeat_manager.get_history()
+        if heartbeat_manager is not None:
+            content = await api_mod._run_on_agent_loop(ds, heartbeat_manager.read())
+            history = await api_mod._run_on_agent_loop(ds, heartbeat_manager.get_history())
 
         return templates.TemplateResponse(
             request,
             "heartbeat.html",
-            {"content": content, "history": history},
+            {
+                **_common_context(request, overview, selected_agent_name=selected_name),
+                "content": content,
+                "history": history,
+            },
         )
 
     @app.get("/dashboard/logs", response_class=HTMLResponse)
@@ -100,29 +332,30 @@ def create_dashboard_app() -> FastAPI:
         log_type: str = Query("audit", alias="type"),
         search: str = Query("", alias="q"),
         limit: int = Query(50),
+        agent: str | None = Query(None),
     ) -> HTMLResponse:
-        ds = _get_state()
+        overview = api_mod.build_council_overview(ds)
+        selected_name = _selected_agent_name(agent, overview)
         entries: list[dict[str, Any]] = []
 
-        if ds.audit_logger and log_type == "activity":
-            try:
-                from agentgolem.dashboard.replay import AuditReplay  # noqa: PLC0415
-
-                data_dir = ds.audit_logger._log_path.parent.parent
-                replay = AuditReplay(data_dir)
-                entries = replay.read_activity(limit=limit, search=search or None)
-            except Exception:
-                entries = []
-        elif ds.audit_logger:
-            entries = ds.audit_logger.read(limit=limit)
-            if search:
-                search_lower = search.lower()
-                entries = [e for e in entries if search_lower in str(e).lower()]
+        if log_type == "activity":
+            selected_agent = api_mod._resolve_agent(ds, selected_name)
+            log_path = api_mod._find_activity_log_path_for_agent(selected_agent) if selected_agent else None
+            if log_path and log_path.exists():
+                entries = api_mod._load_jsonl_entries(log_path, limit=limit, search=search)
+        else:
+            audit_logger = api_mod._selected_audit_logger(ds, selected_name)
+            if audit_logger is not None:
+                entries = audit_logger.read(limit=limit)
+                if search:
+                    lowered = search.lower()
+                    entries = [entry for entry in entries if lowered in str(entry).lower()]
 
         return templates.TemplateResponse(
             request,
             "logs.html",
             {
+                **_common_context(request, overview, selected_agent_name=selected_name),
                 "entries": entries,
                 "log_type": log_type,
                 "search": search,
@@ -137,50 +370,72 @@ def create_dashboard_app() -> FastAPI:
         status_filter: str = Query("", alias="status"),
         trust_min: float = Query(0.0),
         trust_max: float = Query(1.0),
+        agent: str | None = Query(None),
     ) -> HTMLResponse:
-        ds = _get_state()
+        overview = api_mod.build_council_overview(ds)
+        selected_name = _selected_agent_name(agent, overview)
+        memory_store = api_mod._selected_memory_store(ds, selected_name)
         nodes: list[Any] = []
         clusters: list[Any] = []
-        stats: dict[str, int] = {"node_count": 0, "edge_count": 0, "cluster_count": 0}
+        stats: dict[str, int] = {
+            "total_nodes": 0,
+            "total_edges": 0,
+            "total_clusters": 0,
+            "total_sources": 0,
+        }
 
-        memory_store = getattr(ds, "memory_store", None)
-        if memory_store:
+        if memory_store is not None:
             try:
                 from agentgolem.memory.models import NodeFilter, NodeStatus, NodeType
 
-                nf = NodeFilter(trust_min=trust_min, trust_max=trust_max)
+                node_filter = NodeFilter(trust_min=trust_min, trust_max=trust_max, limit=100)
                 if type_filter:
-                    nf.type = NodeType(type_filter)
+                    node_filter.type = NodeType(type_filter.lower())
                 if status_filter:
-                    nf.status = NodeStatus(status_filter)
-                nodes = await memory_store.query_nodes(nf)
+                    node_filter.status = NodeStatus(status_filter.lower())
+                nodes = await memory_store.query_nodes(node_filter)
+                stats = await memory_store.get_statistics()
+
+                async with memory_store._db.execute("SELECT id FROM clusters LIMIT 50") as cur:
+                    rows = await cur.fetchall()
+                for row in rows:
+                    cluster = await memory_store.get_cluster(row["id"])
+                    if cluster:
+                        clusters.append(cluster)
             except Exception:
-                pass
+                nodes = []
+                clusters = []
 
         return templates.TemplateResponse(
             request,
             "memory.html",
             {
+                **_common_context(request, overview, selected_agent_name=selected_name),
                 "nodes": nodes,
                 "clusters": clusters,
                 "stats": stats,
-                "type_filter": type_filter,
-                "status_filter": status_filter,
+                "type_filter": type_filter.upper(),
+                "status_filter": status_filter.upper(),
                 "trust_min": trust_min,
                 "trust_max": trust_max,
             },
         )
 
     @app.get("/dashboard/memory/nodes/{node_id}", response_class=HTMLResponse)
-    async def node_detail_page(request: Request, node_id: str) -> HTMLResponse:
-        ds = _get_state()
+    async def node_detail_page(
+        request: Request,
+        node_id: str,
+        agent: str | None = Query(None),
+    ) -> HTMLResponse:
+        overview = api_mod.build_council_overview(ds)
+        selected_name = _selected_agent_name(agent, overview)
+        memory_store = api_mod._selected_memory_store(ds, selected_name)
         node = None
         edges_out: list[Any] = []
         edges_in: list[Any] = []
         sources: list[Any] = []
 
-        memory_store = getattr(ds, "memory_store", None)
-        if memory_store:
+        if memory_store is not None:
             try:
                 node = await memory_store.get_node(node_id)
                 if node:
@@ -188,12 +443,13 @@ def create_dashboard_app() -> FastAPI:
                     edges_in = await memory_store.get_edges_to(node_id)
                     sources = await memory_store.get_node_sources(node_id)
             except Exception:
-                pass
+                node = None
 
         return templates.TemplateResponse(
             request,
             "node_detail.html",
             {
+                **_common_context(request, overview, selected_agent_name=selected_name),
                 "node": node,
                 "edges_out": edges_out,
                 "edges_in": edges_in,
@@ -202,42 +458,93 @@ def create_dashboard_app() -> FastAPI:
         )
 
     @app.get("/dashboard/memory/clusters/{cluster_id}", response_class=HTMLResponse)
-    async def cluster_detail_page(request: Request, cluster_id: str) -> HTMLResponse:
-        ds = _get_state()
+    async def cluster_detail_page(
+        request: Request,
+        cluster_id: str,
+        agent: str | None = Query(None),
+    ) -> HTMLResponse:
+        overview = api_mod.build_council_overview(ds)
+        selected_name = _selected_agent_name(agent, overview)
+        memory_store = api_mod._selected_memory_store(ds, selected_name)
         cluster = None
         members: list[Any] = []
-        sources: list[Any] = []
 
-        memory_store = getattr(ds, "memory_store", None)
-        if memory_store:
+        if memory_store is not None:
             try:
                 cluster = await memory_store.get_cluster(cluster_id)
                 if cluster:
                     members = await memory_store.get_cluster_nodes(cluster_id)
             except Exception:
-                pass
+                cluster = None
 
         return templates.TemplateResponse(
             request,
             "cluster_detail.html",
             {
+                **_common_context(request, overview, selected_agent_name=selected_name),
                 "cluster": cluster,
                 "members": members,
-                "sources": sources,
+                "sources": [],
             },
         )
 
     @app.get("/dashboard/approvals", response_class=HTMLResponse)
-    async def approvals_page(request: Request) -> HTMLResponse:
-        ds = _get_state()
-        approvals: list[dict[str, Any]] = []
-        if ds.approval_gate:
-            approvals = ds.approval_gate.get_pending()
-
+    async def approvals_page(
+        request: Request,
+        agent: str | None = Query(None),
+    ) -> HTMLResponse:
+        overview = api_mod.build_council_overview(ds)
+        selected_name = _selected_agent_name(agent, overview)
+        approvals = _approval_items(ds, selected_name)
         return templates.TemplateResponse(
             request,
             "approvals.html",
-            {"approvals": approvals},
+            {
+                **_common_context(request, overview, selected_agent_name=selected_name),
+                "approvals": approvals,
+            },
         )
+
+    @app.post("/dashboard/approvals/{request_id}/{decision}", response_class=HTMLResponse)
+    async def approval_action(
+        request: Request,
+        request_id: str,
+        decision: str,
+    ) -> HTMLResponse:
+        form = await request.form()
+        agent_name = str(form.get("agent", "")).strip() or None
+        reason = str(form.get("reason", "")).strip()
+        resolved = api_mod._resolve_agent(ds, agent_name)
+        gate = getattr(resolved, "_approval_gate", None) if resolved is not None else ds.approval_gate
+        if gate is None:
+            return templates.TemplateResponse(
+                request,
+                "_flash.html",
+                {"kind": "danger", "message": "Approval gate not available."},
+            )
+        try:
+            if decision == "approve":
+                gate.approve(request_id, reason)
+            elif decision == "deny":
+                gate.deny(request_id, reason)
+            else:
+                raise ValueError(f"Unknown decision: {decision}")
+            return templates.TemplateResponse(
+                request,
+                "_flash.html",
+                {
+                    "kind": "success",
+                    "message": (
+                        f"Request {request_id} marked as "
+                        f"{'approved' if decision == 'approve' else 'denied'}."
+                    ),
+                },
+            )
+        except Exception as exc:
+            return templates.TemplateResponse(
+                request,
+                "_flash.html",
+                {"kind": "danger", "message": str(exc)},
+            )
 
     return app

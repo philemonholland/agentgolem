@@ -1,0 +1,41 @@
+<article class="panel">
+    <header style="display: flex; justify-content: space-between; gap: 1rem; align-items: baseline; flex-wrap: wrap;">
+        <h2>Dialogue Strip</h2>
+        <small>Queued human input: {{ dialogue.human_messages_pending }}</small>
+    </header>
+
+    <p>
+        <strong>Floor holder:</strong> {{ dialogue.floor_holder or "Open" }}
+        {% if dialogue.floor_locked %}
+        <span class="badge badge-danger">Locked</span>
+        {% else %}
+        <span class="badge badge-success">Open</span>
+        {% endif %}
+    </p>
+
+    <p>
+        <strong>Waiting speakers:</strong>
+        {% if dialogue.waiting_speakers %}
+            {{ dialogue.waiting_speakers | join(", ") }}
+        {% else %}
+            Nobody queued.
+        {% endif %}
+    </p>
+
+    {% if dialogue.transcript %}
+    <div class="stack">
+        {% for msg in dialogue.transcript %}
+        <article class="transcript-entry">
+            <header style="display: flex; justify-content: space-between; gap: 1rem; align-items: baseline; flex-wrap: wrap;">
+                <strong>{{ msg.from_agent }}</strong>
+                <small class="mono">{{ msg.timestamp }}</small>
+            </header>
+            <p class="muted">To: {{ msg.to_agent or "all" }}</p>
+            <p class="mono">{{ msg.text }}</p>
+        </article>
+        {% endfor %}
+    </div>
+    {% else %}
+    <p>No dialogue has been recorded yet.</p>
+    {% endif %}
+</article>

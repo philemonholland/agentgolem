@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -23,6 +26,107 @@ from agentgolem.tools.base import ApprovalGate
 # ---------------------------------------------------------------------------
 # Helpers & fixtures
 # ---------------------------------------------------------------------------
+
+
+@dataclass
+class FakeParamSpec:
+    key: str
+    display_name: str
+    description: str
+    ptype: str
+    group: str
+    aliases: tuple[str, ...] = ()
+
+
+class FakeParamStore:
+    def __init__(self, values: dict[str, Any]) -> None:
+        self.values = dict(values)
+        self.settings = self.values
+        self.launcher: dict[str, Any] = {}
+        self.env: dict[str, str] = {}
+        self._runtime_overrides: dict[str, Any] = {}
+
+    def get(self, key: str, ptype: str) -> Any:
+        return self.values[key]
+
+    def get_display(self, key: str, ptype: str) -> str:
+        value = self.get(key, ptype)
+        if ptype == "bool":
+            return str(bool(value)).lower()
+        return str(value)
+
+
+class FakeBus:
+    def __init__(self) -> None:
+        now = datetime.now(timezone.utc)
+        self.floor_holder = "Council-1"
+        self._messages = [
+            SimpleNamespace(
+                from_agent="Council-1",
+                to_agent="Council-6",
+                text="I think the dialogue should stay open.",
+                timestamp=now,
+            )
+        ]
+
+    def floor_locked(self) -> bool:
+        return True
+
+    def get_waiting_speakers(self) -> list[str]:
+        return ["Council-6"]
+
+    def get_transcript(self, limit: int = 10) -> list[Any]:
+        return self._messages[:limit]
+
+    def pending_count(self, agent_name: str) -> int:
+        return 1 if agent_name == "Council-7" else 0
+
+    def get_priority(self, agent_name: str) -> float:
+        return 0.9 if agent_name == "Council-7" else 0.4
+
+
+def _make_council_agent(root: Path, name: str, mode: str, task: str) -> Any:
+    agent_dir = root / name.lower().replace("-", "_")
+    (agent_dir / "logs").mkdir(parents=True, exist_ok=True)
+    (agent_dir / "approvals").mkdir(parents=True, exist_ok=True)
+    (agent_dir / "soul.md").write_text(f"# Soul\n{name}", encoding="utf-8")
+    (agent_dir / "heartbeat.md").write_text(f"# Heartbeat\n{name}", encoding="utf-8")
+    (agent_dir / "internal_state.json").write_text("{}", encoding="utf-8")
+
+    runtime_state = SimpleNamespace(
+        mode=SimpleNamespace(value=mode),
+        current_task=task,
+        pending_tasks=[],
+        started_at=datetime.now(timezone.utc),
+    )
+    audit_logger = AuditLogger(agent_dir)
+    interrupt_manager = InterruptManager()
+
+    return SimpleNamespace(
+        agent_name=name,
+        _initial_agent_name=name,
+        ethical_vector="holistic" if name == "Council-6" else "integrity",
+        runtime_state=runtime_state,
+        soul_manager=None,
+        heartbeat_manager=None,
+        audit_logger=audit_logger,
+        _approval_gate=ApprovalGate(agent_dir / "approvals", ["email_send"]),
+        interrupt_manager=interrupt_manager,
+        _data_dir=agent_dir,
+        _recent_thoughts=[f"{name} is tracking the conversation."],
+        _conversation_paused=(mode == "paused"),
+        _wake_cycle_count=1,
+        _name_discovered=True,
+        _memory_store=None,
+        _internal_state=None,
+        _metacognitive_monitor=SimpleNamespace(last_observation=None),
+        _attention_director=None,
+        _self_model=None,
+        _narrative_synthesizer=SimpleNamespace(latest_chapter=None),
+        _settings=None,
+        _peer_msg_limit=3000,
+        _discussion_max_completion_tokens=2048,
+    )
 
 
 def _make_base_state(tmp_path: Path) -> DashboardState:
@@ -73,8 +177,83 @@ def dashboard_state(tmp_path: Path) -> DashboardState:
 
 
 @pytest.fixture()
+def council_state(tmp_path: Path) -> DashboardState:
+    store = FakeParamStore(
+        {
+            "discussion_max_completion_tokens": 2048,
+            "dashboard_refresh_interval_seconds": 5,
+        }
+    )
+    specs = [
+        FakeParamSpec(
+            key="discussion_max_completion_tokens",
+            display_name="Discussion Max Tokens",
+            description="Maximum completion tokens for discussion wrap-up.",
+            ptype="int",
+            group="Dialogue",
+        ),
+        FakeParamSpec(
+            key="dashboard_refresh_interval_seconds",
+            display_name="Dashboard Refresh",
+            description="Refresh cadence for live panels.",
+            ptype="int",
+            group="Dashboard",
+        ),
+    ]
+
+    state = DashboardState(
+        agents=[
+            _make_council_agent(tmp_path, "Council-1", "awake", "Listening"),
+            _make_council_agent(tmp_path, "Council-6", "paused", "Integrating"),
+        ],
+        peer_bus=FakeBus(),
+        param_store=store,
+        param_specs=specs,
+        default_values={
+            "discussion_max_completion_tokens": 1024,
+            "dashboard_refresh_interval_seconds": 5,
+        },
+        locked_settings={"repo_root"},
+        optimizable_settings={"discussion_max_completion_tokens"},
+    )
+
+    state.agents[0].audit_logger.log(
+        "setting_optimized",
+        "Council-1",
+        {
+            "key": "discussion_max_completion_tokens",
+            "old_value": "1024",
+            "new_value": "2048",
+            "reason": "More room for council synthesis",
+        },
+    )
+
+    def apply_setting_change(key: str, raw_value: str) -> dict[str, Any]:
+        value = int(raw_value)
+        store.values[key] = value
+        return {
+            "key": key,
+            "display": str(value),
+            "value": value,
+            "ptype": "int",
+            "unchanged": False,
+        }
+
+    state.apply_setting_change = apply_setting_change
+    return state
+
+
+@pytest.fixture()
 async def client(dashboard_state: DashboardState) -> Any:
     app = create_app(dashboard_state)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
+@pytest.fixture()
+async def council_client(council_state: DashboardState) -> Any:
+    app = create_app(council_state)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
@@ -121,6 +300,46 @@ async def test_get_status(client: httpx.AsyncClient) -> None:
     assert isinstance(data["uptime"], (int, float))
     assert data["uptime"] >= 0
     assert "last_heartbeat" in data
+
+
+async def test_get_council_agents(council_client: httpx.AsyncClient) -> None:
+    resp = await council_client.get("/api/council/agents")
+    assert resp.status_code == 200
+    agents = resp.json()
+    assert len(agents) == 2
+    assert agents[0]["name"] == "Council-1"
+    assert agents[0]["is_speaking"] is True
+    assert agents[1]["is_waiting_to_speak"] is True
+
+
+async def test_get_dialogue(council_client: httpx.AsyncClient) -> None:
+    resp = await council_client.get("/api/dialogue")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["floor_holder"] == "Council-1"
+    assert data["waiting_speakers"] == ["Council-6"]
+    assert data["transcript"][0]["from_agent"] == "Council-1"
+
+
+async def test_get_setting_with_history(council_client: httpx.AsyncClient) -> None:
+    resp = await council_client.get("/api/settings/discussion_max_completion_tokens")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["display_name"] == "Discussion Max Tokens"
+    assert data["current_display"] == "2048"
+    assert data["history"][0]["mutation_type"] == "setting_optimized"
+
+
+async def test_update_setting_via_api(
+    council_client: httpx.AsyncClient, council_state: DashboardState
+) -> None:
+    resp = await council_client.post(
+        "/api/settings/discussion_max_completion_tokens",
+        data={"value": "3072"},
+    )
+    assert resp.status_code == 200
+    assert council_state.param_store.get("discussion_max_completion_tokens", "int") == 3072
+    assert resp.json()["setting"]["current_display"] == "3072"
 
 
 # ---------------------------------------------------------------------------
