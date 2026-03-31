@@ -55,6 +55,7 @@ cp config/settings.yaml.template config/settings.yaml
 
 ```powershell
 start.bat                          # Interactive launch (recommended)
+dashboard.bat                      # Launch AgentGolem and open the dashboard
 python run_golem.py                # Same, from shell
 python run_golem.py --auto         # Non-interactive (auto-accept defaults)
 ```
@@ -67,8 +68,9 @@ Once the council is running, you get an interactive prompt:
 
 | Command / Input       | Description                                           |
 |-----------------------|-------------------------------------------------------|
-| `Hello, council`      | Send a message to all agents                          |
+| `Hello, council`      | Let one natural responder answer, then let the council continue organically |
 | `@Council-1 Hello`    | Address a specific agent                              |
+| `/a 3 Hello`          | Send a private message to Council-3                   |
 | `/speak`              | Pause all autonomous work while you talk              |
 | `/continue`           | Resume autonomous work                                |
 | `/status`             | Show all agents: mode, cycle, vector, name            |
@@ -82,11 +84,14 @@ Agent output shows the current wake cycle: `19:04:09 [c3|Council-1   ] 📖 Read
 
 ## Dashboard
 
-The web dashboard starts automatically on port 6667 (or next available).
+The web dashboard starts automatically on port `8765` (or the next browser-safe free port).
 
-Open <http://127.0.0.1:6667/dashboard>.
+`start.bat` and `dashboard.bat` now open it automatically in your default browser.
 
-**Pages:** Status · Soul · Heartbeat · Memory · Logs · Approvals
+If you need it manually, use `/dashboard` in the console or open
+<http://127.0.0.1:8765/dashboard>.
+
+**Pages:** Consciousness · Settings · Soul · Heartbeat · Memory · Logs · Approvals
 
 ---
 

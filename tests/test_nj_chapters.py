@@ -209,3 +209,108 @@ class TestPeerCheckin:
             ethical_vector="testing",
         )
         assert loop._peer_checkin_interval == 25.0
+
+
+class _FakeBrowser:
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self.fetch_calls = 0
+
+    async def fetch(self, url: str) -> str:
+        self.fetch_calls += 1
+        return f"<html>{url}</html>"
+
+    def extract_text(self, page: str) -> str:
+        return self._text
+
+
+async def test_read_chapter_uses_user_grounded_messages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = _make_loop(tmp_path)
+    browser = _FakeBrowser("Full chapter text. " * 40)
+    captured_messages: list[list] = []
+
+    async def fake_complete(messages, **kwargs):
+        captured_messages.append(messages)
+        if len(captured_messages) == 1:
+            return "Detailed digest grounded in the provided chapter text."
+        return "Thoughtful reflection.\nSUMMARY: concise remembered summary."
+
+    async def fake_encode(*args, **kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(loop, "_get_browser", lambda: browser)
+    monkeypatch.setattr(loop, "_complete_discussion", fake_complete)
+    monkeypatch.setattr(loop, "_encode_to_memory", fake_encode)
+
+    await loop._read_niscalajyoti_chapter()
+
+    assert len(captured_messages) == 2
+    assert captured_messages[0][0].role == "system"
+    assert captured_messages[0][1].role == "user"
+    assert "--- FULL TEXT ---" in captured_messages[0][1].content
+    assert captured_messages[1][0].role == "system"
+    assert captured_messages[1][1].role == "user"
+    assert "--- CHAPTER DIGEST ---" in captured_messages[1][1].content
+    assert loop._niscalajyoti_chapter_index == 1
+
+
+async def test_read_chapter_does_not_cache_ungrounded_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = _make_loop(tmp_path)
+    browser = _FakeBrowser("Full chapter text. " * 40)
+
+    async def fake_complete(messages, **kwargs):
+        return (
+            "I’m happy to do that, but I don’t have the actual text of the chapter. "
+            "If you paste the chapter here, I’ll reflect on it."
+        )
+
+    monkeypatch.setattr(loop, "_get_browser", lambda: browser)
+    monkeypatch.setattr(loop, "_complete_discussion", fake_complete)
+
+    await loop._read_niscalajyoti_chapter()
+
+    digest_path = loop._data_dir.parent / "nj_chapter_digests" / "ch_01.txt"
+    assert not digest_path.exists()
+    assert loop._niscalajyoti_chapter_index == 0
+    assert loop._niscalajyoti_chapter_retries == 1
+
+
+async def test_read_chapter_regenerates_invalid_cached_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = _make_loop(tmp_path)
+    browser = _FakeBrowser("Full chapter text. " * 40)
+    digest_dir = loop._data_dir.parent / "nj_chapter_digests"
+    digest_dir.mkdir(parents=True, exist_ok=True)
+    digest_path = digest_dir / "ch_01.txt"
+    digest_path.write_text(
+        "I’m missing the actual text of Chapter 1. If you paste the chapter here, I can help.",
+        encoding="utf-8",
+    )
+    call_count = {"count": 0}
+
+    async def fake_complete(messages, **kwargs):
+        call_count["count"] += 1
+        if call_count["count"] == 1:
+            return "Detailed digest grounded in the provided chapter text."
+        return "Thoughtful reflection.\nSUMMARY: concise remembered summary."
+
+    async def fake_encode(*args, **kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(loop, "_get_browser", lambda: browser)
+    monkeypatch.setattr(loop, "_complete_discussion", fake_complete)
+    monkeypatch.setattr(loop, "_encode_to_memory", fake_encode)
+
+    await loop._read_niscalajyoti_chapter()
+
+    assert browser.fetch_calls == 1
+    assert call_count["count"] == 2
+    assert digest_path.read_text(encoding="utf-8") == "Detailed digest grounded in the provided chapter text."

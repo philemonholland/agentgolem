@@ -218,8 +218,9 @@ Once the council is running, you interact through the `golem>` prompt:
 
 | Command / Input       | Description                                           |
 |-----------------------|-------------------------------------------------------|
-| `Hello, council`      | Send a message to all agents                          |
+| `Hello, council`      | Let one natural responder answer, then let the council continue organically |
 | `@Council-1 Hello`    | Address a specific agent by name                      |
+| `/a 3 Hello`          | Send a private message to Council-3                   |
 | `/speak`              | Pause all autonomous work while you talk              |
 | `/continue`           | Resume autonomous work                                |
 | `/status`             | Show all agents: mode, cycle, vector, name            |
@@ -240,21 +241,25 @@ Agent output shows the current wake cycle:
 
 ## Dashboard
 
-The dashboard starts automatically alongside the council on port **6667**
-(or next available if in use).
+The dashboard starts automatically alongside the council on port **8765**
+(or the next browser-safe free port if 8765 is in use).
 
-Open <http://127.0.0.1:6667/dashboard> in your browser.
+`start.bat` and `dashboard.bat` open it automatically in your default browser.
+
+If you need it manually, use `/dashboard` in the console or open
+<http://127.0.0.1:8765/dashboard>.
 
 ### Pages
 
-| Page          | URL                             | Description                              |
-|---------------|---------------------------------|------------------------------------------|
-| **Status**    | `/dashboard`                    | Runtime mode, current task, uptime       |
-| **Soul**      | `/dashboard/soul`               | Soul contents and version history        |
-| **Heartbeat** | `/dashboard/heartbeat`          | Heartbeat contents and history           |
-| **Memory**    | `/dashboard/memory`             | Browse nodes, clusters, filter by type/trust |
-| **Logs**      | `/dashboard/logs`               | Search activity and audit logs           |
-| **Approvals** | `/dashboard/approvals`          | View and act on pending approvals        |
+| Page               | URL                      | Description |
+|--------------------|--------------------------|-------------|
+| **Consciousness**  | `/dashboard`             | Live council overview, active speaker, transcript, and operator controls |
+| **Settings**       | `/dashboard/settings`    | Browse and edit tunable parameters with descriptions and provenance |
+| **Soul**           | `/dashboard/soul`        | Soul contents and version history |
+| **Heartbeat**      | `/dashboard/heartbeat`   | Heartbeat contents and history |
+| **Memory**         | `/dashboard/memory`      | Browse nodes, clusters, filter by type/trust |
+| **Logs**           | `/dashboard/logs`        | Search activity and audit logs |
+| **Approvals**      | `/dashboard/approvals`   | View and act on pending approvals |
 
 ### API Endpoints
 
@@ -284,7 +289,7 @@ The dashboard exposes a JSON API under `/api/`. Key endpoints:
 Use `/status` in the interactive console, or via API:
 
 ```bash
-curl http://127.0.0.1:6667/api/status
+curl http://127.0.0.1:8765/api/status
 ```
 
 ### Inspect Soul Evolution
@@ -354,7 +359,7 @@ also use `/set awake_duration_minutes 20` to change durations at runtime.
 Or via the dashboard Status page (buttons) or API:
 
 ```bash
-curl -X POST http://127.0.0.1:6667/api/agent/pause
+curl -X POST http://127.0.0.1:8765/api/agent/pause
 ```
 
 ### Send a Message
@@ -448,9 +453,9 @@ ModuleNotFoundError: No module named 'agentgolem'
 
 ### Dashboard not loading
 
-**Fix:** The dashboard starts automatically with the council on port 6667+.
-If it's not loading, check that the council is running and try the next port
-(6668, 6669, etc.) in case of port conflicts.
+**Fix:** The dashboard starts automatically with the council on port 8765+.
+If it's not loading, check that the council is running and use `/dashboard` to
+print and open the exact URL that this run is using.
 
 ### LLM API errors / timeouts
 

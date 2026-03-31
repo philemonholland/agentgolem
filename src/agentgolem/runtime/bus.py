@@ -54,6 +54,8 @@ class InterAgentBus:
         # wait on per-agent Events.  When the floor is released we
         # wake the highest-priority (lowest number) waiter first.
         self._agent_priority: dict[str, int] = {}
+        self._agent_last_spoke_order: dict[str, int | None] = {}
+        self._speak_order_counter = 0
         self._floor_waiters: dict[str, asyncio.Event] = {}
         self._floor_wait_queue: list[str] = []  # agents waiting for floor
 
@@ -72,6 +74,7 @@ class InterAgentBus:
             self._agent_priority[name] = discussion_priority
         else:
             self._agent_priority[name] = DISCUSSION_PRIORITY_DEFAULT
+        self._agent_last_spoke_order[name] = None
 
     def rename(self, old_name: str, new_name: str) -> None:
         """Update an agent's name (e.g., after name discovery)."""
@@ -86,6 +89,8 @@ class InterAgentBus:
             # Carry over discussion priority
             if old_name in self._agent_priority:
                 self._agent_priority[new_name] = self._agent_priority.pop(old_name)
+            if old_name in self._agent_last_spoke_order:
+                self._agent_last_spoke_order[new_name] = self._agent_last_spoke_order.pop(old_name)
 
     def resolve_name(self, name: str) -> str | None:
         """Resolve a name/alias to a registered agent name."""
@@ -107,11 +112,34 @@ class InterAgentBus:
         """Return the current floor wait queue in priority-agnostic arrival order."""
         return list(self._floor_wait_queue)
 
+    def recommend_responder(self) -> str | None:
+        """Recommend the next natural responder based on speaking recency."""
+        if not self._queues:
+            return None
+        names = list(self._queues.keys())
+        names.sort(key=self._speaker_sort_key)
+        return names[0]
+
     def set_max_transcript(self, max_transcript: int) -> None:
         """Update the rolling transcript retention limit."""
         self._max_transcript = max(1, int(max_transcript))
         if len(self._transcript) > self._max_transcript:
             self._transcript = self._transcript[-self._max_transcript :]
+
+    def _speaker_sort_key(self, agent_name: str) -> tuple[int, int, int]:
+        """Sort speakers by whether they've spoken and how recently."""
+        last_spoke = self._agent_last_spoke_order.get(agent_name)
+        priority = self._agent_priority.get(agent_name, DISCUSSION_PRIORITY_DEFAULT)
+        if last_spoke is None:
+            return (0, 0, priority)
+        return (1, last_spoke, priority)
+
+    def _note_spoke(self, agent_name: str) -> None:
+        """Record that *agent_name* just took the floor."""
+        if agent_name not in self._queues:
+            return
+        self._speak_order_counter += 1
+        self._agent_last_spoke_order[agent_name] = self._speak_order_counter
 
     # ------------------------------------------------------------------
     # Messaging
@@ -194,6 +222,7 @@ class InterAgentBus:
         if not self._floor.locked() and not self._floor_wait_queue:
             await self._floor.acquire()
             self._floor_holder = agent_name
+            self._note_spoke(agent_name)
             return
 
         # Add ourselves to the priority wait queue
@@ -207,16 +236,15 @@ class InterAgentBus:
             if agent_name in self._floor_wait_queue:
                 self._floor_wait_queue.remove(agent_name)
         # When woken, we already hold the floor (set by release_floor)
+        self._note_spoke(agent_name)
 
     def release_floor(self) -> None:
         """Release the discussion floor, waking the next highest-priority waiter."""
         self._floor_holder = None
 
         if self._floor_wait_queue:
-            # Sort waiting agents by priority (lowest number first)
-            self._floor_wait_queue.sort(
-                key=lambda n: self._agent_priority.get(n, DISCUSSION_PRIORITY_DEFAULT)
-            )
+            # Prefer agents who have not spoken yet, then the least-recent speaker.
+            self._floor_wait_queue.sort(key=self._speaker_sort_key)
             next_agent = self._floor_wait_queue.pop(0)
             self._floor_holder = next_agent
             evt = self._floor_waiters.get(next_agent)

@@ -720,6 +720,13 @@ PARAM_DEFS: list[ParamDef] = [
     ),
     param("dashboard_host", "Dashboard Host", "Host to bind the dashboard to", "str", "Dashboard"),
     param("dashboard_port", "Dashboard Port", "Port for the web dashboard", "int", "Dashboard"),
+    param(
+        "dashboard_auto_open_browser",
+        "Dashboard Auto Open Browser",
+        "Open the dashboard in your default browser when AgentGolem starts",
+        "bool",
+        "Dashboard",
+    ),
     # --- Secrets (.env) ---
     param(
         "openai_api_key",
@@ -805,11 +812,15 @@ def _build_param_lookup() -> dict[str, ParamDef]:
 
 PARAM_LOOKUP: dict[str, ParamDef] = _build_param_lookup()
 
+# Browser-safe dashboard default. Port 6667 is blocked by Chromium-based browsers.
+DASHBOARD_SAFE_DEFAULT_PORT = 8765
+
 # Launcher-only params (not in settings.yaml)
 LAUNCHER_DEFAULTS: dict[str, Any] = {
     "dashboard_enabled": True,
     "dashboard_host": "127.0.0.1",
-    "dashboard_port": 6667,
+    "dashboard_port": DASHBOARD_SAFE_DEFAULT_PORT,
+    "dashboard_auto_open_browser": True,
 }
 
 # .env field name mapping (python attr → env var)
@@ -1545,8 +1556,8 @@ HELP_TEXT = f"""
   {C.BOLD}━━━ AgentGolem Ethical Council Commands ━━━{C.RESET}
 
   {C.CYAN}/help{C.RESET}                       Show this help message.
-  {C.CYAN}/speak{C.RESET}                      Pause agents — human wants to talk.
-  {C.CYAN}/continue{C.RESET}                   Resume autonomous work after speaking.
+  {C.CYAN}/speak{C.RESET}                      Pause council-to-council conversation while you talk.
+  {C.CYAN}/continue{C.RESET}                   Resume council conversation after /speak.
   {C.CYAN}/status{C.RESET}                     Show all agents' mode, task, uptime.
   {C.CYAN}/params{C.RESET}                     List every parameter and its current value.
   {C.CYAN}/get <param>{C.RESET}                Show the current value of a single parameter.
@@ -1558,18 +1569,20 @@ HELP_TEXT = f"""
   {C.CYAN}/heartbeat{C.RESET}                  Trigger heartbeat for all agents.
   {C.CYAN}/soul{C.RESET}                       Print each agent's current soul.
   {C.CYAN}/logs [N]{C.RESET}                   Show the last N audit-log entries (default 10).
-  {C.CYAN}/dashboard{C.RESET}                  Show the web-dashboard URL.
+  {C.CYAN}/dashboard{C.RESET}                  Show and open the web dashboard.
+  {C.CYAN}/a <1-7> <message>{C.RESET}          Send a private message to one council member.
   {C.CYAN}/restart{C.RESET}                    Stop and restart (re-runs config walkthrough).
   {C.CYAN}/reset-nj{C.RESET}                   Reset Niscalajyoti reading progress for all agents.
   {C.CYAN}/quit{C.RESET}  or  {C.CYAN}/exit{C.RESET}           Gracefully shut down all agents.
 
   {C.BOLD}━━━ Talking to Agents ━━━{C.RESET}
 
-  {C.DIM}Bare text is sent to ALL agents (auto-pauses, use /continue to resume):{C.RESET}
+  {C.DIM}Bare text joins the live conversation — one natural responder answers first:{C.RESET}
     Hello everyone
 
-  {C.DIM}Prefix with @Name to address one agent:{C.RESET}
+  {C.DIM}Prefix with @Name or use /a to address one agent directly:{C.RESET}
     @Council-1 What do you think about compassion?
+    /a 3 What do you think about compassion?
 """
 
 
@@ -1589,6 +1602,7 @@ class RuntimeConsole:
         agents: list[Any] | None = None,
         bus: Any | None = None,
         human_speaking_event: threading.Event | None = None,
+        transient_pause_event: threading.Event | None = None,
     ) -> None:
         self._store = store
         self._loop_ref = loop_ref  # single MainLoop (legacy compat)
@@ -1597,6 +1611,7 @@ class RuntimeConsole:
         self._running = True
         self._restart_requested = False
         self._human_speaking = human_speaking_event or threading.Event()
+        self._transient_pause = transient_pause_event or threading.Event()
         self._thread: threading.Thread | None = None
         self._param_lookup: dict[str, ParamDef] = dict(PARAM_LOOKUP)
 
@@ -1665,6 +1680,10 @@ class RuntimeConsole:
                 self._cmd_speak()
             elif cmd == "/continue":
                 self._cmd_continue()
+            elif cmd == "/a" and len(parts) >= 3:
+                self._cmd_message_to(parts[1], parts[2])
+            elif cmd == "/a":
+                cprint("  Usage: /a <1-7> <message>", C.YELLOW)
             elif cmd == "/status":
                 self._cmd_status()
             elif cmd == "/params":
@@ -1785,58 +1804,91 @@ class RuntimeConsole:
             except Exception as e:
                 cprint(f"  ✗ {getattr(agent, 'agent_name', '?')}: {e}", C.RED)
 
-    def _cmd_message_all(self, text: str) -> None:
-        """Send a message to every agent.
-
-        If conversation is paused (via ``/speak``), the message is queued
-        and delivered after the current speaker finishes.  Otherwise it is
-        sent immediately (auto-pausing conversation so agents listen first).
-        """
-        if not self._human_speaking.is_set():
-            self._human_speaking.set()
-            for agent in self._agents:
-                agent._conversation_paused = True
-            cprint(
-                "  ⏸  Conversation paused while you speak. Type /continue to resume.", C.YELLOW
-            )
+    def _set_conversation_paused(self, paused: bool) -> None:
+        """Toggle the per-agent conversation pause flag."""
         for agent in self._agents:
-            try:
-                future = asyncio.run_coroutine_threadsafe(
-                    agent.interrupt_manager.send_message(text), self._async_loop
-                )
-                future.result(timeout=5.0)
-            except Exception as e:
-                name = getattr(agent, "agent_name", "?")
-                cprint(f"  ✗ {name}: {e}", C.RED)
-        cprint(f"  ✓ Message sent to {len(self._agents)} agents: {text}", C.GREEN)
+            agent._conversation_paused = paused
+
+    def _resolve_agent(self, selector: str) -> Any | None:
+        """Resolve by current name, initial council id, or council number."""
+        selector = selector.strip()
+        if not selector:
+            return None
+
+        if selector.isdigit():
+            initial_name = f"Council-{int(selector)}"
+            for agent in self._agents:
+                if getattr(agent, "_initial_agent_name", "") == initial_name:
+                    return agent
+
+        selector_lower = selector.lower()
+        for agent in self._agents:
+            current_name = getattr(agent, "agent_name", "")
+            initial_name = getattr(agent, "_initial_agent_name", current_name)
+            candidates = {current_name.lower(), initial_name.lower()}
+            if selector_lower in candidates:
+                return agent
+            if any(name.startswith(selector_lower) for name in candidates):
+                return agent
+        return None
+
+    def _select_human_responder(self) -> Any | None:
+        """Pick the most natural next agent to respond to the human."""
+        if not self._agents:
+            return None
+        if self._bus is not None:
+            holder = getattr(self._bus, "floor_holder", None)
+            if holder:
+                agent = self._resolve_agent(holder)
+                if agent is not None:
+                    return agent
+            if hasattr(self._bus, "recommend_responder"):
+                recommended = self._bus.recommend_responder()
+                if recommended:
+                    agent = self._resolve_agent(recommended)
+                    if agent is not None:
+                        return agent
+        return self._agents[0]
+
+    def _queue_human_turn(self, agent: Any, text: str) -> None:
+        """Queue one human message for exactly one agent."""
+        if not self._human_speaking.is_set():
+            self._transient_pause.set()
+            self._set_conversation_paused(True)
+        future = asyncio.run_coroutine_threadsafe(
+            agent.interrupt_manager.send_message(text), self._async_loop
+        )
+        future.result(timeout=5.0)
+
+    def _cmd_message_all(self, text: str) -> None:
+        """Queue one natural human interjection into the live conversation."""
+        agent = self._select_human_responder()
+        if agent is None:
+            cprint("  No agents running.", C.YELLOW)
+            return
+        name = getattr(agent, "agent_name", "?")
+        try:
+            self._queue_human_turn(agent, text)
+            cprint(f"  ✓ Queued for {name}: {text}", C.GREEN)
+        except Exception as e:
+            cprint(f"  ✗ {name}: {e}", C.RED)
 
     def _cmd_message_to(self, target_name: str, text: str) -> None:
-        """Send a message to a specific agent by name (or partial match)."""
-        if not self._human_speaking.is_set():
-            self._human_speaking.set()
-            for agent in self._agents:
-                agent._conversation_paused = True
+        """Send a private message to a specific agent by name or council number."""
+        agent = self._resolve_agent(target_name)
+        if agent is None:
+            cprint(f"  Unknown agent: {target_name}", C.RED)
             cprint(
-                "  ⏸  Conversation paused while you speak. Type /continue to resume.", C.YELLOW
+                f"  Known agents: {', '.join(getattr(a, 'agent_name', '?') for a in self._agents)}",
+                C.DIM,
             )
-        target_lower = target_name.lower()
-        for agent in self._agents:
-            name = getattr(agent, "agent_name", "")
-            if name.lower() == target_lower or name.lower().startswith(target_lower):
-                try:
-                    future = asyncio.run_coroutine_threadsafe(
-                        agent.interrupt_manager.send_message(text), self._async_loop
-                    )
-                    future.result(timeout=5.0)
-                    cprint(f"  ✓ → {name}: {text}", C.GREEN)
-                except Exception as e:
-                    cprint(f"  ✗ {name}: {e}", C.RED)
-                return
-        cprint(f"  Unknown agent: {target_name}", C.RED)
-        cprint(
-            f"  Known agents: {', '.join(getattr(a, 'agent_name', '?') for a in self._agents)}",
-            C.DIM,
-        )
+            return
+        name = getattr(agent, "agent_name", "?")
+        try:
+            self._queue_human_turn(agent, text)
+            cprint(f"  ✓ Private turn queued for {name}: {text}", C.GREEN)
+        except Exception as e:
+            cprint(f"  ✗ {name}: {e}", C.RED)
 
     # Keep legacy _cmd_message for backward compat
     def _cmd_message(self, text: str) -> None:
@@ -1848,10 +1900,10 @@ class RuntimeConsole:
             cprint("  Already paused — agents are listening.", C.DIM)
             return
         self._human_speaking.set()
+        self._transient_pause.clear()
         # Also set the per-agent conversation-paused flag so consciousness
         # ticks continue while only discussion is suspended.
-        for agent in self._agents:
-            agent._conversation_paused = True
+        self._set_conversation_paused(True)
         cprint(
             "  ⏸  Conversation paused. Agents keep thinking but won't talk.",
             C.YELLOW,
@@ -1862,10 +1914,12 @@ class RuntimeConsole:
         """Resume autonomous conversation after speaking."""
         if not self._human_speaking.is_set():
             cprint("  Agents are already running autonomously.", C.DIM)
+            self._transient_pause.clear()
+            self._set_conversation_paused(False)
             return
         self._human_speaking.clear()
-        for agent in self._agents:
-            agent._conversation_paused = False
+        self._transient_pause.clear()
+        self._set_conversation_paused(False)
         cprint("  ▶  Conversation resumed — agents can speak again.", C.GREEN)
 
     def _cmd_heartbeat(self) -> None:
@@ -1923,7 +1977,15 @@ class RuntimeConsole:
         if enabled:
             host = self._store.get("dashboard_host", "str")
             port = self._store.get("dashboard_port", "int")
-            cprint(f"  🌐 http://{host}:{port}/dashboard", C.CYAN)
+            url_host = _dashboard_browser_host(host)
+            url = f"http://{url_host}:{port}/dashboard"
+            cprint(f"  🌐 {url}", C.CYAN)
+            try:
+                import webbrowser
+
+                webbrowser.open_new_tab(url)
+            except Exception:
+                pass
         else:
             cprint("  Dashboard is disabled.  /set dashboard_enabled true  to enable.", C.YELLOW)
 
@@ -2005,12 +2067,56 @@ def _human_duration(delta: timedelta) -> str:
 # ---------------------------------------------------------------------------
 
 
+UNSAFE_BROWSER_PORTS = {
+    6000,
+    6566,
+    6665,
+    6666,
+    6667,
+    6668,
+    6669,
+    6697,
+    10080,
+}
+
+
+def _is_browser_unsafe_port(port: int) -> bool:
+    """Return True when *port* is blocked by common browsers."""
+    return port in UNSAFE_BROWSER_PORTS
+
+
+def _dashboard_browser_host(host: str) -> str:
+    """Map wildcard dashboard bind hosts to a browser-safe local URL host."""
+    return "127.0.0.1" if host in {"0.0.0.0", "::", ""} else host
+
+
+def _open_dashboard_in_browser_when_ready(url: str, host: str, port: int) -> None:
+    """Open the dashboard once the server is accepting connections."""
+
+    def _runner() -> None:
+        import socket
+        import webbrowser
+
+        deadline = time.time() + 15.0
+        while time.time() < deadline:
+            try:
+                with socket.create_connection((host, port), timeout=0.5):
+                    webbrowser.open_new_tab(url)
+                    return
+            except OSError:
+                time.sleep(0.25)
+
+    threading.Thread(target=_runner, daemon=True, name="dashboard-browser").start()
+
+
 def _find_free_port(preferred: int, host: str = "127.0.0.1") -> int:
     """Find a free port starting from *preferred*, skipping 8000–8100."""
     import socket
 
     for offset in range(100):
         port = preferred + offset
+        if _is_browser_unsafe_port(port):
+            continue
         if 8000 <= port <= 8100:
             continue
         try:
@@ -2031,6 +2137,8 @@ def start_dashboard(
     *,
     bus: Any | None = None,
     async_loop: asyncio.AbstractEventLoop | None = None,
+    human_speaking_event: threading.Event | None = None,
+    transient_pause_event: threading.Event | None = None,
 ) -> threading.Thread | None:
     """Start the dashboard in a background thread if enabled."""
     enabled = store.get("dashboard_enabled", "bool")
@@ -2039,9 +2147,21 @@ def start_dashboard(
 
     host = str(store.get("dashboard_host", "str"))
     preferred_port = int(store.get("dashboard_port", "int"))
+    if _is_browser_unsafe_port(preferred_port):
+        cprint(
+            f"  ⚠ Dashboard port {preferred_port} is blocked by browsers; "
+            f"using {DASHBOARD_SAFE_DEFAULT_PORT} instead",
+            C.YELLOW,
+        )
+        preferred_port = DASHBOARD_SAFE_DEFAULT_PORT
     port = _find_free_port(preferred_port, host)
     if port != preferred_port:
         cprint(f"  ⚠ Port {preferred_port} in use, using {port} instead", C.YELLOW)
+    store._runtime_overrides["dashboard_host"] = host
+    store._runtime_overrides["dashboard_port"] = port
+    dashboard_host = _dashboard_browser_host(host)
+    dashboard_url = f"http://{dashboard_host}:{port}/dashboard"
+    auto_open_browser = store.get("dashboard_auto_open_browser", "bool")
 
     first_agent = agents[0] if agents else None
 
@@ -2100,6 +2220,8 @@ def start_dashboard(
                 apply_setting_change=_apply_setting_change,
                 locked_settings=set(LOCKED_SETTINGS),
                 optimizable_settings=set(OPTIMIZABLE_SETTINGS),
+                human_speaking_event=human_speaking_event,
+                transient_pause_event=transient_pause_event,
             )
 
         dashboard = create_dashboard_app()
@@ -2119,7 +2241,9 @@ def start_dashboard(
 
     thread = threading.Thread(target=_run_dashboard, daemon=True, name="dashboard")
     thread.start()
-    cprint(f"  🌐 Dashboard → http://{host}:{port}/dashboard", C.CYAN)
+    cprint(f"  🌐 Dashboard → {dashboard_url}", C.CYAN)
+    if auto_open_browser:
+        _open_dashboard_in_browser_when_ready(dashboard_url, dashboard_host, port)
     return thread
 
 
@@ -2183,8 +2307,11 @@ async def run_agent(store: ParamStore) -> bool | Literal["evolution"]:
     # Shared event for evolution restart (any agent can trigger)
     evolution_event = asyncio.Event()
 
-    # Shared event for /speak — pauses autonomous ticks while human speaks
+    # Shared event for explicit /speak pause.
     human_speaking_event = threading.Event()
+    # One-shot human interjections temporarily pause peer conversation until one
+    # council member responds, then auto-resume.
+    transient_pause_event = threading.Event()
 
     agents: list[MainLoop] = []
     dbs: list[Any] = []
@@ -2240,6 +2367,11 @@ async def run_agent(store: ParamStore) -> bool | Literal["evolution"]:
                     with _output_lock:
                         print(line)
                         time.sleep(_OUTPUT_PACE_SECONDS)
+
+                if transient_pause_event.is_set() and not human_speaking_event.is_set():
+                    transient_pause_event.clear()
+                    for peer in agents:
+                        peer._conversation_paused = False
 
             return cb
 
@@ -2312,7 +2444,14 @@ async def run_agent(store: ParamStore) -> bool | Literal["evolution"]:
     loop_handle = asyncio.get_event_loop()
 
     # Start dashboard (council-aware: sees the full swarm + shared bus)
-    start_dashboard(store, agents, bus=bus, async_loop=loop_handle)
+    start_dashboard(
+        store,
+        agents,
+        bus=bus,
+        async_loop=loop_handle,
+        human_speaking_event=human_speaking_event,
+        transient_pause_event=transient_pause_event,
+    )
 
     # Print council lineup
     cprint("\n  ─── Ethical Council Lineup ───────────────────────", C.MAGENTA)
@@ -2334,6 +2473,7 @@ async def run_agent(store: ParamStore) -> bool | Literal["evolution"]:
         agents=agents,
         bus=bus,
         human_speaking_event=human_speaking_event,
+        transient_pause_event=transient_pause_event,
     )
     console.start()
 

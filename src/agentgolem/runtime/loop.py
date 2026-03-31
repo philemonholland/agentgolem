@@ -369,7 +369,9 @@ class MainLoop:
         self._proposals_dir = self._data_dir.parent / "evolution_proposals"
         self._proposals_dir.mkdir(parents=True, exist_ok=True)
 
-        # Human-speaking pause: when set, autonomous ticks are suspended
+        # Explicit /speak pause: shared event used only when the human wants to
+        # hold the conversational floor. One-off human interjections use the
+        # per-agent _conversation_paused flag instead.
         self._human_speaking_event: threading.Event | None = None
 
         # Conversation-only pause: when set, discussion/peer/autonomous speech
@@ -1023,6 +1025,44 @@ class MainLoop:
         kwargs.setdefault("max_completion_tokens", self._discussion_max_completion_tokens)
         return await self._llm.complete(messages, **kwargs)
 
+    def _source_prompt_messages(self, prompt: str) -> list[Message]:
+        """Wrap source-heavy prompts so extracted material is delivered as user content."""
+        return [
+            Message(
+                role="system",
+                content=(
+                    "Ground your answer in the source material provided by the user message. "
+                    "Do not claim the text is missing when it is present. "
+                    "If the supplied material is malformed or truncated, say that directly."
+                ),
+            ),
+            Message(role="user", content=prompt),
+        ]
+
+    @staticmethod
+    def _looks_like_missing_source_reply(text: str) -> bool:
+        """Detect ungrounded replies that incorrectly claim the source was absent."""
+        normalized = " ".join(text.lower().split())
+        if not normalized:
+            return False
+        return any(
+            phrase in normalized
+            for phrase in (
+                "don't have the actual text",
+                "do not have the actual text",
+                "don't have the text",
+                "do not have the text",
+                "missing the actual text",
+                "missing the text",
+                "can't responsibly reflect on its specific content yet",
+                "cannot responsibly reflect on its specific content yet",
+                "if you paste the chapter",
+                "if you paste the source",
+                "paste the chapter here",
+                "paste the source here",
+            )
+        )
+
     async def _complete_code(self, messages: list[Message], **kwargs: Any) -> str:
         """Run a coding-oriented completion."""
         client = self._code_llm or self._llm
@@ -1323,22 +1363,30 @@ class MainLoop:
 
         if self._persisted_mode and self._persisted_phase_remaining > 0:
             # We have a valid persisted state — resume where we left off
-            remaining = timedelta(seconds=self._persisted_phase_remaining)
+            resumed_state = self._advance_persisted_phase(now)
+            if resumed_state is None:
+                remaining = timedelta(0)
+            else:
+                persisted_mode, remaining, completed_cycles = resumed_state
+                self._wake_cycle_count += completed_cycles
 
-            if self._persisted_mode == "asleep":
+            if resumed_state is not None and persisted_mode == "asleep":
                 await self.runtime_state.transition(AgentMode.ASLEEP)
                 self._fell_asleep_at = now - (self._sleep_duration - remaining)
                 self._awoke_at = None
+                self._wind_down_at = None
                 self._winding_down = False
                 resumed = True
                 self._emit(
                     "💤",
                     f"Resuming ASLEEP — {remaining.total_seconds():.0f}s left",
                 )
-            elif self._persisted_mode == "awake":
+            elif resumed_state is not None and persisted_mode == "awake":
                 if self.runtime_state.mode != AgentMode.AWAKE:
                     await self.runtime_state.transition(AgentMode.AWAKE)
                 self._awoke_at = now - (self._awake_duration - remaining)
+                self._fell_asleep_at = None
+                self._wind_down_at = None
                 self._winding_down = False
                 resumed = True
                 self._emit(
@@ -1346,12 +1394,14 @@ class MainLoop:
                     f"Resuming AWAKE — {remaining.total_seconds():.0f}s left "
                     f"(cycle #{self._wake_cycle_count})",
                 )
-            elif self._persisted_mode == "winding_down":
+            elif resumed_state is not None and persisted_mode == "winding_down":
                 if self.runtime_state.mode != AgentMode.AWAKE:
                     await self.runtime_state.transition(AgentMode.AWAKE)
-                self._awoke_at = now - self._awake_duration  # past wake limit
+                wind_down_elapsed = self._wind_down_duration - remaining
+                self._awoke_at = now - (self._awake_duration + wind_down_elapsed)
+                self._fell_asleep_at = None
                 self._winding_down = True
-                self._wind_down_at = now - (self._wind_down_duration - remaining)
+                self._wind_down_at = now - wind_down_elapsed
                 resumed = True
                 self._emit(
                     "🌅",
@@ -1363,6 +1413,8 @@ class MainLoop:
             if self.runtime_state.mode != AgentMode.AWAKE:
                 await self.runtime_state.transition(AgentMode.AWAKE)
             self._awoke_at = now
+            self._fell_asleep_at = None
+            self._wind_down_at = None
             self._winding_down = False
             if self._wake_cycle_count == 0:
                 self._wake_cycle_count = 1
@@ -1519,18 +1571,16 @@ class MainLoop:
             await self._respond_to_message(msg)
             return
 
-        # 2. Peer messages (processed even during conversation pause so
-        #    messages are consumed from the queue; the floor lock handles
-        #    serialisation)
-        peer_msg = await self._receive_peer_message()
-        if peer_msg:
-            await self._respond_to_peer(peer_msg)
-            return
-
-        # 3. Conversation-pause check: when the human is speaking,
+        # 2. Conversation-pause check: when the human is speaking,
         #    suppress autonomous discussion but keep consciousness alive.
         if self._is_conversation_paused():
             await self._tick_consciousness_only()
+            return
+
+        # 3. Peer messages
+        peer_msg = await self._receive_peer_message()
+        if peer_msg:
+            await self._respond_to_peer(peer_msg)
             return
 
         # 4. Autonomous work (discussion, browsing, reading, etc.)
@@ -1874,6 +1924,7 @@ class MainLoop:
         # Defaults for fields that may be loaded
         self._persisted_mode: str | None = None
         self._persisted_phase_remaining: float = 0.0
+        self._persisted_saved_at: datetime | None = None
 
         if not self._session_state_path.exists():
             return
@@ -1882,6 +1933,9 @@ class MainLoop:
             self._wake_cycle_count = data.get("wake_cycle_count", 0)
             self._persisted_mode = data.get("mode")  # "awake"/"asleep"/"winding_down"
             self._persisted_phase_remaining = data.get("phase_remaining_seconds", 0.0)
+            saved_at = data.get("saved_at")
+            if saved_at:
+                self._persisted_saved_at = datetime.fromisoformat(saved_at)
 
             # Name discovery
             if data.get("name_discovered"):
@@ -1911,6 +1965,55 @@ class MainLoop:
 
         except Exception:
             pass  # corrupt file — use defaults
+
+    def _phase_duration_for_mode(self, mode: str) -> timedelta:
+        """Return the duration of one persisted wake-cycle phase."""
+        if mode == "awake":
+            return self._awake_duration
+        if mode == "winding_down":
+            return self._wind_down_duration
+        if mode == "asleep":
+            return self._sleep_duration
+        raise ValueError(f"Unknown persisted mode: {mode}")
+
+    def _advance_phase(self, mode: str) -> tuple[str, int]:
+        """Advance to the next wake-cycle phase.
+
+        Returns ``(next_mode, completed_wake_cycles)``.
+        """
+        if mode == "awake":
+            return "winding_down", 0
+        if mode == "winding_down":
+            return "asleep", 0
+        if mode == "asleep":
+            return "awake", 1
+        raise ValueError(f"Unknown persisted mode: {mode}")
+
+    def _advance_persisted_phase(
+        self,
+        now: datetime,
+    ) -> tuple[str, timedelta, int] | None:
+        """Advance saved cycle timing by real wall-clock downtime."""
+        if not self._persisted_mode or self._persisted_phase_remaining <= 0:
+            return None
+
+        mode = self._persisted_mode
+        remaining = timedelta(seconds=self._persisted_phase_remaining)
+        completed_cycles = 0
+        offline_elapsed = timedelta(0)
+        if self._persisted_saved_at is not None and now > self._persisted_saved_at:
+            offline_elapsed = now - self._persisted_saved_at
+
+        while offline_elapsed >= remaining and remaining.total_seconds() > 0:
+            offline_elapsed -= remaining
+            mode, cycle_increment = self._advance_phase(mode)
+            completed_cycles += cycle_increment
+            remaining = self._phase_duration_for_mode(mode)
+
+        if offline_elapsed > timedelta(0):
+            remaining = max(timedelta(0), remaining - offline_elapsed)
+
+        return mode, remaining, completed_cycles
 
     def _save_session_state(self) -> None:
         """Persist session state to disk for resumption after restart."""
@@ -1983,7 +2086,16 @@ class MainLoop:
 
         chapter_digest = ""
         if digest_path.exists():
-            chapter_digest = digest_path.read_text(encoding="utf-8").strip()
+            cached_digest = digest_path.read_text(encoding="utf-8").strip()
+            if self._looks_like_missing_source_reply(cached_digest):
+                self._logger.warning(
+                    "invalid_cached_niscalajyoti_digest",
+                    agent=self.agent_name,
+                    chapter=title,
+                )
+                self._emit("⚠️", f"Discarding invalid cached digest for '{title}' and regenerating")
+            else:
+                chapter_digest = cached_digest
 
         if not chapter_digest:
             # First agent to read this chapter — fetch and generate digest
@@ -2026,7 +2138,7 @@ class MainLoop:
             )
             try:
                 chapter_digest = await self._complete_discussion(
-                    [Message(role="system", content=digest_prompt)]
+                    self._source_prompt_messages(digest_prompt)
                 )
             except Exception as e:
                 self._logger.error(
@@ -2036,6 +2148,19 @@ class MainLoop:
                     error=repr(e),
                 )
                 self._emit("❌", f"Failed to digest '{title}': {e}")
+                self._niscalajyoti_chapter_retries += 1
+                return
+
+            if self._looks_like_missing_source_reply(chapter_digest):
+                self._logger.warning(
+                    "niscalajyoti_digest_ungrounded",
+                    agent=self.agent_name,
+                    chapter=title,
+                )
+                self._emit(
+                    "⚠️",
+                    f"Digest for '{title}' was not grounded in the fetched chapter text — will retry",
+                )
                 self._niscalajyoti_chapter_retries += 1
                 return
 
@@ -2083,7 +2208,19 @@ class MainLoop:
                 f"ideas that you'd want to remember."
             )
 
-            response = await self._complete_discussion([Message(role="system", content=prompt)])
+            response = await self._complete_discussion(self._source_prompt_messages(prompt))
+            if self._looks_like_missing_source_reply(response):
+                self._logger.warning(
+                    "niscalajyoti_reflection_ungrounded",
+                    agent=self.agent_name,
+                    chapter=title,
+                )
+                self._emit(
+                    "⚠️",
+                    f"Reflection for '{title}' was not grounded in the digest — will retry",
+                )
+                self._niscalajyoti_chapter_retries += 1
+                return
 
             # Extract summary from the response
             summary = ""
@@ -2204,7 +2341,7 @@ class MainLoop:
 
         try:
             source_digest = await self._complete_discussion(
-                [Message(role="system", content=digest_prompt)]
+                self._source_prompt_messages(digest_prompt)
             )
         except Exception as e:
             self._logger.error(
@@ -2214,6 +2351,19 @@ class MainLoop:
                 error=repr(e),
             )
             self._emit("❌", f"Failed to digest '{title}': {e}")
+            self._council7_source_retries += 1
+            return
+
+        if self._looks_like_missing_source_reply(source_digest):
+            self._logger.warning(
+                "council7_digest_ungrounded",
+                agent=self.agent_name,
+                source=title,
+            )
+            self._emit(
+                "⚠️",
+                f"Digest for '{title}' was not grounded in the fetched source text — will retry",
+            )
             self._council7_source_retries += 1
             return
 
@@ -2240,7 +2390,7 @@ class MainLoop:
         )
 
         try:
-            response = await self._complete_discussion([Message(role="system", content=prompt)])
+            response = await self._complete_discussion(self._source_prompt_messages(prompt))
         except Exception as e:
             self._logger.error(
                 "council7_source_error",
@@ -2249,6 +2399,19 @@ class MainLoop:
                 error=repr(e),
             )
             self._emit("❌", f"Failed to reflect on '{title}': {e}")
+            self._council7_source_retries += 1
+            return
+
+        if self._looks_like_missing_source_reply(response):
+            self._logger.warning(
+                "council7_reflection_ungrounded",
+                agent=self.agent_name,
+                source=title,
+            )
+            self._emit(
+                "⚠️",
+                f"Reflection for '{title}' was not grounded in the digest — will retry",
+            )
             self._council7_source_retries += 1
             return
 
@@ -3934,74 +4097,89 @@ class MainLoop:
 
     async def _respond_to_message(self, msg: HumanMessage) -> None:
         """Generate an LLM response to a human message and deliver it."""
-        self._logger.info(
-            "processing_message",
-            agent=self.agent_name,
-            text=msg.text,
-        )
-        self._emit("📨", f"Human says: {msg.text}")
-        self.audit_logger.log(
-            mutation_type="inbound_message",
-            target_id="human",
-            evidence={"text": msg.text, "agent": self.agent_name},
-        )
-
-        if self._llm is None:
-            reply = "I received your message, but I have no LLM API key configured."
-            self._emit("⚠️", "No LLM API key — cannot respond")
-            self._deliver_response(reply)
-            return
-
-        self._emit("🧠", "Reading soul.md for identity context…")
-        soul_text = await self.soul_manager.read()
-        heartbeat_text = await self.heartbeat_manager.read()
-        mode = self.runtime_state.mode.value
-        memory_context = await self._build_memory_context(msg.text, top_k=5)
-        memory_block = f"\n--- MEMORY CONTEXT ---\n{memory_context}\n" if memory_context else ""
-
-        system_content = (
-            f"You are {self.agent_name}, a member of the AgentGolem "
-            f"Ethical Council. Your primary ethical orientation is "
-            f"'{self.ethical_vector}'. "
-            f"Respond thoughtfully and honestly. Acknowledge uncertainty. "
-            f"Be concise but warm.\n\n"
-            f"--- YOUR IDENTITY (soul.md) ---\n{soul_text}\n\n"
-            f"--- CURRENT STATE ---\nMode: {mode}\n"
-            f"{memory_block}"
-        )
-        if heartbeat_text:
-            system_content += f"\n--- RECENT HEARTBEAT ---\n{heartbeat_text}\n"
-
-        self._conversation.append(Message(role="user", content=msg.text))
-        if len(self._conversation) > self._max_conversation_turns:
-            self._conversation = self._conversation[-self._max_conversation_turns :]
-
-        llm_messages = [
-            Message(role="system", content=system_content),
-            *self._conversation,
-        ]
-
-        self._emit(
-            "💭",
-            f"Thinking… ({len(self._conversation)} turns, "
-            f"model: {self._resolve_model_name(self._llm)})",
-        )
+        transcript: list = []
+        if self._peer_bus:
+            transcript = await self._acquire_floor_with_reflection()
 
         try:
-            reply = await self._complete_discussion(llm_messages)
-            self._conversation.append(Message(role="assistant", content=reply))
-            self._emit("✍️", f"Composed response ({len(reply)} chars)")
-        except Exception as e:
-            self._logger.error("llm_error", error=repr(e))
-            self._emit("❌", f"LLM error: {e}")
-            reply = f"I encountered an error: {e}"
+            self._logger.info(
+                "processing_message",
+                agent=self.agent_name,
+                text=msg.text,
+            )
+            self._emit("📨", f"Human says: {msg.text}")
+            self.audit_logger.log(
+                mutation_type="inbound_message",
+                target_id="human",
+                evidence={"text": msg.text, "agent": self.agent_name},
+            )
 
-        self.audit_logger.log(
-            mutation_type="outbound_message",
-            target_id="human",
-            evidence={"reply": reply[:500], "agent": self.agent_name},
-        )
-        self._deliver_response(reply)
+            if self._llm is None:
+                reply = "I received your message, but I have no LLM API key configured."
+                self._emit("⚠️", "No LLM API key — cannot respond")
+                self._deliver_response(reply)
+                return
+
+            self._emit("🧠", "Reading soul.md for identity context…")
+            soul_text = await self.soul_manager.read()
+            heartbeat_text = await self.heartbeat_manager.read()
+            mode = self.runtime_state.mode.value
+            memory_context = await self._build_memory_context(msg.text, top_k=5)
+            memory_block = f"\n--- MEMORY CONTEXT ---\n{memory_context}\n" if memory_context else ""
+            transcript_ctx = self._format_transcript_context(transcript)
+            transcript_block = (
+                f"\n--- RECENT COUNCIL DIALOGUE ---\n{transcript_ctx}\n"
+                if transcript_ctx
+                else ""
+            )
+
+            system_content = (
+                f"You are {self.agent_name}, a member of the AgentGolem "
+                f"Ethical Council. Your primary ethical orientation is "
+                f"'{self.ethical_vector}'. "
+                f"Respond as one participant in an ongoing live conversation with the human. "
+                f"Be concise, warm, and natural. Leave room for the council to continue after you.\n\n"
+                f"--- YOUR IDENTITY (soul.md) ---\n{soul_text}\n\n"
+                f"--- CURRENT STATE ---\nMode: {mode}\n"
+                f"{memory_block}"
+                f"{transcript_block}"
+            )
+            if heartbeat_text:
+                system_content += f"\n--- RECENT HEARTBEAT ---\n{heartbeat_text}\n"
+
+            self._conversation.append(Message(role="user", content=msg.text))
+            if len(self._conversation) > self._max_conversation_turns:
+                self._conversation = self._conversation[-self._max_conversation_turns :]
+
+            llm_messages = [
+                Message(role="system", content=system_content),
+                *self._conversation,
+            ]
+
+            self._emit(
+                "💭",
+                f"Thinking… ({len(self._conversation)} turns, "
+                f"model: {self._resolve_model_name(self._llm)})",
+            )
+
+            try:
+                reply = await self._complete_discussion(llm_messages)
+                self._conversation.append(Message(role="assistant", content=reply))
+                self._emit("✍️", f"Composed response ({len(reply)} chars)")
+            except Exception as e:
+                self._logger.error("llm_error", error=repr(e))
+                self._emit("❌", f"LLM error: {e}")
+                reply = f"I encountered an error: {e}"
+
+            self.audit_logger.log(
+                mutation_type="outbound_message",
+                target_id="human",
+                evidence={"reply": reply[:500], "agent": self.agent_name},
+            )
+            self._deliver_response(reply)
+        finally:
+            if self._peer_bus:
+                self._release_floor()
 
     def _deliver_response(self, text: str) -> None:
         """Send a response to the human operator."""

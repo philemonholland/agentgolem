@@ -38,6 +38,8 @@ class DashboardState:
     apply_setting_change: Callable[[str, str], dict[str, Any]] | None = None
     locked_settings: set[str] = field(default_factory=set)
     optimizable_settings: set[str] = field(default_factory=set)
+    human_speaking_event: Any = None
+    transient_pause_event: Any = None
 
 
 class ApprovalBody(BaseModel):
@@ -679,9 +681,25 @@ async def _queue_message(st: DashboardState, text: str, target_agent: str | None
         if resolved is None:
             raise HTTPException(404, f"Agent '{target_agent}' not found")
         recipients = [resolved]
+    else:
+        responder = None
+        if st.peer_bus is not None:
+            holder = getattr(st.peer_bus, "floor_holder", None)
+            if holder:
+                responder = _resolve_agent(st, holder)
+            elif hasattr(st.peer_bus, "recommend_responder"):
+                responder_name = st.peer_bus.recommend_responder()
+                if responder_name:
+                    responder = _resolve_agent(st, responder_name)
+        recipients = [responder or agents[0]]
 
-    for agent in agents:
-        setattr(agent, "_conversation_paused", True)
+    manual_pause_active = bool(
+        st.human_speaking_event is not None and st.human_speaking_event.is_set()
+    )
+    if not manual_pause_active and st.transient_pause_event is not None:
+        st.transient_pause_event.set()
+        for agent in agents:
+            setattr(agent, "_conversation_paused", True)
 
     delivered_to: list[str] = []
     for agent in recipients:

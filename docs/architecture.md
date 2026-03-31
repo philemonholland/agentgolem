@@ -50,7 +50,7 @@ memory references.
 The launcher (`run_golem.py`) orchestrates:
 - Agent lifecycle (wake/sleep/shutdown)
 - Interactive console (`golem>` prompt with `/speak`, `/continue`, `@Name`)
-- Web dashboard (FastAPI on port 6667+)
+- Web dashboard (FastAPI on port 8765+ with browser-safe fallback)
 - Crash logging to `data/logs/crash.log`
 
 ### Agent Lifecycle

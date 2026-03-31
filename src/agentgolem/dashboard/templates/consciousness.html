@@ -34,7 +34,7 @@
         <label style="min-width: 220px;">
             Deliver to
             <select name="agent">
-                <option value="">All agents</option>
+                <option value="">Natural next responder</option>
                 {% for agent_name in agent_names %}
                 <option value="{{ agent_name }}" {% if agent_name == selected_agent_name %}selected{% endif %}>{{ agent_name }}</option>
                 {% endfor %}

@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import suppress
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 import pytest
 
 from agentgolem.config.secrets import Secrets
 from agentgolem.config.settings import Settings
+from agentgolem.runtime.bus import AgentMessage
 from agentgolem.runtime.loop import MainLoop
 from agentgolem.runtime.state import AgentMode
 from agentgolem.tools.base import ApprovalGate
@@ -160,6 +162,93 @@ async def test_auto_sleep_wake_cycle(loop_env: tuple[Settings, Secrets, Path]) -
         task.cancel()
         with suppress(asyncio.CancelledError):
             await task
+
+
+def test_advance_persisted_phase_subtracts_real_downtime(
+    loop_env: tuple[Settings, Secrets, Path],
+) -> None:
+    settings, _, _ = loop_env
+    timed_settings = Settings(
+        data_dir=settings.data_dir,
+        awake_duration_minutes=10,
+        wind_down_minutes=1,
+        sleep_duration_minutes=5,
+    )
+    secrets = Secrets(_env_file=None)
+    loop = MainLoop(settings=timed_settings, secrets=secrets)
+
+    saved_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    loop._persisted_mode = "awake"
+    loop._persisted_phase_remaining = 600.0
+    loop._persisted_saved_at = saved_at
+
+    resumed = loop._advance_persisted_phase(saved_at + timedelta(minutes=3))
+
+    assert resumed is not None
+    mode, remaining, completed_cycles = resumed
+    assert mode == "awake"
+    assert remaining == timedelta(minutes=7)
+    assert completed_cycles == 0
+
+
+def test_advance_persisted_phase_advances_across_wind_down_and_sleep(
+    loop_env: tuple[Settings, Secrets, Path],
+) -> None:
+    settings, _, _ = loop_env
+    timed_settings = Settings(
+        data_dir=settings.data_dir,
+        awake_duration_minutes=10,
+        wind_down_minutes=1,
+        sleep_duration_minutes=5,
+    )
+    secrets = Secrets(_env_file=None)
+    loop = MainLoop(settings=timed_settings, secrets=secrets)
+
+    saved_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    loop._persisted_mode = "awake"
+    loop._persisted_phase_remaining = 120.0
+    loop._persisted_saved_at = saved_at
+
+    resumed = loop._advance_persisted_phase(saved_at + timedelta(minutes=5))
+
+    assert resumed is not None
+    mode, remaining, completed_cycles = resumed
+    assert mode == "asleep"
+    assert remaining == timedelta(minutes=3)
+    assert completed_cycles == 0
+
+
+async def test_tick_awake_skips_peer_messages_when_conversation_paused(
+    loop_env: tuple[Settings, Secrets, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, secrets, _ = loop_env
+    loop = MainLoop(settings=settings, secrets=secrets)
+    loop._conversation_paused = True
+
+    saw = {"peer": False, "consciousness": False}
+
+    async def fake_get_message(timeout: float | None = None):
+        return None
+
+    async def fake_receive_peer():
+        return AgentMessage(from_agent="Peer", text="hello")
+
+    async def fake_respond_to_peer(msg: AgentMessage) -> None:
+        saw["peer"] = True
+
+    async def fake_tick_consciousness_only() -> None:
+        saw["consciousness"] = True
+
+    monkeypatch.setattr(loop.interrupt_manager, "get_message", fake_get_message)
+    monkeypatch.setattr(loop, "_receive_peer_message", fake_receive_peer)
+    monkeypatch.setattr(loop, "_respond_to_peer", fake_respond_to_peer)
+    monkeypatch.setattr(loop, "_tick_consciousness_only", fake_tick_consciousness_only)
+
+    await loop._tick_awake()
+
+    assert saw["consciousness"] is True
+    assert saw["peer"] is False
 
 
 def test_main_loop_prefers_deepseek_for_discussion_and_openai_for_code(

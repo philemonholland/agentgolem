@@ -287,6 +287,45 @@ async def test_priority_floor_ordering() -> None:
     assert order == ["Mid", "Low"], f"Expected Mid before Low, got {order}"
 
 
+async def test_recommend_responder_prefers_least_recent_speaker() -> None:
+    bus = InterAgentBus()
+    bus.register("Council-6", discussion_priority=DISCUSSION_PRIORITY_INITIATOR)
+    bus.register("Council-7", discussion_priority=DISCUSSION_PRIORITY_LAST)
+
+    await bus.acquire_floor("Council-6")
+    bus.release_floor()
+
+    assert bus.recommend_responder() == "Council-7"
+
+
+async def test_floor_fairness_prefers_never_spoken_waiter_over_repeat_speaker() -> None:
+    bus = InterAgentBus()
+    bus.register("Holder")
+    bus.register("Council-6", discussion_priority=DISCUSSION_PRIORITY_INITIATOR)
+    bus.register("Council-7", discussion_priority=DISCUSSION_PRIORITY_LAST)
+
+    await bus.acquire_floor("Council-6")
+    bus.release_floor()
+    await bus.acquire_floor("Holder")
+
+    order: list[str] = []
+
+    async def wait_and_record(name: str) -> None:
+        await bus.acquire_floor(name)
+        order.append(name)
+        bus.release_floor()
+
+    t_repeat = asyncio.create_task(wait_and_record("Council-6"))
+    await asyncio.sleep(0.01)
+    t_quiet = asyncio.create_task(wait_and_record("Council-7"))
+    await asyncio.sleep(0.05)
+
+    bus.release_floor()
+    await asyncio.gather(t_repeat, t_quiet)
+
+    assert order[0] == "Council-7"
+
+
 # ------------------------------------------------------------------
 # Message truncation
 # ------------------------------------------------------------------

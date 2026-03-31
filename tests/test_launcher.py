@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 
 # Import from the launcher module at repo root
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -14,6 +16,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import run_golem
+from agentgolem.runtime.interrupts import InterruptManager
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -51,7 +54,8 @@ class TestParamStore:
         store = run_golem.ParamStore()
         assert store.get("dashboard_enabled", "bool") is True
         assert store.get("dashboard_host", "str") == "127.0.0.1"
-        assert store.get("dashboard_port", "int") == 6667
+        assert store.get("dashboard_port", "int") == run_golem.DASHBOARD_SAFE_DEFAULT_PORT
+        assert store.get("dashboard_auto_open_browser", "bool") is True
 
     def test_set_persists_launcher_param(self, tmp_env):
         store = run_golem.ParamStore()
@@ -265,7 +269,7 @@ class TestWalkthrough:
         inputs = ["n"] + param_inputs
         with patch("builtins.input", side_effect=inputs):
             run_golem.walkthrough(store)
-        assert store.get("dashboard_port", "int") == 6667  # default kept
+        assert store.get("dashboard_port", "int") == run_golem.DASHBOARD_SAFE_DEFAULT_PORT
 
 
 def test_agent_defs_include_supplementary_council7() -> None:
@@ -355,10 +359,98 @@ class TestCommandDispatch:
 
     def test_dashboard_shows_url(self, tmp_env, capsys):
         console, _, loop = self._make_console(tmp_env)
-        console._dispatch_command("/dashboard")
+        with patch("webbrowser.open_new_tab"):
+            console._dispatch_command("/dashboard")
         captured = capsys.readouterr().out
         assert "127.0.0.1" in captured
-        assert "6667" in captured
+        assert str(run_golem.DASHBOARD_SAFE_DEFAULT_PORT) in captured
+        loop.close()
+
+    def test_private_message_command_targets_council_number(self, tmp_env, monkeypatch):
+        store = run_golem.ParamStore()
+        loop = asyncio.new_event_loop()
+        agents = [
+            SimpleNamespace(
+                agent_name="Aurora",
+                _initial_agent_name="Council-1",
+                interrupt_manager=InterruptManager(),
+                _conversation_paused=False,
+            ),
+            SimpleNamespace(
+                agent_name="Basil",
+                _initial_agent_name="Council-2",
+                interrupt_manager=InterruptManager(),
+                _conversation_paused=False,
+            ),
+        ]
+        console = run_golem.RuntimeConsole(
+            store=store,
+            loop_ref=None,
+            async_loop=loop,
+            agents=agents,
+            human_speaking_event=threading.Event(),
+            transient_pause_event=threading.Event(),
+        )
+
+        class _ImmediateFuture:
+            def result(self, timeout=None):
+                return None
+
+        def _run_sync(coro, async_loop):
+            async_loop.run_until_complete(coro)
+            return _ImmediateFuture()
+
+        monkeypatch.setattr(run_golem.asyncio, "run_coroutine_threadsafe", _run_sync)
+
+        console._dispatch_command("/a 2 hello there")
+
+        assert agents[0].interrupt_manager.has_messages() is False
+        assert agents[1].interrupt_manager.has_messages() is True
+        loop.close()
+
+    def test_bare_text_queues_one_natural_responder(self, tmp_env, monkeypatch):
+        store = run_golem.ParamStore()
+        loop = asyncio.new_event_loop()
+        agents = [
+            SimpleNamespace(
+                agent_name="Council-1",
+                _initial_agent_name="Council-1",
+                interrupt_manager=InterruptManager(),
+                _conversation_paused=False,
+            ),
+            SimpleNamespace(
+                agent_name="Council-2",
+                _initial_agent_name="Council-2",
+                interrupt_manager=InterruptManager(),
+                _conversation_paused=False,
+            ),
+        ]
+        bus = SimpleNamespace(floor_holder="Council-2", recommend_responder=lambda: "Council-1")
+        console = run_golem.RuntimeConsole(
+            store=store,
+            loop_ref=None,
+            async_loop=loop,
+            agents=agents,
+            bus=bus,
+            human_speaking_event=threading.Event(),
+            transient_pause_event=threading.Event(),
+        )
+
+        class _ImmediateFuture:
+            def result(self, timeout=None):
+                return None
+
+        def _run_sync(coro, async_loop):
+            async_loop.run_until_complete(coro)
+            return _ImmediateFuture()
+
+        monkeypatch.setattr(run_golem.asyncio, "run_coroutine_threadsafe", _run_sync)
+
+        console._cmd_message_all("join in")
+
+        assert agents[0].interrupt_manager.has_messages() is False
+        assert agents[1].interrupt_manager.has_messages() is True
+        assert all(agent._conversation_paused for agent in agents)
         loop.close()
 
     def test_status_without_agent(self, tmp_env, capsys):
@@ -446,6 +538,7 @@ class TestParamDefs:
             "/soul",
             "/logs",
             "/dashboard",
+            "/a",
             "/restart",
             "/quit",
             "/exit",
