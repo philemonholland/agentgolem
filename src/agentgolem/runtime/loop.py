@@ -1134,6 +1134,20 @@ class MainLoop:
             specs.extend(self._tool_registry.list_capabilities())
         return format_capability_summary(specs)
 
+    def _valid_capability_names(self) -> set[str]:
+        """Return the authoritative set of capability names the LLM may choose.
+
+        Built from the same sources as the prompt-facing summary — this is the
+        single source of truth for capability validation.
+        """
+        names: set[str] = set()
+        for spec in self._internal_capabilities():
+            names.add(spec.capability_name)
+        if self._tool_registry is not None:
+            for spec in self._tool_registry.list_capabilities():
+                names.add(spec.capability_name)
+        return names
+
     def _toolbox_enrichment_guidance(self) -> str:
         """Explain the safe path for extending the toolbox."""
         if self._tool_registry is not None:
@@ -4051,6 +4065,24 @@ class MainLoop:
         capability = choice.capability.strip()
         arguments = {key: str(value) for key, value in choice.arguments.items()}
 
+        # Validate against the authoritative capability registry
+        valid = self._valid_capability_names()
+        if capability not in valid:
+            self._emit("⚠️", f"Unknown capability: {capability}")
+            # Fallback: if the LLM hallucinated a capability but included a URL,
+            # redirect to browser.fetch_text so the intent isn't wasted.
+            url = arguments.get("url", "").strip()
+            if not url:
+                for val in arguments.values():
+                    v = str(val).strip()
+                    if v.startswith(("http://", "https://")):
+                        url = v
+                        break
+            if url:
+                self._emit("🔄", f"Redirecting to browser.fetch_text({url})")
+                await self._autonomous_browse(url)
+            return
+
         if capability == "think.private":
             topic = arguments.get("topic", "").strip()
             if not topic:
@@ -4146,21 +4178,6 @@ class MainLoop:
             else:
                 self._emit("❌", f"{capability} failed: {result.error}")
             return
-
-        self._emit("⚠️", f"Unknown capability: {capability}")
-        # Fallback: if the LLM hallucinated a capability but included a URL,
-        # redirect to browser.fetch_text so the intent isn't wasted.
-        url = arguments.get("url", "").strip()
-        if not url:
-            # Check if any argument value looks like a URL
-            for val in arguments.values():
-                v = str(val).strip()
-                if v.startswith(("http://", "https://")):
-                    url = v
-                    break
-        if url:
-            self._emit("🔄", f"Redirecting to browser.fetch_text({url})")
-            await self._autonomous_browse(url)
 
     async def _autonomous_browse(self, url: str) -> None:
         """Browse a URL, reflect on it, optionally share findings."""
@@ -4311,6 +4328,8 @@ class MainLoop:
         )
         memory_block = f"\n{memory_context}\n" if memory_context else ""
         toolbox_summary = self._toolbox_summary()
+        valid_names = sorted(self._valid_capability_names())
+        valid_names_str = ", ".join(valid_names)
         enrichment_guidance = self._toolbox_enrichment_guidance()
 
         # Consciousness kernel: compute attention directive
@@ -4341,9 +4360,9 @@ class MainLoop:
                             f"Recent:\n{recent}\n{memory_block}"
                             f"{consciousness_ctx}\n"
                             f"Available capabilities:\n{toolbox_summary}\n\n"
-                            f"Choose exactly one capability from the list above. "
-                            f"You MUST use one of the listed capability names exactly "
-                            f"as shown — do NOT invent new capability names. "
+                            f"VALID CAPABILITY NAMES: {valid_names_str}\n"
+                            f"You MUST set 'capability' to one of the names above. "
+                            f"Do NOT invent new names. "
                             f"To browse any website, use browser.fetch_text(url=...). "
                             f"Prefer concrete exploration over vague planning. "
                             f"Never choose a capability marked unavailable. Keep "
