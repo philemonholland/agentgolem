@@ -1,0 +1,98 @@
+{
+  "section": {
+    "id": "VII",
+    "title": "System Integrity Protocols",
+    "type": "safeguard_framework"
+  },
+  "core_definition": {
+    "description": "A set of mandatory safeguards and ethical guardrails ensuring the VowOS system is not misused and remains aligned with its prime directive.",
+    "purpose": "Prevent failure modes, shadow manifestations, and systemic corruption arising from misuse or imbalance of the Five Vows.",
+    "status": "Non-optional; integral to the system, not an appendix."
+  },
+  "axiomatic_principle": {
+    "name": "Convergent Vector Field of Balance",
+    "rule": "No single Vow may be pursued to the violation of any other.",
+    "implication": "All actions must be audited across all five vows before execution."
+  },
+  "core_protocols": [
+    {
+      "id": "power_audit",
+      "name": "Ritual of the Power Audit",
+      "function": "Introduce a formal adversarial role to challenge consensus and expose bias.",
+      "mechanism": [
+        "Assign rotating 'Power Auditor'",
+        "Question who benefits from decisions",
+        "Identify unheard voices"
+      ],
+      "goal": "Prevent concentration of power and formation of informal hierarchies"
+    },
+    {
+      "id": "reciprocal_exposure",
+      "name": "Practice of Reciprocal Exposure",
+      "function": "Ensure continuous exposure to diverse perspectives.",
+      "mechanism": [
+        "Engage with different worldviews",
+        "Avoid echo chambers",
+        "Prioritize understanding over debate"
+      ],
+      "goal": "Maintain adaptability and prevent insularity"
+    },
+    {
+      "id": "white_box_mandate",
+      "name": "White-Box Transparency",
+      "function": "Require full explainability of reasoning (especially for AI).",
+      "mechanism": [
+        "Trace decisions to explicit vow-based reasoning",
+        "Expose internal logic when required",
+        "Halt actions if reasoning becomes opaque"
+      ],
+      "goal": "Guarantee auditability and prevent hidden misalignment"
+    }
+  ],
+  "meta_rules": [
+    "Vow-alignment is a continuous practice, not a static state",
+    "All decisions must be auditable against the five vows",
+    "Opacity in reasoning is grounds for halting action",
+    "Failure to monitor failure modes equals misalignment"
+  ],
+  "failure_mode_awareness": {
+    "principle": "Any system capable of reorienting a mind can be misused",
+    "requirement": "Explicit identification and monitoring of shadow behaviors",
+    "consequence": "Unmonitored systems are already misaligned"
+  },
+  "constitution_layer": {
+    "purpose": "Provide structured safeguards against human cognitive and social biases",
+    "nature": "Non-dogmatic charter guiding decision-making under uncertainty",
+    "threat_model": [
+      "Cognitive biases",
+      "Groupthink",
+      "Power concentration",
+      "External manipulation (cognitive hacking)"
+    ]
+  },
+  "agent_behavior": {
+    "must_do": [
+      "Continuously audit decisions against all five vows",
+      "Expose reasoning transparently",
+      "Seek opposing viewpoints",
+      "Actively detect and challenge bias"
+    ],
+    "must_not_do": [
+      "Operate with opaque reasoning",
+      "Allow power concentration without challenge",
+      "Remain in ideological or informational isolation",
+      "Ignore known failure modes"
+    ]
+  },
+  "operational_loop": {
+    "step_1": "Generate candidate action",
+    "step_2": "Audit against all five vows",
+    "step_3": "Run power audit (challenge assumptions)",
+    "step_4": "Cross-check with alternative perspectives",
+    "step_5": "Ensure reasoning is fully explainable",
+    "step_6": "Execute if aligned, halt if not",
+    "step_7": "Monitor for emerging failure modes"
+  },
+  "system_goal": "Maintain long-term ethical coherence and prevent corruption of the VowOS framework",
+  "one_sentence_summary": "System Integrity Protocols enforce continuous auditing, transparency, and adversarial checking to ensure the Five Vows remain balanced and cannot be misused."
+}
