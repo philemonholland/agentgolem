@@ -167,6 +167,14 @@ class TrustAggregateMetrics(BaseModel):
     observed_reliable_rate: MetricSummary
 
 
+class TrustDeltaMetrics(BaseModel):
+    """Delta metrics where actual-vs-baseline differences are meaningful."""
+
+    brier_score: MetricSummary
+    expected_calibration_error: MetricSummary
+    average_prediction: MetricSummary
+
+
 class TrustCaseResult(BaseModel):
     """Per-case trust calibration outputs."""
 
@@ -185,7 +193,7 @@ class TrustBenchmarkReport(BaseModel):
     baseline_name: str
     actual: TrustAggregateMetrics
     baseline: TrustAggregateMetrics
-    delta: TrustAggregateMetrics
+    delta: TrustDeltaMetrics
     cases: list[TrustCaseResult]
 
 

@@ -24,6 +24,8 @@ from agentgolem.benchmarks.presets import (
 )
 from agentgolem.benchmarks.runner import (
     BenchmarkRunner,
+    _run_from_args,
+    build_parser,
     interpret_report,
     interpret_run_report,
     load_report,
@@ -257,6 +259,12 @@ async def test_run_target_directory_aggregates_multiple_suites(tmp_path):
     loaded = load_report(output_path)
     assert isinstance(loaded, BenchmarkRunReport)
     assert loaded.suite_count == 2
+
+
+async def test_run_from_args_rejects_conflicting_suite_and_preset() -> None:
+    args = build_parser().parse_args(["benchmarks\\sample_suite.json", "--preset", "robust"])
+    with pytest.raises(ValueError, match="Cannot specify both suite path and --preset"):
+        await _run_from_args(args)
 
 
 async def test_load_suite_reads_json_file(tmp_path):

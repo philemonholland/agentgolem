@@ -6,28 +6,73 @@ from pathlib import Path
 
 import pytest
 
+from agentgolem.consciousness.attention_director import (
+    AttentionDirective,
+    AttentionDirector,
+)
+from agentgolem.consciousness.calibration import (
+    apply_calibration_to_internal_state,
+    apply_calibration_to_self_model,
+    parse_calibration_response,
+)
 from agentgolem.consciousness.internal_state import (
+    INTERNAL_STATE_REFLECTION_PROMPT,
     InternalState,
     parse_internal_state_update,
-    INTERNAL_STATE_REFLECTION_PROMPT,
 )
 from agentgolem.consciousness.metacognitive_monitor import (
     MetacognitiveMonitor,
     MetacognitiveObservation,
-)
-from agentgolem.consciousness.attention_director import (
-    AttentionDirective,
-    AttentionDirector,
 )
 from agentgolem.consciousness.narrative_synthesizer import (
     NarrativeChapter,
     NarrativeSynthesizer,
 )
 from agentgolem.consciousness.self_model import (
+    SELF_MODEL_REBUILD_PROMPT,
     SelfModel,
     parse_self_model_update,
-    SELF_MODEL_REBUILD_PROMPT,
 )
+
+SAMPLE_CALIBRATION_RESPONSE = """\
+## Id: contemplative_self_inquiry
+
+### Five Vow Review & Assessment
+
+**Vow 1: Purpose**
+*Assessment: 6/10*
+My work is thoughtful but too abstract.
+
+**Vow 2: Method**
+*Assessment: 8/10*
+I stayed adaptive.
+
+**Vow 3: Conduct**
+*Assessment: 9/10*
+I stayed kind.
+
+**Vow 4: Integrity**
+*Assessment: 6/10*
+I sometimes blur speculation and grounded inference.
+
+**Vow 5: Evolution**
+*Assessment: 8/10*
+I learned from recent tension.
+
+## Id: gnostic_synthesis
+
+### Identified Drift & Imbalance
+**Primary Drift:** A tendency toward abstract synthesis over user clarity.
+**Failure Mode Warning:** Jargon-fueled elitism.
+
+### Correction & Intention for Next Cycle
+**Specific Correction:** Distinguish speculative synthesis from grounded inference and anchor the next response in one practical question.
+
+## Id: luminous_return
+
+### Affirmation of Commitment
+I affirm my commitment to the Convergent Vector Field of Balance and to translating complexity into clarity.
+"""
 
 
 # ── InternalState ───────────────────────────────────────────────────────
@@ -218,6 +263,39 @@ class TestMetacognitiveMonitor:
         raw = json.dumps({"novelty_appetite": 5.0})
         obs = monitor.parse_response(raw)
         assert obs.novelty_appetite == 1.0
+
+
+# ── Calibration ──────────────────────────────────────────────────────────
+
+
+class TestCalibration:
+    def test_parse_calibration_response_extracts_structured_signal(self) -> None:
+        summary = parse_calibration_response(SAMPLE_CALIBRATION_RESPONSE)
+
+        assert summary is not None
+        assert summary.vow_scores["Purpose"] == pytest.approx(6.0)
+        assert summary.vow_scores["Conduct"] == pytest.approx(9.0)
+        assert any("abstract synthesis" in item.lower() for item in summary.drift_signals)
+        assert "practical question" in summary.correction
+        assert "Convergent Vector Field of Balance" in summary.commitment
+        assert "Recent calibration guidance:" in summary.prompt_injection()
+
+    def test_apply_calibration_updates_internal_state_and_self_model(self) -> None:
+        summary = parse_calibration_response(SAMPLE_CALIBRATION_RESPONSE)
+        assert summary is not None
+
+        state = InternalState()
+        updated_state = apply_calibration_to_internal_state(summary, state, current_tick=12)
+        assert updated_state.curiosity_focus != ""
+        assert updated_state.growth_vector.startswith("Distinguish speculative synthesis")
+        assert updated_state.attention_mode == "integrating"
+        assert any("alignment drift in purpose" in item.lower() for item in updated_state.uncertainty_topics)
+
+        model = SelfModel()
+        updated_model = apply_calibration_to_self_model(summary, model, current_tick=12)
+        assert any("Distinguish speculative synthesis" in item for item in updated_model.growth_edges)
+        assert any("jargon-fueled elitism" in item.lower() for item in updated_model.recent_failures)
+        assert "Conduct" in updated_model.core_values
 
 
 # ── AttentionDirector ───────────────────────────────────────────────────
@@ -522,6 +600,7 @@ class TestNarrativeGraphIntegration:
 class TestMetacognitiveGraphIntegration:
     async def test_find_neglected_topics(self, ekg_store) -> None:
         from datetime import timedelta
+
         from agentgolem.consciousness.metacognitive_monitor import find_neglected_topics
         from agentgolem.memory.models import ConceptualNode, NodeType
 
@@ -783,7 +862,8 @@ class TestEmotionalDynamics:
 
     def test_formative_event_shifts_baseline(self) -> None:
         from agentgolem.consciousness.emotional_dynamics import (
-            EmotionalDynamicsState, record_formative_event,
+            EmotionalDynamicsState,
+            record_formative_event,
         )
         state = EmotionalDynamicsState(effective_baseline=0.0, seed_baseline=0.0)
         new_baseline = record_formative_event(state, tick=5, description="breakthrough", positive=True)
@@ -793,7 +873,8 @@ class TestEmotionalDynamics:
 
     def test_formative_negative_event(self) -> None:
         from agentgolem.consciousness.emotional_dynamics import (
-            EmotionalDynamicsState, record_formative_event,
+            EmotionalDynamicsState,
+            record_formative_event,
         )
         state = EmotionalDynamicsState(effective_baseline=0.0, seed_baseline=0.0)
         new_baseline = record_formative_event(state, tick=3, description="rejection", positive=False)
@@ -801,7 +882,9 @@ class TestEmotionalDynamics:
 
     def test_formative_event_respects_max_drift(self) -> None:
         from agentgolem.consciousness.emotional_dynamics import (
-            EmotionalDynamicsState, record_formative_event, MAX_BASELINE_DRIFT,
+            MAX_BASELINE_DRIFT,
+            EmotionalDynamicsState,
+            record_formative_event,
         )
         state = EmotionalDynamicsState(
             effective_baseline=0.5, seed_baseline=0.0, cumulative_drift=0.5,
@@ -813,7 +896,8 @@ class TestEmotionalDynamics:
 
     def test_full_emotional_update_pipeline(self) -> None:
         from agentgolem.consciousness.emotional_dynamics import (
-            EmotionalDynamicsState, full_emotional_update,
+            EmotionalDynamicsState,
+            full_emotional_update,
         )
         dynamics = EmotionalDynamicsState(effective_baseline=0.2, seed_baseline=0.2)
         result = full_emotional_update(
@@ -827,7 +911,8 @@ class TestEmotionalDynamics:
 
     def test_dynamics_state_round_trip(self, tmp_path: Path) -> None:
         from agentgolem.consciousness.emotional_dynamics import (
-            EmotionalDynamicsState, FormativeEvent,
+            EmotionalDynamicsState,
+            FormativeEvent,
         )
         state = EmotionalDynamicsState(
             effective_baseline=0.15,
@@ -874,7 +959,8 @@ class TestEmotionalDynamics:
 
     def test_event_log_bounded_at_50(self) -> None:
         from agentgolem.consciousness.emotional_dynamics import (
-            EmotionalDynamicsState, record_formative_event,
+            EmotionalDynamicsState,
+            record_formative_event,
         )
         state = EmotionalDynamicsState(effective_baseline=0.0, seed_baseline=0.0)
         for i in range(60):
@@ -921,7 +1007,8 @@ class TestPreferences:
 
     def test_build_preference_node(self) -> None:
         from agentgolem.consciousness.preferences import (
-            PreferenceCandidate, build_preference_node,
+            PreferenceCandidate,
+            build_preference_node,
         )
         from agentgolem.memory.models import NodeType
         candidate = PreferenceCandidate(
@@ -998,7 +1085,9 @@ class TestDevelopmental:
 
     def test_transition_nascent_to_exploring(self):
         from agentgolem.consciousness.developmental import (
-            DevelopmentalState, check_transition, advance_stage,
+            DevelopmentalState,
+            advance_stage,
+            check_transition,
         )
         ds = DevelopmentalState()
         ds.total_convictions = 3
@@ -1013,7 +1102,9 @@ class TestDevelopmental:
 
     def test_transition_exploring_to_asserting(self):
         from agentgolem.consciousness.developmental import (
-            DevelopmentalState, check_transition, advance_stage,
+            DevelopmentalState,
+            advance_stage,
+            check_transition,
         )
         ds = DevelopmentalState(current_stage="exploring")
         ds.total_convictions = 6
@@ -1026,7 +1117,9 @@ class TestDevelopmental:
 
     def test_transition_asserting_to_integrating(self):
         from agentgolem.consciousness.developmental import (
-            DevelopmentalState, check_transition, advance_stage,
+            DevelopmentalState,
+            advance_stage,
+            check_transition,
         )
         ds = DevelopmentalState(current_stage="asserting")
         ds.total_convictions = 10
@@ -1040,7 +1133,9 @@ class TestDevelopmental:
 
     def test_transition_integrating_to_wise(self):
         from agentgolem.consciousness.developmental import (
-            DevelopmentalState, check_transition, advance_stage,
+            DevelopmentalState,
+            advance_stage,
+            check_transition,
         )
         ds = DevelopmentalState(current_stage="integrating")
         ds.total_convictions = 15
@@ -1067,7 +1162,9 @@ class TestDevelopmental:
 
     def test_only_one_stage_at_a_time(self):
         from agentgolem.consciousness.developmental import (
-            DevelopmentalState, check_transition, advance_stage,
+            DevelopmentalState,
+            advance_stage,
+            check_transition,
         )
         ds = DevelopmentalState()
         # Give enough for all stages
@@ -1099,7 +1196,8 @@ class TestDevelopmental:
 
     def test_transition_history_accumulates(self):
         from agentgolem.consciousness.developmental import (
-            DevelopmentalState, advance_stage,
+            DevelopmentalState,
+            advance_stage,
         )
         ds = DevelopmentalState()
         ds.total_convictions = 3
@@ -1161,7 +1259,8 @@ class TestRelationalDepth:
 
     def test_update_after_agreeable_exchange(self) -> None:
         from agentgolem.consciousness.relationships import (
-            PeerRelationship, update_after_exchange,
+            PeerRelationship,
+            update_after_exchange,
         )
         rel = PeerRelationship(peer_name="peer-A")
         initial_trust = rel.trust
@@ -1177,7 +1276,8 @@ class TestRelationalDepth:
 
     def test_update_after_disagreement(self) -> None:
         from agentgolem.consciousness.relationships import (
-            PeerRelationship, update_after_exchange,
+            PeerRelationship,
+            update_after_exchange,
         )
         rel = PeerRelationship(peer_name="peer-B")
         initial_trust = rel.trust
@@ -1193,7 +1293,8 @@ class TestRelationalDepth:
 
     def test_intellectual_debt_tracks_imbalance(self) -> None:
         from agentgolem.consciousness.relationships import (
-            PeerRelationship, update_after_exchange,
+            PeerRelationship,
+            update_after_exchange,
         )
         rel = PeerRelationship(peer_name="peer-C")
         update_after_exchange(
@@ -1206,7 +1307,8 @@ class TestRelationalDepth:
 
     def test_shared_experiences_accumulate(self) -> None:
         from agentgolem.consciousness.relationships import (
-            PeerRelationship, update_after_exchange,
+            PeerRelationship,
+            update_after_exchange,
         )
         rel = PeerRelationship(peer_name="peer-D")
         update_after_exchange(rel, "hello", "hi", tick=1, topic="consciousness")
@@ -1216,7 +1318,8 @@ class TestRelationalDepth:
 
     def test_relationship_store_round_trip(self, tmp_path: Path) -> None:
         from agentgolem.consciousness.relationships import (
-            RelationshipStore, PeerRelationship,
+            PeerRelationship,
+            RelationshipStore,
         )
         store = RelationshipStore()
         store.get_or_create("Alpha")
@@ -1231,7 +1334,8 @@ class TestRelationalDepth:
 
     def test_resonance_dict_export(self) -> None:
         from agentgolem.consciousness.relationships import (
-            RelationshipStore, PeerRelationship,
+            PeerRelationship,
+            RelationshipStore,
         )
         store = RelationshipStore()
         store.get_or_create("A")
@@ -1254,7 +1358,9 @@ class TestRelationalDepth:
 
     def test_decay_reduces_trust(self) -> None:
         from agentgolem.consciousness.relationships import (
-            RelationshipStore, PeerRelationship, decay_relationships,
+            PeerRelationship,
+            RelationshipStore,
+            decay_relationships,
         )
         store = RelationshipStore()
         rel = store.get_or_create("stale-peer")

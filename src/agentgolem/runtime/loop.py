@@ -18,6 +18,12 @@ import yaml
 from pydantic import BaseModel, Field, SecretStr
 
 from agentgolem.config.settings import Settings
+from agentgolem.consciousness.calibration import (
+    CalibrationSummary,
+    apply_calibration_to_internal_state,
+    apply_calibration_to_self_model,
+    parse_calibration_response,
+)
 from agentgolem.identity.heartbeat import HeartbeatManager, HeartbeatSummary
 from agentgolem.identity.soul import SoulManager, SoulUpdate
 from agentgolem.llm.base import Message
@@ -349,6 +355,7 @@ class MainLoop:
         self._vow_foundation_stage = 0
         self._vow_foundation_complete = False
         self._last_calibration_tick: datetime | None = None
+        self._last_calibration_summary: CalibrationSummary | None = None
 
         # Legacy NJ reading state (kept for reference / web browsing)
         self._niscalajyoti_reading_complete = False
@@ -498,9 +505,9 @@ class MainLoop:
 
     def _init_consciousness_kernel(self, settings: Settings) -> None:
         """Initialise the five pillars of the consciousness kernel."""
+        from agentgolem.consciousness.attention_director import AttentionDirector
         from agentgolem.consciousness.internal_state import InternalState
         from agentgolem.consciousness.metacognitive_monitor import MetacognitiveMonitor
-        from agentgolem.consciousness.attention_director import AttentionDirector
         from agentgolem.consciousness.narrative_synthesizer import NarrativeSynthesizer
         from agentgolem.consciousness.self_model import SelfModel
         from agentgolem.consciousness.temperament import Temperament, seed_temperament
@@ -1436,6 +1443,11 @@ class MainLoop:
             if state_summary:
                 parts.append(f"Current felt sense: {state_summary}")
 
+        if self._last_calibration_summary is not None:
+            calibration_guidance = self._last_calibration_summary.prompt_injection()
+            if calibration_guidance:
+                parts.append(calibration_guidance)
+
         # Desires (synthesized drives)
         desires = self._build_identity_desires()
         if desires:
@@ -2263,6 +2275,9 @@ class MainLoop:
                 ts = data.get("last_calibration")
                 if ts:
                     self._last_calibration_tick = datetime.fromisoformat(ts)
+                summary = data.get("last_calibration_summary")
+                if isinstance(summary, dict):
+                    self._last_calibration_summary = CalibrationSummary.from_dict(summary)
             except Exception:
                 pass
 
@@ -2274,6 +2289,12 @@ class MainLoop:
             "last_calibration": (
                 self._last_calibration_tick.isoformat()
                 if self._last_calibration_tick else None
+            ),
+            "last_calibration_summary": (
+                self._last_calibration_summary.to_dict()
+                if self._last_calibration_summary is not None
+                and self._last_calibration_summary.has_signal()
+                else None
             ),
         }
         self._vow_state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2533,11 +2554,14 @@ class MainLoop:
                 self._source_prompt_messages(prompt)
             )
             self._emit("🔄", f"Calibration result:\n{response}")
-            self._recent_thoughts.append(
-                f"VowOS Calibration: {response[:300]}"
-            )
+            summary = parse_calibration_response(response)
+            if summary is not None:
+                await self._apply_calibration_summary(summary, response)
+
+            memory_text = self._format_calibration_memory(response, summary)
+            self._recent_thoughts.append(f"VowOS Calibration: {memory_text[:300]}")
             await self._encode_to_memory(
-                f"VowOS Calibration Protocol self-audit:\n{response}",
+                memory_text,
                 source_kind="inference",
                 origin="calibration_protocol",
                 label="VowOS Calibration",
@@ -2552,6 +2576,182 @@ class MainLoop:
 
         self._last_calibration_tick = datetime.now(UTC)
         self._save_vow_foundation_state()
+
+    def _format_calibration_memory(
+        self,
+        response: str,
+        summary: CalibrationSummary | None,
+    ) -> str:
+        """Render a calibration memory entry with structured highlights."""
+        lines = [
+            "VowOS Calibration Protocol self-audit:",
+            response,
+        ]
+        if summary is None:
+            return "\n".join(lines)
+
+        lines.extend(["", "Structured calibration summary:"])
+        if summary.vow_scores:
+            rendered_scores = ", ".join(
+                f"{name}={score:.1f}/10" for name, score in summary.vow_scores.items()
+            )
+            lines.append(f"- Vow scores: {rendered_scores}")
+        for drift in summary.drift_signals[:3]:
+            lines.append(f"- Drift to watch: {drift}")
+        if summary.correction:
+            lines.append(f"- Correction for next cycle: {summary.correction}")
+        if summary.commitment:
+            lines.append(f"- Commitment: {summary.commitment}")
+        return "\n".join(lines)
+
+    async def _apply_calibration_summary(
+        self,
+        summary: CalibrationSummary,
+        raw_response: str,
+    ) -> None:
+        """Make calibration structurally affect self-state and memory."""
+        tick = self._consciousness_tick_counter
+        self._last_calibration_summary = summary
+
+        self._internal_state = apply_calibration_to_internal_state(
+            summary,
+            self._internal_state,
+            tick,
+        )
+        if self._internal_state.curiosity_focus:
+            self._recent_curiosity_focuses.append(self._internal_state.curiosity_focus)
+            self._recent_curiosity_focuses = self._recent_curiosity_focuses[-15:]
+        if self._internal_state.growth_vector:
+            self._recent_growth_vectors.append(self._internal_state.growth_vector)
+            self._recent_growth_vectors = self._recent_growth_vectors[-10:]
+        self._internal_state.save(self._internal_state_path)
+
+        self._self_model = apply_calibration_to_self_model(
+            summary,
+            self._self_model,
+            tick,
+        )
+        self._self_model.save(self._self_model_path)
+
+        if summary.correction:
+            self._recent_thoughts.append(f"Calibration correction: {summary.correction[:200]}")
+        if summary.drift_signals:
+            self._recent_thoughts.append(f"Calibration warning: {summary.drift_signals[0][:200]}")
+        self._recent_thoughts = self._recent_thoughts[-50:]
+
+        await self._persist_calibration_graph(summary, raw_response)
+
+    async def _persist_calibration_graph(
+        self,
+        summary: CalibrationSummary,
+        raw_response: str,
+    ) -> None:
+        """Persist explicit calibration-derived goal/risk/identity nodes."""
+        if self._memory_store is None:
+            return
+
+        from agentgolem.memory.models import (
+            ConceptualNode,
+            EdgeType,
+            MemoryEdge,
+            NodeType,
+            Source,
+            SourceKind,
+        )
+
+        source = Source(
+            kind=SourceKind.INFERENCE,
+            origin=f"calibration_protocol/{self.agent_name}",
+            reliability=0.82,
+            raw_reference=raw_response[:4000],
+        )
+        source_id = await self._memory_store.add_source(source)
+
+        async def add_node(node: ConceptualNode) -> str:
+            node_id = await self._memory_store.add_node(node)
+            await self._memory_store.link_node_source(node_id, source_id)
+            return node_id
+
+        identity_node_id = ""
+        if summary.commitment:
+            identity_node_id = await add_node(
+                ConceptualNode(
+                    text=f"Calibration commitment: {summary.commitment}",
+                    type=NodeType.IDENTITY,
+                    search_text=(
+                        f"{self.agent_name}, calibration, commitment, "
+                        f"{', '.join(summary.vow_scores.keys())}"
+                    ),
+                    base_usefulness=0.8,
+                    trustworthiness=0.82,
+                    salience=0.78,
+                    emotion_label="reflective",
+                    emotion_score=0.2,
+                )
+            )
+
+        goal_node_id = ""
+        if summary.correction:
+            goal_node_id = await add_node(
+                ConceptualNode(
+                    text=f"Calibration correction: {summary.correction}",
+                    type=NodeType.GOAL,
+                    search_text=f"{self.agent_name}, calibration, correction",
+                    base_usefulness=0.85,
+                    trustworthiness=0.82,
+                    salience=0.88,
+                    emotion_label="reflective",
+                    emotion_score=0.1,
+                )
+            )
+
+        risk_ids: list[str] = []
+        for drift in summary.drift_signals[:2]:
+            risk_ids.append(
+                await add_node(
+                    ConceptualNode(
+                        text=f"Calibration risk: {drift}",
+                        type=NodeType.RISK,
+                        search_text=f"{self.agent_name}, calibration, risk",
+                        base_usefulness=0.78,
+                        trustworthiness=0.8,
+                        salience=0.84,
+                        emotion_label="painful",
+                        emotion_score=-0.45,
+                    )
+                )
+            )
+
+        if goal_node_id and identity_node_id:
+            await self._memory_store.add_edge(
+                MemoryEdge(
+                    source_id=goal_node_id,
+                    target_id=identity_node_id,
+                    edge_type=EdgeType.SUPPORTS,
+                    weight=0.9,
+                )
+            )
+        for risk_id in risk_ids:
+            if goal_node_id:
+                await self._memory_store.add_edge(
+                    MemoryEdge(
+                        source_id=risk_id,
+                        target_id=goal_node_id,
+                        edge_type=EdgeType.RELATED_TO,
+                        weight=0.8,
+                    )
+                )
+            elif identity_node_id:
+                await self._memory_store.add_edge(
+                    MemoryEdge(
+                        source_id=risk_id,
+                        target_id=identity_node_id,
+                        edge_type=EdgeType.RELATED_TO,
+                        weight=0.8,
+                    )
+                )
+
+        self._shared_memory_export_dirty = True
 
     # ------------------------------------------------------------------
     # Niscalajyoti chapter-by-chapter reading (legacy — kept for reference)
@@ -5219,14 +5419,14 @@ class MainLoop:
 
     async def _update_internal_state(self, tick: int) -> None:
         """Pillar 3 — fast LLM reflection to update the felt-sense state."""
+        from agentgolem.consciousness.emotional_dynamics import (
+            detect_formative_event,
+            full_emotional_update,
+            record_formative_event,
+        )
         from agentgolem.consciousness.internal_state import (
             INTERNAL_STATE_REFLECTION_PROMPT,
             parse_internal_state_update,
-        )
-        from agentgolem.consciousness.emotional_dynamics import (
-            full_emotional_update,
-            detect_formative_event,
-            record_formative_event,
         )
 
         try:
@@ -5422,10 +5622,10 @@ class MainLoop:
     async def _refresh_preferences(self, tick: int) -> None:
         """Crystallize new preferences from patterns and refresh the cache."""
         from agentgolem.consciousness.preferences import (
-            detect_preference_candidates,
             build_preference_node,
-            retrieve_top_preferences,
+            detect_preference_candidates,
             format_preferences_for_prompt,
+            retrieve_top_preferences,
         )
 
         try:
@@ -5495,8 +5695,8 @@ class MainLoop:
     async def _check_developmental_transition(self, tick: int) -> None:
         """Check if the agent should advance to the next developmental stage."""
         from agentgolem.consciousness.developmental import (
-            check_transition,
             advance_stage,
+            check_transition,
             stage_badge,
         )
 

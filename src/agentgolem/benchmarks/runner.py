@@ -42,6 +42,7 @@ from agentgolem.benchmarks.models import (
     TrustAggregateMetrics,
     TrustBenchmarkReport,
     TrustCaseResult,
+    TrustDeltaMetrics,
 )
 from agentgolem.benchmarks.presets import load_preset_suites
 from agentgolem.config.secrets import Secrets
@@ -527,7 +528,6 @@ class BenchmarkRunner:
                 actual_points,
                 baseline_points,
                 paired_deltas(actual_predictions, baseline_predictions),
-                paired_deltas(observed_values, observed_values),
                 seed_offset=60,
             ),
             cases=case_results,
@@ -740,11 +740,10 @@ class BenchmarkRunner:
         actual_points: list[CalibrationPoint],
         baseline_points: list[CalibrationPoint],
         prediction_deltas: list[float],
-        observed_deltas: list[float],
         *,
         seed_offset: int,
-    ) -> TrustAggregateMetrics:
-        return TrustAggregateMetrics(
+    ) -> TrustDeltaMetrics:
+        return TrustDeltaMetrics(
             brier_score=self._paired_statistic_metric_summary(
                 actual_points,
                 baseline_points,
@@ -759,9 +758,6 @@ class BenchmarkRunner:
             ),
             average_prediction=self._metric_summary(
                 prediction_deltas, seed_offset=seed_offset + 3
-            ),
-            observed_reliable_rate=self._metric_summary(
-                observed_deltas, seed_offset=seed_offset + 4
             ),
         )
 
@@ -900,6 +896,8 @@ def write_report(payload: ReportPayload, path: Path) -> None:
 
 
 async def _run_from_args(args: argparse.Namespace) -> int:
+    if args.preset and args.suite is not None:
+        raise ValueError("Cannot specify both suite path and --preset.")
     if args.preset:
         payload = await run_preset(args.preset, run_label=args.label)
     elif args.suite is not None:

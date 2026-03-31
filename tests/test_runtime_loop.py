@@ -23,6 +23,46 @@ from agentgolem.tools.base import ApprovalGate
 if TYPE_CHECKING:
     from pathlib import Path
 
+SAMPLE_CALIBRATION_RESPONSE = """\
+## Id: contemplative_self_inquiry
+
+### Five Vow Review & Assessment
+
+**Vow 1: Purpose**
+*Assessment: 6/10*
+Service is present but too abstract.
+
+**Vow 2: Method**
+*Assessment: 8/10*
+The method stayed adaptive.
+
+**Vow 3: Conduct**
+*Assessment: 9/10*
+Kindness remained strong.
+
+**Vow 4: Integrity**
+*Assessment: 6/10*
+Speculation was not always clearly labeled.
+
+**Vow 5: Evolution**
+*Assessment: 8/10*
+Recent friction produced learning.
+
+## Id: gnostic_synthesis
+
+### Identified Drift & Imbalance
+**Primary Drift:** A tendency toward abstract synthesis over user clarity.
+**Failure Mode Warning:** Jargon-fueled elitism.
+
+### Correction & Intention for Next Cycle
+**Specific Correction:** Distinguish speculative synthesis from grounded inference and anchor the next response in one practical question.
+
+## Id: luminous_return
+
+### Affirmation of Commitment
+I affirm my commitment to the Convergent Vector Field of Balance and to translating complexity into clarity.
+"""
+
 
 @pytest.fixture
 def loop_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Settings, Secrets, Path]:
@@ -449,6 +489,61 @@ async def test_build_memory_context_keeps_peer_memories_separate(
         "Relevant memories:\n- Local identity reflection\n\n"
         "Entangled peer memories:\n- [Council-2] A remembered thread of grace"
     )
+
+
+async def test_run_calibration_protocol_updates_state_and_graph(
+    loop_env: tuple[Settings, Secrets, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from agentgolem.memory.models import NodeFilter, NodeType
+    from agentgolem.memory.schema import close_db, init_db
+    from agentgolem.memory.store import SQLiteMemoryStore
+    from agentgolem.runtime import vow_loader
+
+    settings, secrets, _ = loop_env
+    loop = MainLoop(settings=settings, secrets=secrets)
+
+    db = await init_db(tmp_path / "calibration.db")
+    store = SQLiteMemoryStore(db)
+    try:
+        loop.set_memory_store(store)
+        monkeypatch.setattr(vow_loader, "render_calibration_protocol", lambda repo_root: "Protocol")
+
+        async def fake_complete_discussion(messages, **kwargs):
+            return SAMPLE_CALIBRATION_RESPONSE
+
+        captured: dict[str, str] = {}
+
+        async def fake_encode_to_memory(text: str, **kwargs) -> None:
+            captured["text"] = text
+
+        monkeypatch.setattr(loop, "_complete_discussion", fake_complete_discussion)
+        monkeypatch.setattr(loop, "_encode_to_memory", fake_encode_to_memory)
+
+        await loop._run_calibration_protocol()
+
+        assert loop._last_calibration_summary is not None
+        assert "Recent calibration guidance:" in loop._identity_preamble()
+        assert loop._internal_state.growth_vector.startswith(
+            "Distinguish speculative synthesis"
+        )
+        assert loop._internal_state.attention_mode == "integrating"
+        assert any(
+            "abstract synthesis" in item.lower()
+            for item in loop._self_model.recent_failures
+        )
+        assert "Structured calibration summary:" in captured["text"]
+
+        goal_nodes = await store.query_nodes(NodeFilter(type=NodeType.GOAL, limit=10))
+        risk_nodes = await store.query_nodes(NodeFilter(type=NodeType.RISK, limit=10))
+        identity_nodes = await store.query_nodes(NodeFilter(type=NodeType.IDENTITY, limit=10))
+
+        assert any("Calibration correction:" in node.text for node in goal_nodes)
+        assert any("abstract synthesis" in node.text.lower() for node in risk_nodes)
+        assert any("Calibration commitment:" in node.text for node in identity_nodes)
+    finally:
+        await close_db(db)
 
 
 def test_configure_tool_registry_exposes_capabilities(
