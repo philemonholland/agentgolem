@@ -26,19 +26,22 @@ def format_report_comparison(report_paths: list[Path]) -> str:
         rows = sorted(grouped[suite_name], key=_comparison_sort_key)
         for label, report in rows:
             retrieval = (
-                f"retrieval_mrr={report.retrieval.actual.mean_reciprocal_rank:.3f}"
+                f"retrieval_mrr={report.retrieval.actual.mean_reciprocal_rank.value:.3f}, "
+                f"retrieval_delta_mrr={report.retrieval.delta.mean_reciprocal_rank.value:.3f}"
                 if report.retrieval is not None
-                else "retrieval_mrr=n/a"
+                else "retrieval_mrr=n/a, retrieval_delta_mrr=n/a"
             )
             trust = (
-                f"trust_brier={report.trust.actual.brier_score:.3f}"
+                f"trust_brier={report.trust.actual.brier_score.value:.3f}, "
+                f"trust_delta_brier={report.trust.delta.brier_score.value:.3f}"
                 if report.trust is not None
-                else "trust_brier=n/a"
+                else "trust_brier=n/a, trust_delta_brier=n/a"
             )
             error_recovery = (
-                f"error_recovery_accuracy={report.error_recovery.actual.accuracy:.3f}"
+                f"error_recovery_accuracy={report.error_recovery.actual.accuracy.value:.3f}, "
+                f"error_recovery_delta_accuracy={report.error_recovery.delta.accuracy.value:.3f}"
                 if report.error_recovery is not None
-                else "error_recovery_accuracy=n/a"
+                else "error_recovery_accuracy=n/a, error_recovery_delta_accuracy=n/a"
             )
             lines.append(
                 f"- {label}: overall={report.overall_status.value}, "
@@ -83,9 +86,11 @@ def _flatten_reports(payload: BenchmarkReport | BenchmarkRunReport) -> list[Benc
 def _comparison_sort_key(item: tuple[str, BenchmarkReport]) -> tuple[int, float, float, str]:
     label, report = item
     retrieval_mrr = (
-        report.retrieval.actual.mean_reciprocal_rank if report.retrieval is not None else -1.0
+        report.retrieval.actual.mean_reciprocal_rank.value
+        if report.retrieval is not None
+        else -1.0
     )
-    trust_brier = report.trust.actual.brier_score if report.trust is not None else 999.0
+    trust_brier = report.trust.actual.brier_score.value if report.trust is not None else 999.0
     return (_status_rank(report.overall_status), -retrieval_mrr, trust_brier, label)
 
 

@@ -63,6 +63,15 @@ class BenchmarkEdgeSpec(BaseModel):
     weight: float = 1.0
 
 
+class MetricSummary(BaseModel):
+    """Point estimate with an optional confidence interval."""
+
+    value: float
+    ci_lower: float | None = None
+    ci_upper: float | None = None
+    confidence_level: float | None = None
+
+
 class RetrievalBenchmarkCase(BaseModel):
     """A query with a labeled relevant set."""
 
@@ -70,6 +79,7 @@ class RetrievalBenchmarkCase(BaseModel):
     query: str
     relevant_node_ids: list[str]
     top_k: int = 5
+    tags: list[str] = Field(default_factory=list)
 
 
 class TrustCalibrationCase(BaseModel):
@@ -78,6 +88,7 @@ class TrustCalibrationCase(BaseModel):
     id: str
     node_id: str
     expected_reliable: bool
+    tags: list[str] = Field(default_factory=list)
 
 
 class ErrorRecoveryBenchmarkCase(BaseModel):
@@ -89,7 +100,9 @@ class ErrorRecoveryBenchmarkCase(BaseModel):
     expected_success: bool
     status_code: int | None = None
     html: str = ""
+    fetch_error: str = ""
     known_urls: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
 
 
 class BenchmarkSuite(BaseModel):
@@ -103,14 +116,17 @@ class BenchmarkSuite(BaseModel):
     retrieval_cases: list[RetrievalBenchmarkCase] = Field(default_factory=list)
     trust_cases: list[TrustCalibrationCase] = Field(default_factory=list)
     error_recovery_cases: list[ErrorRecoveryBenchmarkCase] = Field(default_factory=list)
+    bootstrap_resamples: int = 1000
+    bootstrap_seed: int = 0
+    confidence_level: float = 0.95
 
 
 class RetrievalAggregateMetrics(BaseModel):
     """Aggregate retrieval metrics across all retrieval cases."""
 
-    mean_reciprocal_rank: float
-    mean_precision_at_k: float
-    mean_ndcg_at_k: float
+    mean_reciprocal_rank: MetricSummary
+    mean_precision_at_k: MetricSummary
+    mean_ndcg_at_k: MetricSummary
 
 
 class RetrievalCaseResult(BaseModel):
@@ -120,6 +136,7 @@ class RetrievalCaseResult(BaseModel):
     query: str
     top_k: int
     relevant_node_ids: list[str]
+    tags: list[str]
     retrieved_node_ids: list[str]
     baseline_retrieved_node_ids: list[str]
     reciprocal_rank: float
@@ -134,18 +151,20 @@ class RetrievalBenchmarkReport(BaseModel):
     """Retrieval benchmark summary."""
 
     case_count: int
+    baseline_name: str
     actual: RetrievalAggregateMetrics
     baseline: RetrievalAggregateMetrics
+    delta: RetrievalAggregateMetrics
     cases: list[RetrievalCaseResult]
 
 
 class TrustAggregateMetrics(BaseModel):
     """Aggregate trust calibration metrics."""
 
-    brier_score: float
-    expected_calibration_error: float
-    average_prediction: float
-    observed_reliable_rate: float
+    brier_score: MetricSummary
+    expected_calibration_error: MetricSummary
+    average_prediction: MetricSummary
+    observed_reliable_rate: MetricSummary
 
 
 class TrustCaseResult(BaseModel):
@@ -153,6 +172,7 @@ class TrustCaseResult(BaseModel):
 
     case_id: str
     node_id: str
+    tags: list[str]
     prediction: float
     baseline_prediction: float
     expected_reliable: bool
@@ -162,17 +182,19 @@ class TrustBenchmarkReport(BaseModel):
     """Trust calibration benchmark summary."""
 
     case_count: int
+    baseline_name: str
     actual: TrustAggregateMetrics
-    constant_baseline: TrustAggregateMetrics
+    baseline: TrustAggregateMetrics
+    delta: TrustAggregateMetrics
     cases: list[TrustCaseResult]
 
 
 class ErrorRecoveryAggregateMetrics(BaseModel):
     """Aggregate error-recovery metrics."""
 
-    accuracy: float
-    expected_failure_handling_rate: float
-    expected_recovery_rate: float
+    accuracy: MetricSummary
+    expected_failure_handling_rate: MetricSummary
+    expected_recovery_rate: MetricSummary
 
 
 class ErrorRecoveryCaseResult(BaseModel):
@@ -181,6 +203,7 @@ class ErrorRecoveryCaseResult(BaseModel):
     case_id: str
     scenario: ErrorRecoveryScenario
     url: str
+    tags: list[str]
     expected_success: bool
     actual_success: bool
     baseline_success: bool
@@ -192,8 +215,10 @@ class ErrorRecoveryBenchmarkReport(BaseModel):
     """Error recovery benchmark summary."""
 
     case_count: int
+    baseline_name: str
     actual: ErrorRecoveryAggregateMetrics
     baseline: ErrorRecoveryAggregateMetrics
+    delta: ErrorRecoveryAggregateMetrics
     cases: list[ErrorRecoveryCaseResult]
 
 

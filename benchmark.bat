@@ -14,8 +14,8 @@ if exist ".venv\Scripts\activate.bat" (
 
 echo.
 if "%~1"=="" (
-    echo Running benchmark suite directory...
-    python -m agentgolem.benchmarks benchmarks --output data\benchmarks\latest_run.json --interpret
+    echo Running robust benchmark preset...
+    python -m agentgolem.benchmarks --preset robust --output data\benchmarks\latest_run.json --interpret
 ) else (
     echo Running benchmark target: %~1
     python -m agentgolem.benchmarks %* --interpret

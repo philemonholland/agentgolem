@@ -229,10 +229,11 @@ The test suite covers the full runtime, memory, trust, sleep, and tooling stack.
 
 ## Benchmarking
 
-Run the offline benchmark harness against a labeled JSON suite:
+Run the offline benchmark harness against the robust preset or a labeled JSON suite:
 
 ```powershell
 benchmark.bat
+python -m agentgolem.benchmarks --preset robust
 python -m agentgolem.benchmarks benchmarks
 python -m agentgolem.benchmarks benchmarks --output data\benchmarks\latest_run.json --interpret
 python -m agentgolem.benchmarks benchmarks --output data\benchmarks\gpt-5.4.json --label gpt-5.4
@@ -240,13 +241,22 @@ python -m agentgolem.benchmarks benchmarks --output data\benchmarks\claude-sonne
 python -m agentgolem.benchmarks.compare data\benchmarks\gpt-5.4.json data\benchmarks\claude-sonnet-4.6.json
 ```
 
-The current harness benchmarks retrieval ranking, trust calibration, and
-deterministic error recovery against simple baselines so you can measure whether
-the architecture is helping or just adding complexity.
+`benchmark.bat` now runs the deterministic `robust` preset by default. That
+preset currently includes:
 
-Current suites are still mostly memory/trust/recovery focused, so cross-model
-comparison becomes more meaningful as autonomy, dialogue, and tool-use benchmark
-tracks are added.
+- retrieval depth with `60` hard cases, larger candidate pools, multiple
+  relevant items, adversarial near-duplicates, and a trust-blind
+  `lexical_salience_no_trust` baseline;
+- trust calibration depth with `120` imbalanced cases and a stronger
+  `source_reliability_prior` baseline;
+- deterministic error recovery depth with `60` cases covering HTTP failures,
+  timeout-style failures, discovered URLs, guessed URLs, and near-match traps.
+
+Reports now include bootstrap confidence intervals and delta-vs-baseline
+summaries so you can see whether a gain looks robust or just noisy.
+
+The older JSON suites in `benchmarks\` still work and are useful as smoke tests
+or custom experiments, but they are no longer the default “real benchmark” path.
 
 For the suite format and planned extensions, see
 **[docs/benchmarking.md](docs/benchmarking.md)**.

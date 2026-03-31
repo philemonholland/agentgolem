@@ -16,12 +16,19 @@ from agentgolem.benchmarks.models import (
     RetrievalBenchmarkCase,
     TrustCalibrationCase,
 )
+from agentgolem.benchmarks.presets import (
+    build_robust_error_recovery_suite,
+    build_robust_retrieval_suite,
+    build_robust_trust_suite,
+    load_preset_suites,
+)
 from agentgolem.benchmarks.runner import (
     BenchmarkRunner,
     interpret_report,
     interpret_run_report,
     load_report,
     load_suite,
+    run_preset,
     run_target,
     write_report,
 )
@@ -37,13 +44,13 @@ def _suite() -> BenchmarkSuite:
                 id="trusted-human",
                 kind=SourceKind.HUMAN,
                 origin="operator",
-                reliability=0.95,
+                reliability=0.88,
             ),
             BenchmarkSourceSpec(
                 id="shaky-web",
                 kind=SourceKind.WEB,
                 origin="unknown-blog",
-                reliability=0.2,
+                reliability=0.28,
             ),
         ],
         nodes=[
@@ -53,7 +60,7 @@ def _suite() -> BenchmarkSuite:
                 search_text="python typing async",
                 type=NodeType.FACT,
                 base_usefulness=0.9,
-                trustworthiness=0.9,
+                trustworthiness=0.96,
                 salience=0.4,
                 source_ids=["trusted-human"],
             ),
@@ -63,7 +70,7 @@ def _suite() -> BenchmarkSuite:
                 search_text="python typing async",
                 type=NodeType.INTERPRETATION,
                 base_usefulness=0.2,
-                trustworthiness=0.2,
+                trustworthiness=0.05,
                 salience=0.95,
                 source_ids=["shaky-web"],
             ),
@@ -73,7 +80,7 @@ def _suite() -> BenchmarkSuite:
                 search_text="rust memory safety",
                 type=NodeType.FACT,
                 base_usefulness=0.85,
-                trustworthiness=0.85,
+                trustworthiness=0.92,
                 salience=0.45,
                 source_ids=["trusted-human"],
             ),
@@ -83,7 +90,7 @@ def _suite() -> BenchmarkSuite:
                 search_text="rust memory safety",
                 type=NodeType.INTERPRETATION,
                 base_usefulness=0.15,
-                trustworthiness=0.15,
+                trustworthiness=0.08,
                 salience=0.9,
                 source_ids=["shaky-web"],
             ),
@@ -171,19 +178,22 @@ async def test_benchmark_runner_scores_against_baselines(tmp_path):
     report = await runner.run()
 
     assert report.retrieval is not None
-    assert report.retrieval.actual.mean_reciprocal_rank == pytest.approx(1.0)
-    assert report.retrieval.baseline.mean_reciprocal_rank == pytest.approx(0.5)
+    assert report.retrieval.actual.mean_reciprocal_rank.value == pytest.approx(1.0)
+    assert report.retrieval.baseline.mean_reciprocal_rank.value == pytest.approx(0.5)
     assert (
-        report.retrieval.actual.mean_reciprocal_rank
-        > report.retrieval.baseline.mean_reciprocal_rank
+        report.retrieval.actual.mean_reciprocal_rank.value
+        > report.retrieval.baseline.mean_reciprocal_rank.value
     )
+    assert report.retrieval.baseline_name == "lexical_salience_no_trust"
+    assert report.retrieval.delta.mean_reciprocal_rank.value == pytest.approx(0.5)
 
     assert report.trust is not None
-    assert report.trust.actual.brier_score == pytest.approx(0.02375)
-    assert report.trust.constant_baseline.brier_score == pytest.approx(0.25)
-    assert report.trust.actual.brier_score < report.trust.constant_baseline.brier_score
-    assert report.retrieval_status == BenchmarkStatus.PASS
-    assert report.trust_status == BenchmarkStatus.MIXED
+    assert report.trust.actual.brier_score.value == pytest.approx(0.004225)
+    assert report.trust.baseline.brier_score.value == pytest.approx(0.0464)
+    assert report.trust.actual.brier_score.value < report.trust.baseline.brier_score.value
+    assert report.trust.baseline_name == "source_reliability_prior"
+    assert report.retrieval_status == BenchmarkStatus.MIXED
+    assert report.trust_status == BenchmarkStatus.PASS
     assert report.overall_status == BenchmarkStatus.MIXED
 
     output_path = tmp_path / "report.json"
@@ -191,6 +201,7 @@ async def test_benchmark_runner_scores_against_baselines(tmp_path):
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     assert payload["suite_name"] == "test-suite"
     assert payload["retrieval"]["case_count"] == 2
+    assert payload["retrieval"]["baseline_name"] == "lexical_salience_no_trust"
 
 
 async def test_interpret_report_describes_benchmark_result():
@@ -200,8 +211,10 @@ async def test_interpret_report_describes_benchmark_result():
 
     assert "Retrieval (2 cases)" in summary
     assert "Run label: gpt-5.4" in summary
-    assert "retrieval ranking is helping on this suite." in summary
-    assert "trust calibration is mixed on this suite." in summary
+    assert "Baseline: lexical_salience_no_trust" in summary
+    assert "Baseline: source_reliability_prior" in summary
+    assert "retrieval ranking is mixed on this suite." in summary
+    assert "trust scores are better calibrated than the stronger source-aware baseline." in summary
     assert "this suite shows a mixed picture" in summary
 
 
@@ -209,13 +222,13 @@ async def test_error_recovery_suite_scores_above_baseline():
     report = await BenchmarkRunner(_error_recovery_suite()).run()
 
     assert report.error_recovery is not None
-    assert report.error_recovery.actual.accuracy == pytest.approx(1.0)
-    assert report.error_recovery.baseline.accuracy == pytest.approx(0.5)
-    assert report.error_recovery_status == BenchmarkStatus.PASS
+    assert report.error_recovery.actual.accuracy.value == pytest.approx(1.0)
+    assert report.error_recovery.baseline.accuracy.value == pytest.approx(0.5)
+    assert report.error_recovery_status == BenchmarkStatus.MIXED
 
     summary = interpret_report(report)
     assert "Error recovery (4 cases)" in summary
-    assert "error recovery is beating the naive baseline on this suite." in summary
+    assert "error recovery is mixed on this suite." in summary
 
 
 async def test_run_target_directory_aggregates_multiple_suites(tmp_path):
@@ -254,3 +267,32 @@ async def test_load_suite_reads_json_file(tmp_path):
 
     assert suite.name == "test-suite"
     assert len(suite.retrieval_cases) == 2
+
+
+async def test_robust_preset_builders_meet_requested_scale():
+    retrieval = build_robust_retrieval_suite()
+    trust = build_robust_trust_suite()
+    recovery = build_robust_error_recovery_suite()
+
+    assert len(retrieval.retrieval_cases) >= 50
+    assert any("multi_relevant" in case.tags for case in retrieval.retrieval_cases)
+    assert len(trust.trust_cases) >= 50
+    assert len(recovery.error_recovery_cases) >= 50
+
+
+async def test_load_preset_suites_returns_robust_bundle():
+    suites = load_preset_suites("robust")
+
+    assert [suite.name for suite in suites] == [
+        "robust-retrieval-depth",
+        "robust-trust-depth",
+        "robust-error-recovery-depth",
+    ]
+
+
+async def test_run_preset_executes_robust_bundle():
+    payload = await run_preset("robust", run_label="robust-regression")
+
+    assert isinstance(payload, BenchmarkRunReport)
+    assert payload.target == "preset:robust"
+    assert payload.suite_count == 3
