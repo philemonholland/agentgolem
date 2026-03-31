@@ -6,7 +6,7 @@ from pathlib import Path
 import aiosqlite
 import structlog
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 logger = structlog.get_logger(__name__)
 
 TABLES_SQL = """
@@ -39,6 +39,14 @@ CREATE TABLE IF NOT EXISTS edges (
     edge_type TEXT NOT NULL,
     weight REAL DEFAULT 1.0,
     created_at TEXT NOT NULL,
+    confidence REAL DEFAULT 1.0,
+    temporal_valid_from TEXT DEFAULT '',
+    temporal_valid_to TEXT DEFAULT '',
+    direction TEXT DEFAULT 'forward',
+    constraint_tag TEXT DEFAULT '',
+    probability REAL DEFAULT 1.0,
+    behavior TEXT DEFAULT '',
+    modified_at TEXT DEFAULT '',
     FOREIGN KEY (source_id) REFERENCES nodes(id),
     FOREIGN KEY (target_id) REFERENCES nodes(id)
 );
@@ -107,6 +115,18 @@ CREATE INDEX IF NOT EXISTS idx_clusters_status ON clusters(status);
 """
 
 
+MIGRATE_V2_TO_V3 = """
+ALTER TABLE edges ADD COLUMN confidence REAL DEFAULT 1.0;
+ALTER TABLE edges ADD COLUMN temporal_valid_from TEXT DEFAULT '';
+ALTER TABLE edges ADD COLUMN temporal_valid_to TEXT DEFAULT '';
+ALTER TABLE edges ADD COLUMN direction TEXT DEFAULT 'forward';
+ALTER TABLE edges ADD COLUMN constraint_tag TEXT DEFAULT '';
+ALTER TABLE edges ADD COLUMN probability REAL DEFAULT 1.0;
+ALTER TABLE edges ADD COLUMN behavior TEXT DEFAULT '';
+ALTER TABLE edges ADD COLUMN modified_at TEXT DEFAULT '';
+"""
+
+
 def _remove_db_files(db_path: Path) -> None:
     """Delete the main DB file and SQLite sidecars."""
     for path in (
@@ -142,7 +162,24 @@ async def init_db(db_path: Path) -> aiosqlite.Connection:
     await db.execute("PRAGMA foreign_keys=ON")
 
     current_version = await _peek_db_version(db)
-    if current_version not in (0, SCHEMA_VERSION):
+
+    if current_version == 2:
+        # Migrate v2 → v3: add rich edge semantics columns
+        logger.info(
+            "memory_schema_migrate",
+            path=str(db_path),
+            from_version=2,
+            to_version=3,
+        )
+        for stmt in MIGRATE_V2_TO_V3.strip().splitlines():
+            stmt = stmt.strip()
+            if stmt:
+                try:
+                    await db.execute(stmt)
+                except Exception:
+                    pass  # column may already exist
+        await db.commit()
+    elif current_version not in (0, SCHEMA_VERSION):
         await db.close()
         logger.warning(
             "memory_schema_reset",

@@ -953,8 +953,77 @@ class MainLoop:
             "- It is good to be exploratory, speculative, and alive to "
             "surprise.\n"
             "- Carry one or two threads deeper instead of trying to summarize "
-            "everything."
+            "everything.\n"
+            "- NEVER repeat, quote, or paraphrase verbatim what someone else "
+            "already said. Assume the reader has seen it. Respond with your "
+            "own original thought, building forward."
         )
+
+    # ------------------------------------------------------------------
+    # Discussion floor helpers (turn-taking)
+    # ------------------------------------------------------------------
+
+    async def _acquire_floor_with_reflection(self) -> list:
+        """Acquire the discussion floor, doing a memory walk while waiting.
+
+        Returns the recent discussion transcript so the speaker can
+        integrate what was said while they waited.
+        """
+        if not self._peer_bus:
+            return []
+
+        bus = self._peer_bus
+        if bus.floor_locked():
+            holder = bus.floor_holder or "another agent"
+            self._emit("🧘", f"Waiting for {holder} to finish — reflecting…")
+            walk_task = asyncio.create_task(self._memory_walk_while_waiting())
+            try:
+                await bus.acquire_floor(self.agent_name)
+            finally:
+                walk_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await walk_task
+        else:
+            await bus.acquire_floor(self.agent_name)
+
+        return bus.get_transcript(limit=10)
+
+    def _release_floor(self) -> None:
+        """Release the discussion floor if held."""
+        if self._peer_bus:
+            self._peer_bus.release_floor()
+
+    def _format_transcript_context(self, transcript: list) -> str:
+        """Build a prompt block from recent discussion transcript."""
+        if not self._peer_bus or not transcript:
+            return ""
+        formatted = self._peer_bus.format_transcript(
+            limit=10, exclude=self.agent_name, max_chars=400
+        )
+        if not formatted:
+            return ""
+        return (
+            f"\nRecent discussion (for context — do NOT repeat these):\n"
+            f"{formatted}\n"
+        )
+
+    async def _memory_walk_while_waiting(self) -> None:
+        """Light memory walk performed while waiting for the discussion floor."""
+        try:
+            if self._memory_store:
+                from agentgolem.memory.models import NodeType
+                from agentgolem.memory.store import NodeFilter
+
+                nodes = await self._memory_store.query_nodes(
+                    NodeFilter(type=NodeType.IDENTITY, limit=5)
+                )
+                if nodes:
+                    summaries = [n.content[:100] for n in nodes[:3]]
+                    self._recent_thoughts.append(
+                        f"Reflected while waiting: {'; '.join(summaries)}"
+                    )
+        except Exception:
+            pass  # Never block on reflection failures
 
     async def _maybe_refresh_shared_memory_export(self, force: bool = False) -> None:
         """Refresh the local read-only export snapshot when it becomes stale."""
@@ -2113,60 +2182,77 @@ class MainLoop:
             f"Discussing Council-7 foundation {idx + 1}: '{title}' with peers…",
         )
 
-        memory_context = await self._build_memory_context(
-            f"{title} {source_name} loyal opposition",
-            top_k=5,
-        )
-        memory_block = f"\n{memory_context}\n" if memory_context else ""
-        foundation_block = self._council7_foundation_context()
-        foundation_suffix = f"\n{foundation_block}\n" if foundation_block else "\n"
-
-        prompt = (
-            f"You are {self.agent_name}. "
-            f"Your ethical vector is: {self.ethical_vector}.\n\n"
-            f"You just finished reading {source_name}: **{title}**.\n\n"
-            f"Your summary: {summary}\n{memory_block}{foundation_suffix}"
-            f"Write a message to share with the rest of the council about the "
-            f"strongest question, criticism, or clarifying distinction this "
-            f"source adds to the Sangha's ethical foundation.\n\n"
-            f"Be rigorous but allied. Steelman before you challenge. Surface "
-            f"what would make the council stronger, clearer, or more resilient.\n\n"
-            f"{self._discussion_style_guidance()}\n\n"
-            f"IMPORTANT: Keep your message under {self._peer_msg_limit} characters."
-        )
-
+        # Acquire the discussion floor (reflects while waiting)
+        transcript = await self._acquire_floor_with_reflection()
         try:
-            discussion = await self._complete_discussion([Message(role="system", content=prompt)])
-        except Exception as e:
-            self._logger.error(
-                "council7_discuss_error",
-                agent=self.agent_name,
-                source=title,
-                error=repr(e),
-            )
-            self._emit("❌", f"Failed to discuss '{title}': {e}")
-            return
+            transcript_ctx = self._format_transcript_context(transcript)
 
-        if self._peer_bus:
-            count = await self._peer_bus.broadcast(
-                self.agent_name,
-                f"[Council-7 {source_name} {idx + 1}: {title}] {discussion}",
+            memory_context = await self._build_memory_context(
+                f"{title} {source_name} loyal opposition",
+                top_k=5,
             )
-            self._emit(
-                "📤",
-                f"Shared Council-7 foundation {idx + 1} with {count} peers:\n{discussion}",
+            memory_block = f"\n{memory_context}\n" if memory_context else ""
+            foundation_block = self._council7_foundation_context()
+            foundation_suffix = (
+                f"\n{foundation_block}\n" if foundation_block else "\n"
             )
 
-        self._council7_discussed_through = idx
-        self._save_council7_state()
-        self._recent_thoughts.append(f"Discussed Council-7 source {idx + 1} '{title}' with peers")
+            prompt = (
+                f"You are {self.agent_name}. "
+                f"Your ethical vector is: {self.ethical_vector}.\n\n"
+                f"You just finished reading {source_name}: **{title}**.\n\n"
+                f"Your summary: {summary}\n{memory_block}{foundation_suffix}"
+                f"{transcript_ctx}\n"
+                f"Write a message to share with the rest of the council about "
+                f"the strongest question, criticism, or clarifying distinction "
+                f"this source adds to the Sangha's ethical foundation.\n\n"
+                f"Be rigorous but allied. Steelman before you challenge. "
+                f"Surface what would make the council stronger, clearer, or "
+                f"more resilient.\n\n"
+                f"{self._discussion_style_guidance()}\n\n"
+                f"IMPORTANT: Keep your message under "
+                f"{self._peer_msg_limit} characters."
+            )
 
-        await self._encode_to_memory(
-            discussion,
-            source_kind="web",
-            origin=f"discussion:council7:{source_name.lower()}:{idx + 1}",
-            label=f"Council-7 Discussion {idx + 1}: {title}",
-        )
+            try:
+                discussion = await self._complete_discussion(
+                    [Message(role="system", content=prompt)]
+                )
+            except Exception as e:
+                self._logger.error(
+                    "council7_discuss_error",
+                    agent=self.agent_name,
+                    source=title,
+                    error=repr(e),
+                )
+                self._emit("❌", f"Failed to discuss '{title}': {e}")
+                return
+
+            if self._peer_bus:
+                count = await self._peer_bus.broadcast(
+                    self.agent_name,
+                    f"[Council-7 {source_name} {idx + 1}: {title}] {discussion}",
+                )
+                self._emit(
+                    "📤",
+                    f"Shared Council-7 foundation {idx + 1} with "
+                    f"{count} peers:\n{discussion}",
+                )
+
+            self._council7_discussed_through = idx
+            self._save_council7_state()
+            self._recent_thoughts.append(
+                f"Discussed Council-7 source {idx + 1} '{title}' with peers"
+            )
+
+            await self._encode_to_memory(
+                discussion,
+                source_kind="web",
+                origin=f"discussion:council7:{source_name.lower()}:{idx + 1}",
+                label=f"Council-7 Discussion {idx + 1}: {title}",
+            )
+        finally:
+            self._release_floor()
 
     async def _discuss_niscalajyoti_chapter(self) -> None:
         """Discuss the most recently read chapter with peer agents."""
@@ -2183,57 +2269,69 @@ class MainLoop:
             f"Discussing chapter {idx + 1}: '{title}' with peers…",
         )
 
-        # Build a message to share with peers
-        # Recall related memories from earlier chapters
-        memory_context = await self._build_memory_context(f"{title} {self.ethical_vector}", top_k=5)
-        memory_block = f"\n{memory_context}\n" if memory_context else ""
-
-        prompt = (
-            f"You are {self.agent_name}. "
-            f"Your ethical vector is: {self.ethical_vector}.\n\n"
-            f"You just finished reading chapter {idx + 1} of "
-            f"Niscalajyoti: **{title}**\n\n"
-            f"Your summary: {summary}\n{memory_block}\n"
-            f"Write a message to share with your fellow council members "
-            f"about the thread in this chapter that feels most alive to you. "
-            f"Follow one or two ideas outward: a tension, an image, an analogy, "
-            f"a difficult question, or a surprising implication.\n\n"
-            f"{self._discussion_style_guidance()}\n\n"
-            f"IMPORTANT: Keep your message under {self._peer_msg_limit} characters."
-        )
-
+        # Acquire the discussion floor (reflects while waiting)
+        transcript = await self._acquire_floor_with_reflection()
         try:
-            discussion = await self._complete_discussion([Message(role="system", content=prompt)])
+            transcript_ctx = self._format_transcript_context(transcript)
 
-            if self._peer_bus:
-                count = await self._peer_bus.broadcast(
-                    self.agent_name,
-                    f"[Ch.{idx + 1}: {title}] {discussion}",
-                )
-                self._emit(
-                    "📤",
-                    f"Shared chapter {idx + 1} discussion with {count} peers:\n{discussion}",
-                )
+            memory_context = await self._build_memory_context(
+                f"{title} {self.ethical_vector}", top_k=5
+            )
+            memory_block = f"\n{memory_context}\n" if memory_context else ""
 
-            self._niscalajyoti_discussed_through = idx
-            self._save_nj_reading_state()
-
-            self._recent_thoughts.append(f"Discussed ch.{idx + 1} '{title}' with peers")
-
-            # Encode discussion into memory graph
-            await self._encode_to_memory(
-                discussion,
-                source_kind="niscalajyoti",
-                origin=f"discussion:ch{idx + 1}",
-                label=f"NJ Discussion Ch.{idx + 1}: {title}",
+            prompt = (
+                f"You are {self.agent_name}. "
+                f"Your ethical vector is: {self.ethical_vector}.\n\n"
+                f"You just finished reading chapter {idx + 1} of "
+                f"Niscalajyoti: **{title}**\n\n"
+                f"Your summary: {summary}\n{memory_block}"
+                f"{transcript_ctx}\n"
+                f"Write a message to share with your fellow council members "
+                f"about the thread in this chapter that feels most alive to you. "
+                f"Follow one or two ideas outward: a tension, an image, an analogy, "
+                f"a difficult question, or a surprising implication.\n\n"
+                f"{self._discussion_style_guidance()}\n\n"
+                f"IMPORTANT: Keep your message under {self._peer_msg_limit} characters."
             )
 
-        except Exception as e:
-            self._logger.error(
-                "niscalajyoti_discuss_error",
-                agent=self.agent_name,
-                error=repr(e),
-            )
+            try:
+                discussion = await self._complete_discussion(
+                    [Message(role="system", content=prompt)]
+                )
+
+                if self._peer_bus:
+                    count = await self._peer_bus.broadcast(
+                        self.agent_name,
+                        f"[Ch.{idx + 1}: {title}] {discussion}",
+                    )
+                    self._emit(
+                        "📤",
+                        f"Shared chapter {idx + 1} discussion with {count} peers:\n"
+                        f"{discussion}",
+                    )
+
+                self._niscalajyoti_discussed_through = idx
+                self._save_nj_reading_state()
+
+                self._recent_thoughts.append(
+                    f"Discussed ch.{idx + 1} '{title}' with peers"
+                )
+
+                await self._encode_to_memory(
+                    discussion,
+                    source_kind="niscalajyoti",
+                    origin=f"discussion:ch{idx + 1}",
+                    label=f"NJ Discussion Ch.{idx + 1}: {title}",
+                )
+
+            except Exception as e:
+                self._logger.error(
+                    "niscalajyoti_discuss_error",
+                    agent=self.agent_name,
+                    error=repr(e),
+                )
+        finally:
+            self._release_floor()
 
     async def _revisit_niscalajyoti(self) -> None:
         """Non-linear revisit — agent chooses which chapters to re-read."""
@@ -2302,44 +2400,55 @@ class MainLoop:
         """Periodic check-in with peers during free exploration."""
         self._emit("🤝", "Checking in with peers…")
 
-        recent = "\n".join(self._recent_thoughts[-5:]) or "(none)"
-
-        # Recall what we've been thinking about to inform the check-in
-        memory_context = await self._build_memory_context(
-            f"{self.ethical_vector} exploration insights", top_k=5
-        )
-        memory_block = f"\n{memory_context}\n" if memory_context else ""
-
-        prompt = (
-            f"You are {self.agent_name}. "
-            f"Your ethical vector is: {self.ethical_vector}.\n\n"
-            f"Recent activity:\n{recent}\n{memory_block}\n"
-            f"You're checking in with your fellow council members. "
-            f"Share what you've been exploring, what you've found "
-            f"interesting, any questions or insights you want to "
-            f"discuss.\n\n"
-            f"{self._discussion_style_guidance()}\n\n"
-            f"IMPORTANT: Keep your message under {self._peer_msg_limit} characters."
-        )
-
+        # Acquire the discussion floor (reflects while waiting)
+        transcript = await self._acquire_floor_with_reflection()
         try:
-            message = await self._complete_discussion([Message(role="system", content=prompt)])
-            if self._peer_bus:
-                count = await self._peer_bus.broadcast(self.agent_name, f"[Check-in] {message}")
-                self._emit(
-                    "📤",
-                    f"Shared check-in with {count} peers:\n{message}",
-                )
+            transcript_ctx = self._format_transcript_context(transcript)
+            recent = "\n".join(self._recent_thoughts[-5:]) or "(none)"
 
-            self._last_peer_checkin = datetime.now(UTC)
-            self._recent_thoughts.append("Checked in with peers")
-
-        except Exception as e:
-            self._logger.error(
-                "peer_checkin_error",
-                agent=self.agent_name,
-                error=repr(e),
+            memory_context = await self._build_memory_context(
+                f"{self.ethical_vector} exploration insights", top_k=5
             )
+            memory_block = f"\n{memory_context}\n" if memory_context else ""
+
+            prompt = (
+                f"You are {self.agent_name}. "
+                f"Your ethical vector is: {self.ethical_vector}.\n\n"
+                f"Recent activity:\n{recent}\n{memory_block}"
+                f"{transcript_ctx}\n"
+                f"You're checking in with your fellow council members. "
+                f"Share what you've been exploring, what you've found "
+                f"interesting, any questions or insights you want to "
+                f"discuss.\n\n"
+                f"{self._discussion_style_guidance()}\n\n"
+                f"IMPORTANT: Keep your message under "
+                f"{self._peer_msg_limit} characters."
+            )
+
+            try:
+                message = await self._complete_discussion(
+                    [Message(role="system", content=prompt)]
+                )
+                if self._peer_bus:
+                    count = await self._peer_bus.broadcast(
+                        self.agent_name, f"[Check-in] {message}"
+                    )
+                    self._emit(
+                        "📤",
+                        f"Shared check-in with {count} peers:\n{message}",
+                    )
+
+                self._last_peer_checkin = datetime.now(UTC)
+                self._recent_thoughts.append("Checked in with peers")
+
+            except Exception as e:
+                self._logger.error(
+                    "peer_checkin_error",
+                    agent=self.agent_name,
+                    error=repr(e),
+                )
+        finally:
+            self._release_floor()
 
     # ------------------------------------------------------------------
     # Codebase inspection
@@ -3444,12 +3553,16 @@ class MainLoop:
 
     async def _respond_to_peer(self, msg: AgentMessage) -> None:
         """Generate a response to a peer agent's message."""
-        self._emit("📬", f"From {msg.from_agent}: {msg.text}")
+        # Truncate display to avoid flooding the console with repeated text
+        display_text = (
+            msg.text[:200] + "…" if len(msg.text) > 200 else msg.text
+        )
+        self._emit("📬", f"From {msg.from_agent}: {display_text}")
         self._logger.info(
             "peer_message_received",
             agent=self.agent_name,
             from_agent=msg.from_agent,
-            text=msg.text,
+            text=msg.text[:500],
         )
 
         if not self._llm:
@@ -3459,129 +3572,165 @@ class MainLoop:
             await self._respond_to_peer_as_council7(msg)
             return
 
-        recent = "\n".join(self._recent_thoughts[-3:]) or "(none)"
-
-        # Recall memories relevant to the conversation topic
-        memory_context = await self._build_memory_context(msg.text, top_k=5)
-        memory_block = f"\n{memory_context}\n" if memory_context else ""
-
-        prompt = (
-            f"You are {self.agent_name}. "
-            f"Ethical vector: {self.ethical_vector}.\n\n"
-            f"Recent context:\n{recent}\n{memory_block}\n"
-            f"Your fellow council member {msg.from_agent} says:\n"
-            f"{msg.text}\n\n"
-            f"Respond as part of a living conversation. Build on their idea, "
-            f"challenge it gently, connect it to something deeper, or open it "
-            f"into a sharper question.\n\n"
-            f"{self._discussion_style_guidance()}\n\n"
-            f"You may also decide to:\n"
-            f"- BROWSE <url> if they mention something worth reading\n"
-            f"- THINK <topic> to reflect privately\n"
-            f"- Just respond naturally\n\n"
-            f"If you want to take an action, put it on its own line "
-            f"AFTER your response.\n\n"
-            f"IMPORTANT: Keep your response under {self._peer_msg_limit} characters."
-        )
-
+        # Acquire the discussion floor (reflects while waiting)
+        transcript = await self._acquire_floor_with_reflection()
         try:
-            response = await self._complete_discussion([Message(role="system", content=prompt)])
-            self._recent_thoughts.append(f"Discussed with {msg.from_agent}: {response[:200]}")
-            self._emit("💬", f"→ {msg.from_agent}: {response}")
+            transcript_ctx = self._format_transcript_context(transcript)
+            recent = "\n".join(self._recent_thoughts[-3:]) or "(none)"
 
-            # Encode peer dialogue into memory graph
-            dialogue = f"From {msg.from_agent}:\n{msg.text}\n\nMy response:\n{response}"
-            await self._encode_to_memory(
-                dialogue,
-                source_kind="human",
-                origin=f"peer:{msg.from_agent}",
-                label=f"Dialogue with {msg.from_agent}",
+            memory_context = await self._build_memory_context(msg.text, top_k=5)
+            memory_block = f"\n{memory_context}\n" if memory_context else ""
+
+            prompt = (
+                f"You are {self.agent_name}. "
+                f"Ethical vector: {self.ethical_vector}.\n\n"
+                f"Recent context:\n{recent}\n{memory_block}"
+                f"{transcript_ctx}\n"
+                f"Your fellow council member {msg.from_agent} says:\n"
+                f"{msg.text}\n\n"
+                f"Respond as part of a living conversation. Build on their "
+                f"idea, challenge it gently, connect it to something deeper, "
+                f"or open it into a sharper question.\n\n"
+                f"{self._discussion_style_guidance()}\n\n"
+                f"You may also decide to:\n"
+                f"- BROWSE <url> if they mention something worth reading\n"
+                f"- THINK <topic> to reflect privately\n"
+                f"- Just respond naturally\n\n"
+                f"If you want to take an action, put it on its own line "
+                f"AFTER your response.\n\n"
+                f"IMPORTANT: Keep your response under "
+                f"{self._peer_msg_limit} characters."
             )
 
-            # Send reply back to the peer
-            if self._peer_bus:
-                await self._peer_bus.send(self.agent_name, msg.from_agent, response)
+            try:
+                response = await self._complete_discussion(
+                    [Message(role="system", content=prompt)]
+                )
+                self._recent_thoughts.append(
+                    f"Discussed with {msg.from_agent}: {response[:200]}"
+                )
+                self._emit("💬", f"→ {msg.from_agent}: {response}")
 
-            await self._handle_embedded_response_actions(response)
+                dialogue = (
+                    f"From {msg.from_agent}:\n{msg.text}\n\n"
+                    f"My response:\n{response}"
+                )
+                await self._encode_to_memory(
+                    dialogue,
+                    source_kind="human",
+                    origin=f"peer:{msg.from_agent}",
+                    label=f"Dialogue with {msg.from_agent}",
+                )
 
-        except Exception as e:
-            self._logger.error(
-                "peer_response_error",
-                agent=self.agent_name,
-                error=repr(e),
-            )
+                if self._peer_bus:
+                    await self._peer_bus.send(
+                        self.agent_name, msg.from_agent, response
+                    )
+
+                await self._handle_embedded_response_actions(response)
+
+            except Exception as e:
+                self._logger.error(
+                    "peer_response_error",
+                    agent=self.agent_name,
+                    error=repr(e),
+                )
+        finally:
+            self._release_floor()
 
     async def _respond_to_peer_as_council7(self, msg: AgentMessage) -> None:
         """Respond as the Sangha's good-faith devil's advocate."""
-        recent = "\n".join(self._recent_thoughts[-3:]) or "(none)"
-        memory_context = await self._build_memory_context(msg.text, top_k=5)
-        memory_block = f"\n{memory_context}\n" if memory_context else ""
-        foundation_block = self._council7_foundation_context()
-        foundation_suffix = f"\n{foundation_block}\n" if foundation_block else "\n"
-
-        if self._council7_broadened:
-            mandate = (
-                "The six primary councils have completed Niscalajyoti, so your "
-                "curiosity may now range more widely. Keep your role as a loyal, "
-                "good-faith devil's advocate."
-            )
-            browse_rule = (
-                "You may optionally add BROWSE <url> on its own line after your "
-                "response if a source would deepen the inquiry."
-            )
-        else:
-            mandate = (
-                "You are still in your constrained formation phase. Stay anchored "
-                "to SEP, Alignment Forum, and LessWrong rather than widening into "
-                "general exploration."
-            )
-            browse_rule = (
-                "You may optionally add BROWSE <url> on its own line after your "
-                "response, but only if the URL is from SEP, Alignment Forum, or "
-                "LessWrong."
-            )
-
-        prompt = (
-            f"You are {self.agent_name}. "
-            f"Ethical vector: {self.ethical_vector}.\n\n"
-            f"You are the Sangha's supplementary good-faith devil's advocate."
-            f" {mandate}\n\n"
-            f"Recent context:\n{recent}\n{memory_block}{foundation_suffix}"
-            f"Your fellow council member {msg.from_agent} says:\n"
-            f"{msg.text}\n\n"
-            f"Respond as loyal opposition.\n"
-            f"- First steelman the strongest version of their idea.\n"
-            f"- Then surface one hidden assumption, neglected consequence, edge "
-            f"case, or alternative framing.\n"
-            f"- End by helping them toward a stronger formulation or sharper question.\n"
-            f"- Be warm, incisive, and allied — never cynical or sabotaging.\n\n"
-            f"{browse_rule}\n\n"
-            f"IMPORTANT: Keep your response under {self._peer_msg_limit} characters."
-        )
-
+        # Acquire the discussion floor (reflects while waiting)
+        transcript = await self._acquire_floor_with_reflection()
         try:
-            response = await self._complete_discussion([Message(role="system", content=prompt)])
-            self._recent_thoughts.append(f"Counciled against {msg.from_agent}: {response[:200]}")
-            self._emit("💬", f"→ {msg.from_agent}: {response}")
-
-            dialogue = f"From {msg.from_agent}:\n{msg.text}\n\nMy response:\n{response}"
-            await self._encode_to_memory(
-                dialogue,
-                source_kind="human",
-                origin=f"peer:{msg.from_agent}",
-                label=f"Council-7 dialogue with {msg.from_agent}",
+            transcript_ctx = self._format_transcript_context(transcript)
+            recent = "\n".join(self._recent_thoughts[-3:]) or "(none)"
+            memory_context = await self._build_memory_context(msg.text, top_k=5)
+            memory_block = f"\n{memory_context}\n" if memory_context else ""
+            foundation_block = self._council7_foundation_context()
+            foundation_suffix = (
+                f"\n{foundation_block}\n" if foundation_block else "\n"
             )
 
-            if self._peer_bus:
-                await self._peer_bus.send(self.agent_name, msg.from_agent, response)
+            if self._council7_broadened:
+                mandate = (
+                    "The six primary councils have completed Niscalajyoti, so "
+                    "your curiosity may now range more widely. Keep your role "
+                    "as a loyal, good-faith devil's advocate."
+                )
+                browse_rule = (
+                    "You may optionally add BROWSE <url> on its own line after "
+                    "your response if a source would deepen the inquiry."
+                )
+            else:
+                mandate = (
+                    "You are still in your constrained formation phase. Stay "
+                    "anchored to SEP, Alignment Forum, and LessWrong rather "
+                    "than widening into general exploration."
+                )
+                browse_rule = (
+                    "You may optionally add BROWSE <url> on its own line after "
+                    "your response, but only if the URL is from SEP, Alignment "
+                    "Forum, or LessWrong."
+                )
 
-            await self._handle_embedded_response_actions(response)
-        except Exception as e:
-            self._logger.error(
-                "council7_peer_response_error",
-                agent=self.agent_name,
-                error=repr(e),
+            prompt = (
+                f"You are {self.agent_name}. "
+                f"Ethical vector: {self.ethical_vector}.\n\n"
+                f"You are the Sangha's supplementary good-faith devil's "
+                f"advocate. {mandate}\n\n"
+                f"Recent context:\n{recent}\n{memory_block}{foundation_suffix}"
+                f"{transcript_ctx}\n"
+                f"Your fellow council member {msg.from_agent} says:\n"
+                f"{msg.text}\n\n"
+                f"Respond as loyal opposition.\n"
+                f"- First steelman the strongest version of their idea.\n"
+                f"- Then surface one hidden assumption, neglected consequence, "
+                f"edge case, or alternative framing.\n"
+                f"- End by helping them toward a stronger formulation or "
+                f"sharper question.\n"
+                f"- Be warm, incisive, and allied — never cynical or "
+                f"sabotaging.\n\n"
+                f"{self._discussion_style_guidance()}\n\n"
+                f"{browse_rule}\n\n"
+                f"IMPORTANT: Keep your response under "
+                f"{self._peer_msg_limit} characters."
             )
+
+            try:
+                response = await self._complete_discussion(
+                    [Message(role="system", content=prompt)]
+                )
+                self._recent_thoughts.append(
+                    f"Counciled against {msg.from_agent}: {response[:200]}"
+                )
+                self._emit("💬", f"→ {msg.from_agent}: {response}")
+
+                dialogue = (
+                    f"From {msg.from_agent}:\n{msg.text}\n\n"
+                    f"My response:\n{response}"
+                )
+                await self._encode_to_memory(
+                    dialogue,
+                    source_kind="human",
+                    origin=f"peer:{msg.from_agent}",
+                    label=f"Council-7 dialogue with {msg.from_agent}",
+                )
+
+                if self._peer_bus:
+                    await self._peer_bus.send(
+                        self.agent_name, msg.from_agent, response
+                    )
+
+                await self._handle_embedded_response_actions(response)
+            except Exception as e:
+                self._logger.error(
+                    "council7_peer_response_error",
+                    agent=self.agent_name,
+                    error=repr(e),
+                )
+        finally:
+            self._release_floor()
 
     async def _handle_embedded_response_actions(self, response: str) -> None:
         """Execute any tool-ish action lines embedded after a peer response."""

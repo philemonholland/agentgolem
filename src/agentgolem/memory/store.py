@@ -198,8 +198,11 @@ class SQLiteMemoryStore:
     async def add_edge(self, edge: MemoryEdge) -> str:
         """Insert an edge. Returns the edge id."""
         await self._db.execute(
-            """INSERT INTO edges (id, source_id, target_id, edge_type, weight, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO edges (
+                id, source_id, target_id, edge_type, weight, created_at,
+                confidence, temporal_valid_from, temporal_valid_to,
+                direction, constraint_tag, probability, behavior, modified_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 edge.id,
                 edge.source_id,
@@ -207,6 +210,14 @@ class SQLiteMemoryStore:
                 edge.edge_type.value,
                 edge.weight,
                 edge.created_at.isoformat(),
+                edge.confidence,
+                edge.temporal_valid_from,
+                edge.temporal_valid_to,
+                edge.direction,
+                edge.constraint,
+                edge.probability,
+                edge.behavior,
+                edge.modified_at.isoformat(),
             ),
         )
         await self._db.commit()
@@ -264,11 +275,44 @@ class SQLiteMemoryStore:
                 results.append((edge, self._row_to_node(row)))
         return results
 
-    async def update_edge(self, edge_id: str, weight: float) -> None:
-        """Update edge weight."""
-        await self._db.execute(
-            "UPDATE edges SET weight = ? WHERE id = ?", (weight, edge_id)
-        )
+    async def update_edge(
+        self,
+        edge_id: str,
+        weight: float | None = None,
+        confidence: float | None = None,
+        probability: float | None = None,
+        behavior: str | None = None,
+        constraint: str | None = None,
+        temporal_valid_to: str | None = None,
+    ) -> None:
+        """Update edge fields. Only non-None kwargs are written."""
+        sets: list[str] = []
+        params: list[Any] = []
+        if weight is not None:
+            sets.append("weight = ?")
+            params.append(weight)
+        if confidence is not None:
+            sets.append("confidence = ?")
+            params.append(confidence)
+        if probability is not None:
+            sets.append("probability = ?")
+            params.append(probability)
+        if behavior is not None:
+            sets.append("behavior = ?")
+            params.append(behavior)
+        if constraint is not None:
+            sets.append("constraint_tag = ?")
+            params.append(constraint)
+        if temporal_valid_to is not None:
+            sets.append("temporal_valid_to = ?")
+            params.append(temporal_valid_to)
+        if not sets:
+            return
+        sets.append("modified_at = ?")
+        params.append(datetime.now(timezone.utc).isoformat())
+        params.append(edge_id)
+        sql = f"UPDATE edges SET {', '.join(sets)} WHERE id = ?"  # noqa: S608
+        await self._db.execute(sql, params)
         await self._db.commit()
 
     # ------------------------------------------------------------------
@@ -512,6 +556,12 @@ class SQLiteMemoryStore:
         )
 
     def _row_to_edge(self, row: aiosqlite.Row) -> MemoryEdge:
+        modified_raw = row["modified_at"] if "modified_at" in row.keys() else ""
+        modified_at = (
+            datetime.fromisoformat(modified_raw)
+            if modified_raw
+            else datetime.fromisoformat(row["created_at"])
+        )
         return MemoryEdge(
             id=row["id"],
             source_id=row["source_id"],
@@ -519,6 +569,26 @@ class SQLiteMemoryStore:
             edge_type=EdgeType(row["edge_type"]),
             weight=row["weight"],
             created_at=datetime.fromisoformat(row["created_at"]),
+            confidence=row["confidence"] if "confidence" in row.keys() else 1.0,
+            temporal_valid_from=(
+                row["temporal_valid_from"]
+                if "temporal_valid_from" in row.keys()
+                else ""
+            ),
+            temporal_valid_to=(
+                row["temporal_valid_to"]
+                if "temporal_valid_to" in row.keys()
+                else ""
+            ),
+            direction=row["direction"] if "direction" in row.keys() else "forward",
+            constraint=(
+                row["constraint_tag"] if "constraint_tag" in row.keys() else ""
+            ),
+            probability=(
+                row["probability"] if "probability" in row.keys() else 1.0
+            ),
+            behavior=row["behavior"] if "behavior" in row.keys() else "",
+            modified_at=modified_at,
         )
 
     def _row_to_source(self, row: aiosqlite.Row) -> Source:

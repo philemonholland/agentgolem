@@ -156,6 +156,14 @@ quarantine_trust_useful_threshold: 0.3
 # --- Web Browsing ---
 browser_rate_limit_per_minute: 10
 browser_timeout_seconds: 20
+
+# --- Consciousness Kernel ---
+metacognition_interval: 3              # Ticks between metacognitive reflection
+narrative_synthesis_interval: 15       # Ticks between narrative chapter synthesis
+self_model_rebuild_interval: 10        # Ticks between self-model reconstruction
+attention_influence_weight: 0.7        # How strongly the attention directive biases action selection
+internal_state_mycelium_share: true    # Share internal state read-only via mycelium
+metacognition_novelty_bias: 0.3        # How much "stuck" detection pushes toward novelty
 ```
 
 ---
@@ -347,6 +355,25 @@ a specific agent.
 
 Messages are queued to the agent's inbox and processed during the next AWAKE
 cycle.
+
+---
+
+## Consciousness Kernel
+
+The consciousness kernel gives each agent metacognitive self-awareness through
+five interlocking systems that run passively alongside normal work:
+
+| Pillar | Interval | What It Does |
+|--------|----------|--------------|
+| **Internal State** | Every tick | Updates curiosity, confidence, valence, engagement, cognitive load |
+| **Metacognitive Monitor** | 3 ticks | Detects repetitive patterns, bias risks, neglected memory clusters |
+| **Attention Director** | Every tick | Translates internal state into a behavioral directive for action selection |
+| **Narrative Synthesizer** | 15 ticks | Weaves experience into temporal chapters stored in the memory graph |
+| **Self-Model** | 10 ticks | Reconstructs "who am I" from graph queries — convictions, unknowns, growth edges |
+
+All consciousness failures are logged but never block the agent.  Adjust
+intervals in the `Consciousness Kernel` settings group to trade depth vs.
+token cost.
 
 ---
 

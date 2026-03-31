@@ -294,6 +294,15 @@ curl "http://127.0.0.1:8000/api/logs?type=audit&q=soul_update&limit=20"
 The dashboard Logs page provides a searchable interface for both activity and
 audit logs.
 
+### Consciousness Kernel Auditing
+
+Narrative chapters stored in the EKG graph are `identity` nodes and follow
+the standard audit pipeline — every `node_create` for a narrative chapter
+is logged with a `mutation_type` of `node_create`.  Self-model rebuilds and
+internal state updates are persisted to per-agent JSON files and are not
+individually audit-logged (they are transient cognitive state, not trust-rated
+memory mutations).
+
 ---
 
 ## Retention Protections

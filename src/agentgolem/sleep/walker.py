@@ -344,7 +344,7 @@ class GraphWalker:
             return
         new_weight = min(float(row["weight"]) + amount, 5.0)
         new_weight = max(new_weight, 0.0)
-        await self._store.update_edge(edge_id, new_weight)
+        await self._store.update_edge(edge_id, weight=new_weight)
 
     async def weaken_edge(self, edge_id: str, amount: float = 0.1) -> None:
         """Decrease an edge's weight (clamped to [0.01, ∞))."""
@@ -356,7 +356,7 @@ class GraphWalker:
         if row is None:
             return
         new_weight = max(float(row["weight"]) - amount, 0.01)
-        await self._store.update_edge(edge_id, new_weight)
+        await self._store.update_edge(edge_id, weight=new_weight)
 
     async def apply_actions(self, actions: list[dict[str, Any]]) -> int:
         """Apply reinforce/weaken actions produced by the sleep walk."""

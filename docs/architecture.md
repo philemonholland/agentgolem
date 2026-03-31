@@ -415,6 +415,66 @@ It also:
 
 ---
 
+## Consciousness Kernel
+
+The consciousness kernel is a set of five interlocking metacognitive systems
+that run alongside the agent's main work loop, creating a recursive
+self-awareness substrate.
+
+### Architecture
+
+```
+src/agentgolem/consciousness/
+├── internal_state.py        # Pillar 3: per-tick felt-sense (JSON persistence)
+├── metacognitive_monitor.py # Pillar 1: pattern/bias/avoidance detection + EKG queries
+├── attention_director.py    # Pillar 4: state → behavioural directive (pure compute)
+├── narrative_synthesizer.py # Pillar 2: temporal chapters → identity graph nodes
+└── self_model.py            # Pillar 5: periodic "who am I?" from graph queries
+```
+
+### The Recursive Loop
+
+Every autonomous tick:
+1. **InternalState** updates via fast LLM reflection (curiosity, valence, load, mode)
+2. Every `metacognition_interval` ticks, **MetacognitiveMonitor** checks for
+   patterns, biases, avoidance — queries EKG for neglected memory clusters
+3. **AttentionDirector** translates state + observation → directive injected
+   into the action selection prompt as natural language
+4. Every `narrative_synthesis_interval` ticks, **NarrativeSynthesizer** weaves
+   recent experience into a chapter stored as an `identity` node with
+   `supersedes` edges
+5. Every `self_model_rebuild_interval` ticks, **SelfModel** reconstructs from
+   high-trust identity/fact nodes, active contradictions, and goals
+
+### EKG Graph Integration
+
+| Component | Graph Usage |
+|-----------|-------------|
+| NarrativeSynthesizer | Stores chapters as `NodeType.IDENTITY` nodes; chains via `EdgeType.SUPERSEDES` |
+| MetacognitiveMonitor | `find_neglected_topics()` — nodes with old `last_accessed` and low `access_count` |
+| MetacognitiveMonitor | `find_contradiction_clusters()` — nodes with active `CONTRADICTS` edges |
+| SelfModel | `build_graph_context_for_self_model()` — queries identity, fact, goal nodes + contradictions |
+| InternalState | JSON only (transient per-tick weather, not graph-worthy) |
+| AttentionDirector | No persistence (pure computation) |
+
+### Settings
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `metacognition_interval` | 3 | Ticks between metacognitive reflection |
+| `narrative_synthesis_interval` | 15 | Ticks between narrative chapters |
+| `self_model_rebuild_interval` | 10 | Ticks between self-model reconstruction |
+| `attention_influence_weight` | 0.7 | How strongly the directive biases action selection |
+| `internal_state_mycelium_share` | true | Share internal state read-only via mycelium |
+| `metacognition_novelty_bias` | 0.3 | How much "stuck" detection pushes toward novelty |
+
+### Failure Handling
+
+All consciousness passes are wrapped in try/except and log warnings on failure.
+A failed consciousness tick never blocks the agent's main autonomous work.
+
+---
+
 ## Heartbeat Cycle
 
 The heartbeat is a periodic self-assessment that runs every

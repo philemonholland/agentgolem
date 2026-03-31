@@ -82,7 +82,12 @@ class ConceptualNode:
 
 @dataclass
 class MemoryEdge:
-    """A directed edge between two conceptual nodes."""
+    """A directed edge between two conceptual nodes.
+
+    Rich semantics fields allow edges to carry confidence, temporal
+    validity, directionality constraints, probability, and behaviour
+    annotations beyond the core edge type and weight.
+    """
 
     source_id: str  # from node
     target_id: str  # to node
@@ -90,6 +95,16 @@ class MemoryEdge:
     id: str = field(default_factory=_new_id)
     weight: float = 1.0
     created_at: datetime = field(default_factory=_now)
+
+    # Rich relationship semantics (v3)
+    confidence: float = 1.0        # 0–1, how sure are we about this edge?
+    temporal_valid_from: str = ""   # ISO 8601 — when this relationship began
+    temporal_valid_to: str = ""     # ISO 8601 — when it ended ("" = ongoing)
+    direction: str = "forward"      # "forward" | "bidirectional" | "reverse"
+    constraint: str = ""            # e.g. "only_when:awake", "during_sleep"
+    probability: float = 1.0       # 0–1, probabilistic edge (1.0 = certain)
+    behavior: str = ""             # e.g. "propagate_trust", "inhibit_recall"
+    modified_at: datetime = field(default_factory=_now)
 
 
 @dataclass
