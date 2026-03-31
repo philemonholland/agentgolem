@@ -57,23 +57,31 @@ A benchmark suite is a JSON file containing:
   - node ids plus expected reliability labels
 
 See `benchmarks\sample_suite.json` for a minimal working example.
+The directory runner can execute every `*.json` suite under `benchmarks\` in one pass.
 
 ## Running the harness
 
 ```powershell
 benchmark.bat
 benchmark.bat benchmarks\sample_suite.json --output data\benchmarks\latest_report.json
-python -m agentgolem.benchmarks benchmarks\sample_suite.json
-python -m agentgolem.benchmarks benchmarks\sample_suite.json --output data\benchmarks\sample_report.json
-python -m agentgolem.benchmarks benchmarks\sample_suite.json --output data\benchmarks\sample_report.json --interpret
+python -m agentgolem.benchmarks benchmarks
+python -m agentgolem.benchmarks benchmarks --output data\benchmarks\latest_run.json --interpret
+python -m agentgolem.benchmarks benchmarks --output data\benchmarks\gpt-5.4.json --label gpt-5.4
+python -m agentgolem.benchmarks benchmarks --output data\benchmarks\claude-sonnet-4.6.json --label claude-sonnet-4.6
+python -m agentgolem.benchmarks.compare data\benchmarks\gpt-5.4.json data\benchmarks\claude-sonnet-4.6.json
 ```
 
 `benchmark.bat` is the one-click Windows launcher. With no arguments it runs the
-default sample suite, writes `data\benchmarks\latest_report.json`, and prints a
+whole `benchmarks\` suite directory, writes `data\benchmarks\latest_run.json`, and prints a
 human-readable interpretation before pausing so the result stays visible.
 
 Without `--interpret`, the Python CLI keeps its JSON-oriented behavior.
 With `--interpret`, it prints a concise verdict against the configured baselines.
+
+The compare command is meant for labeled runs such as `gpt-5.4`,
+`claude-sonnet-4.6`, or `deepseek-reasoner`. The current offline suites mostly
+exercise retrieval/trust logic, so model-vs-model comparisons are still limited,
+but the reporting pipeline is now ready for broader future suites.
 
 ## Report shape
 

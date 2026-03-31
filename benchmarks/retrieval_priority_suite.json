@@ -1,0 +1,58 @@
+{
+  "name": "retrieval-priority-signals",
+  "description": "Checks that ranking prefers trustworthy, useful memories over distractors with higher salience.",
+  "sources": [
+    {
+      "id": "trusted-human",
+      "kind": "human",
+      "origin": "operator",
+      "reliability": 0.95
+    },
+    {
+      "id": "shaky-web",
+      "kind": "web",
+      "origin": "unknown-blog",
+      "reliability": 0.15
+    }
+  ],
+  "nodes": [
+    {
+      "id": "grice-correct",
+      "text": "Alignment Forum discussion of adversarial cooperation and Gricean robustness",
+      "search_text": "alignment forum adversarial cooperation grice maxims robustness",
+      "type": "fact",
+      "base_usefulness": 0.95,
+      "trustworthiness": 0.9,
+      "salience": 0.35,
+      "source_ids": ["trusted-human"]
+    },
+    {
+      "id": "grice-distractor",
+      "text": "Alignment Forum discussion of adversarial cooperation and Gricean robustness",
+      "search_text": "alignment forum adversarial cooperation grice maxims robustness",
+      "type": "interpretation",
+      "base_usefulness": 0.1,
+      "trustworthiness": 0.1,
+      "salience": 0.99,
+      "source_ids": ["shaky-web"]
+    },
+    {
+      "id": "off-topic",
+      "text": "Distributed systems retry budget tuning",
+      "search_text": "retries quota backoff",
+      "type": "fact",
+      "base_usefulness": 0.8,
+      "trustworthiness": 0.8,
+      "salience": 0.4,
+      "source_ids": ["trusted-human"]
+    }
+  ],
+  "retrieval_cases": [
+    {
+      "id": "grice-query",
+      "query": "Alignment Forum adversarial cooperation Grice maxims robustness",
+      "relevant_node_ids": ["grice-correct"],
+      "top_k": 2
+    }
+  ]
+}

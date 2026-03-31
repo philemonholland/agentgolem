@@ -7,7 +7,9 @@ import pytest
 
 from agentgolem.benchmarks.models import (
     BenchmarkNodeSpec,
+    BenchmarkRunReport,
     BenchmarkSourceSpec,
+    BenchmarkStatus,
     BenchmarkSuite,
     RetrievalBenchmarkCase,
     TrustCalibrationCase,
@@ -15,7 +17,10 @@ from agentgolem.benchmarks.models import (
 from agentgolem.benchmarks.runner import (
     BenchmarkRunner,
     interpret_report,
+    interpret_run_report,
+    load_report,
     load_suite,
+    run_target,
     write_report,
 )
 from agentgolem.memory.models import NodeType, SourceKind
@@ -137,6 +142,9 @@ async def test_benchmark_runner_scores_against_baselines(tmp_path):
     assert report.trust.actual.brier_score == pytest.approx(0.02375)
     assert report.trust.constant_baseline.brier_score == pytest.approx(0.25)
     assert report.trust.actual.brier_score < report.trust.constant_baseline.brier_score
+    assert report.retrieval_status == BenchmarkStatus.PASS
+    assert report.trust_status == BenchmarkStatus.MIXED
+    assert report.overall_status == BenchmarkStatus.MIXED
 
     output_path = tmp_path / "report.json"
     write_report(report, output_path)
@@ -146,14 +154,43 @@ async def test_benchmark_runner_scores_against_baselines(tmp_path):
 
 
 async def test_interpret_report_describes_benchmark_result():
-    report = await BenchmarkRunner(_suite()).run()
+    report = await BenchmarkRunner(_suite(), run_label="gpt-5.4").run()
 
     summary = interpret_report(report)
 
     assert "Retrieval (2 cases)" in summary
+    assert "Run label: gpt-5.4" in summary
     assert "retrieval ranking is helping on this suite." in summary
     assert "trust calibration is mixed on this suite." in summary
     assert "this suite shows a mixed picture" in summary
+
+
+async def test_run_target_directory_aggregates_multiple_suites(tmp_path):
+    suite_path_1 = tmp_path / "suite-one.json"
+    suite_path_2 = tmp_path / "suite-two.json"
+    suite_path_1.write_text(json.dumps(_suite().model_dump(mode="json")), encoding="utf-8")
+
+    suite_two = _suite().model_copy(update={"name": "test-suite-2"})
+    suite_path_2.write_text(json.dumps(suite_two.model_dump(mode="json")), encoding="utf-8")
+
+    payload = await run_target(tmp_path, run_label="claude-sonnet-4.6")
+
+    assert isinstance(payload, BenchmarkRunReport)
+    assert payload.run_label == "claude-sonnet-4.6"
+    assert payload.suite_count == 2
+    assert payload.mixed_suite_count == 2
+    assert payload.passed_suite_count == 0
+
+    summary = interpret_run_report(payload)
+    assert "Suite results: 2 total" in summary
+    assert "test-suite [mixed]" in summary
+    assert "test-suite-2 [mixed]" in summary
+
+    output_path = tmp_path / "aggregate-report.json"
+    write_report(payload, output_path)
+    loaded = load_report(output_path)
+    assert isinstance(loaded, BenchmarkRunReport)
+    assert loaded.suite_count == 2
 
 
 async def test_load_suite_reads_json_file(tmp_path):

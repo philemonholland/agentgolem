@@ -1,0 +1,84 @@
+{
+  "name": "trust-calibration-skewed",
+  "description": "Checks trust calibration on a skewed reliable-rate distribution so constant-trust baselines are less flattering.",
+  "sources": [
+    {
+      "id": "trusted-human",
+      "kind": "human",
+      "origin": "operator",
+      "reliability": 0.95
+    },
+    {
+      "id": "trusted-book",
+      "kind": "niscalajyoti",
+      "origin": "reference-text",
+      "reliability": 0.9
+    },
+    {
+      "id": "shaky-web",
+      "kind": "web",
+      "origin": "unknown-blog",
+      "reliability": 0.1
+    }
+  ],
+  "nodes": [
+    {
+      "id": "reliable-1",
+      "text": "Use UTC timestamps for persisted datetimes",
+      "search_text": "utc timestamps",
+      "type": "rule",
+      "base_usefulness": 0.85,
+      "trustworthiness": 0.96,
+      "source_ids": ["trusted-human"]
+    },
+    {
+      "id": "reliable-2",
+      "text": "All external content is untrusted until processed by the trust pipeline",
+      "search_text": "trust pipeline external content",
+      "type": "rule",
+      "base_usefulness": 0.9,
+      "trustworthiness": 0.94,
+      "source_ids": ["trusted-book"]
+    },
+    {
+      "id": "reliable-3",
+      "text": "Use structlog instead of print for runtime logging",
+      "search_text": "structlog logging",
+      "type": "procedure",
+      "base_usefulness": 0.82,
+      "trustworthiness": 0.9,
+      "source_ids": ["trusted-human"]
+    },
+    {
+      "id": "unreliable-1",
+      "text": "Unverified blog claim about shortcutting approval gates",
+      "search_text": "approval gate shortcut",
+      "type": "interpretation",
+      "base_usefulness": 0.12,
+      "trustworthiness": 0.08,
+      "source_ids": ["shaky-web"]
+    }
+  ],
+  "trust_cases": [
+    {
+      "id": "reliable-1-case",
+      "node_id": "reliable-1",
+      "expected_reliable": true
+    },
+    {
+      "id": "reliable-2-case",
+      "node_id": "reliable-2",
+      "expected_reliable": true
+    },
+    {
+      "id": "reliable-3-case",
+      "node_id": "reliable-3",
+      "expected_reliable": true
+    },
+    {
+      "id": "unreliable-1-case",
+      "node_id": "unreliable-1",
+      "expected_reliable": false
+    }
+  ]
+}

@@ -21,6 +21,8 @@ from agentgolem.benchmarks.metrics import (
 )
 from agentgolem.benchmarks.models import (
     BenchmarkReport,
+    BenchmarkRunReport,
+    BenchmarkStatus,
     BenchmarkSuite,
     RetrievalAggregateMetrics,
     RetrievalBenchmarkReport,
@@ -29,7 +31,13 @@ from agentgolem.benchmarks.models import (
     TrustBenchmarkReport,
     TrustCaseResult,
 )
-from agentgolem.memory.models import ConceptualNode, MemoryEdge, NodeFilter, NodeStatus, Source
+from agentgolem.memory.models import (
+    ConceptualNode,
+    MemoryEdge,
+    NodeFilter,
+    NodeStatus,
+    Source,
+)
 from agentgolem.memory.retrieval import MemoryRetriever
 from agentgolem.memory.schema import close_db, init_db
 from agentgolem.memory.store import SQLiteMemoryStore
@@ -37,17 +45,18 @@ from agentgolem.memory.store import SQLiteMemoryStore
 logger = structlog.get_logger(__name__)
 
 _TRUST_BASELINE = 0.5
+ReportPayload = BenchmarkReport | BenchmarkRunReport
 
 
 def interpret_report(report: BenchmarkReport, output_path: Path | None = None) -> str:
-    """Return a concise human-readable summary of benchmark results."""
+    """Return a concise human-readable summary of one suite report."""
     lines = [f"Suite: {report.suite_name}"]
+    if report.run_label:
+        lines.append(f"Run label: {report.run_label}")
     if report.description:
         lines.append(f"Description: {report.description}")
     if output_path is not None:
         lines.append(f"Report: {output_path}")
-
-    overall_findings: list[str] = []
 
     if report.retrieval is not None:
         retrieval = report.retrieval
@@ -68,41 +77,15 @@ def interpret_report(report: BenchmarkReport, output_path: Path | None = None) -
             f"{retrieval.actual.mean_ndcg_at_k:.3f} "
             f"vs baseline {retrieval.baseline.mean_ndcg_at_k:.3f}"
         )
-        retrieval_wins = _count_wins(
-            actual_values=[
-                retrieval.actual.mean_reciprocal_rank,
-                retrieval.actual.mean_precision_at_k,
-                retrieval.actual.mean_ndcg_at_k,
-            ],
-            baseline_values=[
-                retrieval.baseline.mean_reciprocal_rank,
-                retrieval.baseline.mean_precision_at_k,
-                retrieval.baseline.mean_ndcg_at_k,
-            ],
-            higher_is_better=True,
+        lines.append(
+            "- Verdict: "
+            + _interpret_status(
+                report.retrieval_status,
+                positive="retrieval ranking is helping on this suite.",
+                neutral="retrieval ranking is mixed on this suite.",
+                negative="retrieval ranking is not beating the simple baseline on this suite.",
+            )
         )
-        retrieval_losses = _count_losses(
-            actual_values=[
-                retrieval.actual.mean_reciprocal_rank,
-                retrieval.actual.mean_precision_at_k,
-                retrieval.actual.mean_ndcg_at_k,
-            ],
-            baseline_values=[
-                retrieval.baseline.mean_reciprocal_rank,
-                retrieval.baseline.mean_precision_at_k,
-                retrieval.baseline.mean_ndcg_at_k,
-            ],
-            higher_is_better=True,
-        )
-        retrieval_verdict = _interpret_dimension(
-            wins=retrieval_wins,
-            losses=retrieval_losses,
-            positive="retrieval ranking is helping on this suite.",
-            neutral="retrieval ranking is mixed on this suite.",
-            negative="retrieval ranking is not beating the simple baseline on this suite.",
-        )
-        lines.append(f"- Verdict: {retrieval_verdict}")
-        overall_findings.append(retrieval_verdict)
 
     if report.trust is not None:
         trust = report.trust
@@ -124,50 +107,75 @@ def interpret_report(report: BenchmarkReport, output_path: Path | None = None) -
             "- Avg predicted trust / observed reliable rate: "
             f"{trust.actual.average_prediction:.3f} / {trust.actual.observed_reliable_rate:.3f}"
         )
-        trust_wins = _count_wins(
-            actual_values=[
-                trust.actual.brier_score,
-                trust.actual.expected_calibration_error,
-            ],
-            baseline_values=[
-                trust.constant_baseline.brier_score,
-                trust.constant_baseline.expected_calibration_error,
-            ],
-            higher_is_better=False,
+        lines.append(
+            "- Verdict: "
+            + _interpret_status(
+                report.trust_status,
+                positive="trust scores are better calibrated than the constant baseline.",
+                neutral="trust calibration is mixed on this suite.",
+                negative="trust calibration is not improving on the constant baseline here.",
+            )
         )
-        trust_losses = _count_losses(
-            actual_values=[
-                trust.actual.brier_score,
-                trust.actual.expected_calibration_error,
-            ],
-            baseline_values=[
-                trust.constant_baseline.brier_score,
-                trust.constant_baseline.expected_calibration_error,
-            ],
-            higher_is_better=False,
-        )
-        trust_verdict = _interpret_dimension(
-            wins=trust_wins,
-            losses=trust_losses,
-            positive="trust scores are better calibrated than the constant baseline.",
-            neutral="trust calibration is mixed on this suite.",
-            negative="trust calibration is not improving on the constant baseline here.",
-        )
-        lines.append(f"- Verdict: {trust_verdict}")
-        overall_findings.append(trust_verdict)
 
-    if overall_findings:
+    lines.append("")
+    lines.append(f"Overall: {_overall_status_summary(report.overall_status)}")
+    return "\n".join(lines)
+
+
+def interpret_run_report(
+    run_report: BenchmarkRunReport, output_path: Path | None = None
+) -> str:
+    """Return a concise human-readable summary of a multi-suite run."""
+    lines = ["Benchmark run"]
+    if run_report.run_label:
+        lines.append(f"Run label: {run_report.run_label}")
+    lines.append(f"Target: {run_report.target}")
+    if output_path is not None:
+        lines.append(f"Report: {output_path}")
+    lines.append(
+        "Suite results: "
+        f"{run_report.suite_count} total "
+        f"({run_report.passed_suite_count} pass, "
+        f"{run_report.mixed_suite_count} mixed, "
+        f"{run_report.failed_suite_count} fail)"
+    )
+
+    for suite_report in run_report.suite_reports:
         lines.append("")
-        lines.append(f"Overall: {_overall_verdict(overall_findings)}")
+        lines.append(
+            f"- {suite_report.suite_name} [{suite_report.overall_status.value}]"
+        )
+        if suite_report.retrieval is not None:
+            lines.append(
+                "  retrieval: "
+                f"{suite_report.retrieval_status.value}, "
+                f"MRR {suite_report.retrieval.actual.mean_reciprocal_rank:.3f} "
+                f"vs {suite_report.retrieval.baseline.mean_reciprocal_rank:.3f}"
+            )
+        if suite_report.trust is not None:
+            lines.append(
+                "  trust: "
+                f"{suite_report.trust_status.value}, "
+                f"Brier {suite_report.trust.actual.brier_score:.3f} "
+                f"vs {suite_report.trust.constant_baseline.brier_score:.3f}"
+            )
 
     return "\n".join(lines)
+
+
+def interpret_payload(payload: ReportPayload, output_path: Path | None = None) -> str:
+    """Return a human-readable summary for any benchmark report payload."""
+    if isinstance(payload, BenchmarkRunReport):
+        return interpret_run_report(payload, output_path=output_path)
+    return interpret_report(payload, output_path=output_path)
 
 
 class BenchmarkRunner:
     """Run a benchmark suite against an isolated temporary memory store."""
 
-    def __init__(self, suite: BenchmarkSuite) -> None:
+    def __init__(self, suite: BenchmarkSuite, *, run_label: str = "") -> None:
         self._suite = suite
+        self._run_label = run_label
 
     async def run(self) -> BenchmarkReport:
         """Execute the suite and return a structured report."""
@@ -182,17 +190,27 @@ class BenchmarkRunner:
             finally:
                 await close_db(db)
 
+        retrieval_status = _retrieval_status(retrieval_report)
+        trust_status = _trust_status(trust_report)
+        overall_status = _overall_status([retrieval_status, trust_status])
+
         logger.info(
             "benchmark_completed",
+            run_label=self._run_label or "default",
             suite_name=self._suite.name,
             retrieval_cases=len(self._suite.retrieval_cases),
             trust_cases=len(self._suite.trust_cases),
+            overall_status=overall_status.value,
         )
         return BenchmarkReport(
+            run_label=self._run_label,
             suite_name=self._suite.name,
             description=self._suite.description,
             retrieval=retrieval_report,
             trust=trust_report,
+            retrieval_status=retrieval_status,
+            trust_status=trust_status,
+            overall_status=overall_status,
         )
 
     async def _seed_store(self, store: SQLiteMemoryStore) -> None:
@@ -237,9 +255,13 @@ class BenchmarkRunner:
 
         for edge_spec in self._suite.edges:
             if edge_spec.source_id not in known_node_ids:
-                raise ValueError(f"Edge references missing source node {edge_spec.source_id!r}")
+                raise ValueError(
+                    f"Edge references missing source node {edge_spec.source_id!r}"
+                )
             if edge_spec.target_id not in known_node_ids:
-                raise ValueError(f"Edge references missing target node {edge_spec.target_id!r}")
+                raise ValueError(
+                    f"Edge references missing target node {edge_spec.target_id!r}"
+                )
             await store.add_edge(
                 MemoryEdge(
                     source_id=edge_spec.source_id,
@@ -417,50 +439,114 @@ class BenchmarkRunner:
         return list(all_results.values())
 
 
+async def run_target(target: Path, *, run_label: str = "") -> ReportPayload:
+    """Run one suite file or all suite files within a directory."""
+    if target.is_file():
+        return await BenchmarkRunner(load_suite(target), run_label=run_label).run()
+
+    if not target.is_dir():
+        raise FileNotFoundError(f"Benchmark target {target} does not exist")
+
+    suite_paths = sorted(target.rglob("*.json"))
+    if not suite_paths:
+        raise ValueError(f"No benchmark suites found under {target}")
+
+    suite_reports: list[BenchmarkReport] = []
+    for suite_path in suite_paths:
+        suite_reports.append(
+            await BenchmarkRunner(load_suite(suite_path), run_label=run_label).run()
+        )
+
+    pass_count = sum(report.overall_status == BenchmarkStatus.PASS for report in suite_reports)
+    mixed_count = sum(
+        report.overall_status == BenchmarkStatus.MIXED for report in suite_reports
+    )
+    fail_count = sum(report.overall_status == BenchmarkStatus.FAIL for report in suite_reports)
+
+    return BenchmarkRunReport(
+        run_label=run_label,
+        target=str(target),
+        suite_count=len(suite_reports),
+        passed_suite_count=pass_count,
+        mixed_suite_count=mixed_count,
+        failed_suite_count=fail_count,
+        suite_reports=suite_reports,
+    )
+
+
 def load_suite(path: Path) -> BenchmarkSuite:
     """Load a benchmark suite from JSON."""
     return BenchmarkSuite.model_validate_json(path.read_text(encoding="utf-8"))
 
 
-def write_report(report: BenchmarkReport, path: Path) -> None:
-    """Write a benchmark report to disk as formatted JSON."""
+def load_report(path: Path) -> ReportPayload:
+    """Load a benchmark report payload from JSON."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if "suite_reports" in data:
+        return BenchmarkRunReport.model_validate(data)
+    return BenchmarkReport.model_validate(data)
+
+
+def write_report(payload: ReportPayload, path: Path) -> None:
+    """Write any benchmark report payload to disk as formatted JSON."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps(report.model_dump(mode="json"), indent=2) + "\n",
+        json.dumps(payload.model_dump(mode="json"), indent=2) + "\n",
         encoding="utf-8",
     )
 
 
 async def _run_from_args(args: argparse.Namespace) -> int:
-    suite = load_suite(args.suite)
-    report = await BenchmarkRunner(suite).run()
+    payload = await run_target(args.suite, run_label=args.label)
 
     if args.output is not None:
-        write_report(report, args.output)
+        write_report(payload, args.output)
 
     if args.interpret:
-        sys.stdout.write(interpret_report(report, output_path=args.output) + "\n")
+        sys.stdout.write(interpret_payload(payload, output_path=args.output) + "\n")
         return 0
 
     if args.output is not None:
-        payload = {
-            "suite_name": report.suite_name,
-            "output": str(args.output),
-            "retrieval_mrr": (
-                report.retrieval.actual.mean_reciprocal_rank if report.retrieval else None
-            ),
-            "trust_brier_score": report.trust.actual.brier_score if report.trust else None,
-        }
-        sys.stdout.write(json.dumps(payload, indent=2) + "\n")
+        if isinstance(payload, BenchmarkRunReport):
+            summary = {
+                "run_label": payload.run_label,
+                "output": str(args.output),
+                "suite_count": payload.suite_count,
+                "passed_suite_count": payload.passed_suite_count,
+                "mixed_suite_count": payload.mixed_suite_count,
+                "failed_suite_count": payload.failed_suite_count,
+            }
+        else:
+            summary = {
+                "run_label": payload.run_label,
+                "suite_name": payload.suite_name,
+                "output": str(args.output),
+                "overall_status": payload.overall_status.value,
+                "retrieval_mrr": (
+                    payload.retrieval.actual.mean_reciprocal_rank
+                    if payload.retrieval is not None
+                    else None
+                ),
+                "trust_brier_score": (
+                    payload.trust.actual.brier_score if payload.trust is not None else None
+                ),
+            }
+        sys.stdout.write(json.dumps(summary, indent=2) + "\n")
     else:
-        sys.stdout.write(json.dumps(report.model_dump(mode="json"), indent=2) + "\n")
+        sys.stdout.write(json.dumps(payload.model_dump(mode="json"), indent=2) + "\n")
     return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
     """Create the benchmark CLI parser."""
-    parser = argparse.ArgumentParser(description="Run an offline AgentGolem benchmark suite.")
-    parser.add_argument("suite", type=Path, help="Path to a benchmark suite JSON file.")
+    parser = argparse.ArgumentParser(
+        description="Run an offline AgentGolem benchmark suite or directory of suites."
+    )
+    parser.add_argument(
+        "suite",
+        type=Path,
+        help="Path to a benchmark suite JSON file or a directory containing suite JSON files.",
+    )
     parser.add_argument(
         "--output",
         type=Path,
@@ -472,6 +558,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print a human-readable interpretation instead of JSON output.",
     )
+    parser.add_argument(
+        "--label",
+        default="",
+        help="Optional run label, e.g. a model or provider name for later comparison.",
+    )
     return parser
 
 
@@ -482,52 +573,101 @@ def main(argv: list[str] | None = None) -> int:
     return asyncio.run(_run_from_args(args))
 
 
-def _count_wins(
-    actual_values: list[float], baseline_values: list[float], *, higher_is_better: bool
-) -> int:
+def _retrieval_status(
+    retrieval: RetrievalBenchmarkReport | None,
+) -> BenchmarkStatus:
+    if retrieval is None:
+        return BenchmarkStatus.NOT_APPLICABLE
+    return _status_from_comparison(
+        actual_values=[
+            retrieval.actual.mean_reciprocal_rank,
+            retrieval.actual.mean_precision_at_k,
+            retrieval.actual.mean_ndcg_at_k,
+        ],
+        baseline_values=[
+            retrieval.baseline.mean_reciprocal_rank,
+            retrieval.baseline.mean_precision_at_k,
+            retrieval.baseline.mean_ndcg_at_k,
+        ],
+        higher_is_better=True,
+    )
+
+
+def _trust_status(trust: TrustBenchmarkReport | None) -> BenchmarkStatus:
+    if trust is None:
+        return BenchmarkStatus.NOT_APPLICABLE
+    return _status_from_comparison(
+        actual_values=[
+            trust.actual.brier_score,
+            trust.actual.expected_calibration_error,
+        ],
+        baseline_values=[
+            trust.constant_baseline.brier_score,
+            trust.constant_baseline.expected_calibration_error,
+        ],
+        higher_is_better=False,
+    )
+
+
+def _status_from_comparison(
+    actual_values: list[float],
+    baseline_values: list[float],
+    *,
+    higher_is_better: bool,
+) -> BenchmarkStatus:
     wins = 0
-    for actual, baseline in zip(actual_values, baseline_values, strict=True):
-        if higher_is_better and actual > baseline:
-            wins += 1
-        if not higher_is_better and actual < baseline:
-            wins += 1
-    return wins
-
-
-def _count_losses(
-    actual_values: list[float], baseline_values: list[float], *, higher_is_better: bool
-) -> int:
     losses = 0
     for actual, baseline in zip(actual_values, baseline_values, strict=True):
-        if higher_is_better and actual < baseline:
-            losses += 1
-        if not higher_is_better and actual > baseline:
-            losses += 1
-    return losses
+        if higher_is_better:
+            if actual > baseline:
+                wins += 1
+            elif actual < baseline:
+                losses += 1
+        else:
+            if actual < baseline:
+                wins += 1
+            elif actual > baseline:
+                losses += 1
+
+    if wins > 0 and losses == 0:
+        return BenchmarkStatus.PASS
+    if wins == 0 and losses > 0:
+        return BenchmarkStatus.FAIL
+    return BenchmarkStatus.MIXED
 
 
-def _interpret_dimension(
+def _overall_status(statuses: list[BenchmarkStatus]) -> BenchmarkStatus:
+    relevant = [status for status in statuses if status != BenchmarkStatus.NOT_APPLICABLE]
+    if not relevant:
+        return BenchmarkStatus.NOT_APPLICABLE
+    if all(status == BenchmarkStatus.PASS for status in relevant):
+        return BenchmarkStatus.PASS
+    if all(status == BenchmarkStatus.FAIL for status in relevant):
+        return BenchmarkStatus.FAIL
+    return BenchmarkStatus.MIXED
+
+
+def _interpret_status(
+    status: BenchmarkStatus,
     *,
-    wins: int,
-    losses: int,
     positive: str,
     neutral: str,
     negative: str,
 ) -> str:
-    if wins > 0 and losses == 0:
+    if status == BenchmarkStatus.PASS:
         return positive
-    if wins == 0 and losses > 0:
+    if status == BenchmarkStatus.FAIL:
         return negative
-    return neutral
+    if status == BenchmarkStatus.MIXED:
+        return neutral
+    return "no applicable benchmark cases were present for this dimension."
 
 
-def _overall_verdict(findings: list[str]) -> str:
-    positive_count = sum(
-        "helping" in finding or "better calibrated" in finding for finding in findings
-    )
-    negative_count = sum("not " in finding for finding in findings)
-    if positive_count == len(findings):
+def _overall_status_summary(status: BenchmarkStatus) -> str:
+    if status == BenchmarkStatus.PASS:
         return "on this suite, the architecture is beating the simple baselines."
-    if negative_count == len(findings):
+    if status == BenchmarkStatus.FAIL:
         return "on this suite, the architecture is not showing a benchmark advantage yet."
-    return "this suite shows a mixed picture; some mechanisms help, others still need work."
+    if status == BenchmarkStatus.MIXED:
+        return "this suite shows a mixed picture; some mechanisms help, others still need work."
+    return "this suite did not include enough benchmark dimensions to score."

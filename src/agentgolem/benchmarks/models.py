@@ -2,10 +2,20 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
 from agentgolem.memory.models import EdgeType, NodeStatus, NodeType, SourceKind
+
+
+class BenchmarkStatus(StrEnum):
+    """Normalized status labels for benchmark dimensions and suites."""
+
+    PASS = "pass"
+    MIXED = "mixed"
+    FAIL = "fail"
+    NOT_APPLICABLE = "not_applicable"
 
 
 class BenchmarkSourceSpec(BaseModel):
@@ -138,10 +148,27 @@ class TrustBenchmarkReport(BaseModel):
 
 
 class BenchmarkReport(BaseModel):
-    """Full benchmark run output."""
+    """Full benchmark report for a single suite."""
 
+    run_label: str = ""
     suite_name: str
     description: str = ""
     generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     retrieval: RetrievalBenchmarkReport | None = None
     trust: TrustBenchmarkReport | None = None
+    retrieval_status: BenchmarkStatus = BenchmarkStatus.NOT_APPLICABLE
+    trust_status: BenchmarkStatus = BenchmarkStatus.NOT_APPLICABLE
+    overall_status: BenchmarkStatus = BenchmarkStatus.NOT_APPLICABLE
+
+
+class BenchmarkRunReport(BaseModel):
+    """Report for a run that executed multiple suites."""
+
+    run_label: str = ""
+    target: str
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    suite_count: int
+    passed_suite_count: int
+    mixed_suite_count: int
+    failed_suite_count: int
+    suite_reports: list[BenchmarkReport]

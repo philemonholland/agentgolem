@@ -233,14 +233,19 @@ Run the offline benchmark harness against a labeled JSON suite:
 
 ```powershell
 benchmark.bat
-python -m agentgolem.benchmarks benchmarks\sample_suite.json
-python -m agentgolem.benchmarks benchmarks\sample_suite.json --output data\benchmarks\sample_report.json
-python -m agentgolem.benchmarks benchmarks\sample_suite.json --output data\benchmarks\sample_report.json --interpret
+python -m agentgolem.benchmarks benchmarks
+python -m agentgolem.benchmarks benchmarks --output data\benchmarks\latest_run.json --interpret
+python -m agentgolem.benchmarks benchmarks --output data\benchmarks\gpt-5.4.json --label gpt-5.4
+python -m agentgolem.benchmarks benchmarks --output data\benchmarks\claude-sonnet-4.6.json --label claude-sonnet-4.6
+python -m agentgolem.benchmarks.compare data\benchmarks\gpt-5.4.json data\benchmarks\claude-sonnet-4.6.json
 ```
 
 The current harness benchmarks retrieval ranking and trust calibration against
 simple baselines so you can measure whether the architecture is helping or just
 adding complexity.
+
+Current suites are still mostly memory/trust focused, so cross-model comparison
+becomes more meaningful as autonomy, dialogue, and tool-use benchmark tracks are added.
 
 For the suite format and planned extensions, see
 **[docs/benchmarking.md](docs/benchmarking.md)**.

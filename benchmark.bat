@@ -14,10 +14,10 @@ if exist ".venv\Scripts\activate.bat" (
 
 echo.
 if "%~1"=="" (
-    echo Running default benchmark suite...
-    python -m agentgolem.benchmarks benchmarks\sample_suite.json --output data\benchmarks\latest_report.json --interpret
+    echo Running benchmark suite directory...
+    python -m agentgolem.benchmarks benchmarks --output data\benchmarks\latest_run.json --interpret
 ) else (
-    echo Running benchmark suite: %~1
+    echo Running benchmark target: %~1
     python -m agentgolem.benchmarks %* --interpret
 )
 
