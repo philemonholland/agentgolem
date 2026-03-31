@@ -26,9 +26,11 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from agentgolem.config.settings import Settings
 
 # Ensure UTF-8 output on Windows (avoids cp1252 encoding errors with emoji)
@@ -477,6 +479,27 @@ PARAM_DEFS: list[ParamDef] = [
         "Communication",
     ),
     param(
+        "google_custom_search_enabled",
+        "Google Search Enabled",
+        "Enable Google Custom Search as a web search backend",
+        "bool",
+        "Communication",
+    ),
+    param(
+        "google_gmail_api_enabled",
+        "Google Gmail API Ready",
+        "Expose Gmail API readiness/config status for future integration",
+        "bool",
+        "Communication",
+    ),
+    param(
+        "google_drive_api_enabled",
+        "Google Drive API Ready",
+        "Expose Drive API readiness/config status for future integration",
+        "bool",
+        "Communication",
+    ),
+    param(
         "dry_run_mode",
         "Dry-Run Mode",
         "Outbound actions logged but not executed",
@@ -577,6 +600,34 @@ PARAM_DEFS: list[ParamDef] = [
         "Browser Timeout (s)",
         "HTTP request timeout for web browsing",
         "int",
+        "Browser",
+    ),
+    param(
+        "google_custom_search_default_num_results",
+        "Search Default Results",
+        "Default number of search results returned per query",
+        "int",
+        "Browser",
+    ),
+    param(
+        "google_custom_search_hourly_quota",
+        "Search Avg Budget (/hour)",
+        "Average Google search refill rate per hour with rollover",
+        "int",
+        "Browser",
+    ),
+    param(
+        "google_custom_search_bucket_capacity",
+        "Search Bucket Capacity",
+        "Maximum stored Google search budget tokens",
+        "int",
+        "Browser",
+    ),
+    param(
+        "google_custom_search_safe",
+        "Search Safe Mode",
+        "Google Custom Search safe mode (active or off)",
+        "str",
         "Browser",
     ),
     # --- LLM ---
@@ -871,6 +922,41 @@ PARAM_DEFS: list[ParamDef] = [
     param("email_imap_password", "Email IMAP Password", "IMAP password", "secret", "Secrets"),
     param("moltbook_api_key", "Moltbook API Key", "Moltbook integration key", "secret", "Secrets"),
     param("moltbook_base_url", "Moltbook Base URL", "Moltbook API endpoint", "str_env", "Secrets"),
+    param(
+        "google_custom_search_api_key",
+        "Google Search API Key",
+        "API key for Google Custom Search JSON API",
+        "secret",
+        "Secrets",
+    ),
+    param(
+        "google_custom_search_engine_id",
+        "Google Search Engine ID",
+        "Programmable Search Engine ID (cx)",
+        "str_env",
+        "Secrets",
+    ),
+    param(
+        "google_oauth_client_id",
+        "Google OAuth Client ID",
+        "Optional Google desktop OAuth client ID hint for setup",
+        "secret",
+        "Secrets",
+    ),
+    param(
+        "google_oauth_client_file",
+        "Google OAuth Client File",
+        "Local path to downloaded Google desktop OAuth client JSON",
+        "str_env",
+        "Secrets",
+    ),
+    param(
+        "google_oauth_token_file",
+        "Google OAuth Token File",
+        "Local path to cached Google OAuth token JSON",
+        "str_env",
+        "Secrets",
+    ),
 ]
 
 
@@ -918,6 +1004,11 @@ ENV_KEY_MAP: dict[str, str] = {
     "email_imap_password": "EMAIL_IMAP_PASSWORD",
     "moltbook_api_key": "MOLTBOOK_API_KEY",
     "moltbook_base_url": "MOLTBOOK_BASE_URL",
+    "google_custom_search_api_key": "GOOGLE_CUSTOM_SEARCH_API_KEY",
+    "google_custom_search_engine_id": "GOOGLE_CUSTOM_SEARCH_ENGINE_ID",
+    "google_oauth_client_id": "GOOGLE_OAUTH_CLIENT_ID",
+    "google_oauth_client_file": "GOOGLE_OAUTH_CLIENT_FILE",
+    "google_oauth_token_file": "GOOGLE_OAUTH_TOKEN_FILE",
 }
 
 # ---------------------------------------------------------------------------
@@ -1338,8 +1429,15 @@ def _hot_reload_live_setting(
     tool_route_keys = {
         "email_enabled",
         "moltbook_enabled",
+        "google_custom_search_enabled",
+        "google_gmail_api_enabled",
+        "google_drive_api_enabled",
         "browser_rate_limit_per_minute",
         "browser_timeout_seconds",
+        "google_custom_search_default_num_results",
+        "google_custom_search_hourly_quota",
+        "google_custom_search_bucket_capacity",
+        "google_custom_search_safe",
         "approval_required_actions",
         "email_smtp_host",
         "email_smtp_port",
@@ -1350,6 +1448,11 @@ def _hot_reload_live_setting(
         "email_imap_password",
         "moltbook_api_key",
         "moltbook_base_url",
+        "google_custom_search_api_key",
+        "google_custom_search_engine_id",
+        "google_oauth_client_id",
+        "google_oauth_client_file",
+        "google_oauth_token_file",
     }
     dashboard_keys = {
         "dashboard_refresh_interval_seconds",
@@ -1455,7 +1558,14 @@ def _hot_reload_live_setting(
                 if gate is not None and hasattr(gate, "update_required_actions"):
                     required = value if isinstance(value, list) else [str(value)]
                     gate.update_required_actions(required)
-            if key in {"browser_rate_limit_per_minute", "browser_timeout_seconds"}:
+            if key in {
+                "browser_rate_limit_per_minute",
+                "browser_timeout_seconds",
+                "google_custom_search_default_num_results",
+                "google_custom_search_hourly_quota",
+                "google_custom_search_bucket_capacity",
+                "google_custom_search_safe",
+            }:
                 agent._browser = None
             try:
                 agent.configure_tool_registry()
@@ -2266,7 +2376,7 @@ def start_dashboard(
         for key in Settings.model_fields
     }
     default_values.update(LAUNCHER_DEFAULTS)
-    for key, env_key in ENV_KEY_MAP.items():
+    for key, _env_key in ENV_KEY_MAP.items():
         spec = PARAM_LOOKUP[key]
         default_values.setdefault(key, 0 if spec.ptype == "int_env" else "")
 

@@ -81,8 +81,17 @@ control (listed in `.gitignore`). Copy `.env.example` as a starting point.
 | `EMAIL_IMAP_PASSWORD` | No*      | IMAP password                                 |
 | `MOLTBOOK_API_KEY`    | No*      | API key for Moltbook integration              |
 | `MOLTBOOK_BASE_URL`   | No*      | Moltbook API base URL                         |
+| `GOOGLE_CUSTOM_SEARCH_API_KEY` | No* | API key for Google Custom Search JSON API  |
+| `GOOGLE_CUSTOM_SEARCH_ENGINE_ID` | No* | Programmable Search Engine ID (`cx`)     |
+| `GOOGLE_OAUTH_CLIENT_ID` | No    | Optional hint / mirror of the desktop OAuth client ID |
+| `GOOGLE_OAUTH_CLIENT_FILE` | No* | Local path to Desktop App OAuth JSON         |
+| `GOOGLE_OAUTH_TOKEN_FILE` | No*  | Local path to cached Google OAuth token JSON |
 
 \* Required only if the corresponding feature is enabled in `settings.yaml`.
+
+Google Custom Search uses an API key plus engine ID (`cx`) and does **not**
+use OAuth. Gmail and Drive are separate: they use Desktop App OAuth
+credentials stored in local, gitignored files.
 
 ### `config/settings.yaml` — Agent-Tunable Settings
 

@@ -54,6 +54,7 @@ def test_settings_from_yaml(mock_settings_yaml: Path) -> None:
     assert settings.llm_discussion_model == "deepseek-reasoner"
     assert settings.llm_code_model == "gpt-5.4"
     assert settings.dry_run_mode is True
+    assert settings.google_custom_search_enabled is True
     assert isinstance(settings.data_dir, Path)
 
 
@@ -82,6 +83,10 @@ def test_settings_defaults_when_no_yaml(tmp_path: Path) -> None:
     assert settings.llm_code_model == "gpt-5.4"
     assert settings.log_level == "INFO"
     assert settings.dry_run_mode is False
+    assert settings.google_custom_search_enabled is False
+    assert settings.google_custom_search_hourly_quota == 4
+    assert settings.google_custom_search_bucket_capacity == 100
+    assert settings.google_custom_search_safe == "active"
     assert settings.approval_required_actions == ["email_send", "moltbook_send"]
 
 
@@ -107,6 +112,11 @@ def test_secrets_from_env_file(tmp_env_file: Path) -> None:
     assert secrets.email_imap_password.get_secret_value() == "test-imap-pass"
     assert secrets.moltbook_api_key.get_secret_value() == "mk-test-key-67890"
     assert secrets.moltbook_base_url == "https://moltbook.test.com/api"
+    assert secrets.google_custom_search_api_key.get_secret_value() == "google-search-key"
+    assert secrets.google_custom_search_engine_id == "test-engine-id"
+    assert secrets.google_oauth_client_id.get_secret_value() == "test-google-client-id"
+    assert secrets.google_oauth_client_file == "config/google_oauth_client.json"
+    assert secrets.google_oauth_token_file == "data/google/oauth_token.json"
 
 
 # ── 4. SecretStr fields don't expose values via str() ───────────────────
@@ -122,6 +132,8 @@ def test_secretstr_fields_are_hidden(tmp_env_file: Path) -> None:
         secrets.email_smtp_password,
         secrets.email_imap_password,
         secrets.moltbook_api_key,
+        secrets.google_custom_search_api_key,
+        secrets.google_oauth_client_id,
     ]
     for field in secret_fields:
         assert isinstance(field, SecretStr)

@@ -4,18 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import threading
-
-# Import from the launcher module at repo root
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+import run_golem
 import yaml
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-import run_golem
 from agentgolem.runtime.interrupts import InterruptManager
 
 # ---------------------------------------------------------------------------
@@ -83,6 +78,26 @@ class TestParamStore:
         # Verify written to .env
         content = (tmp_env / ".env").read_text()
         assert "OPENAI_API_KEY=sk-test-key-123" in content
+
+    def test_set_persists_google_search_env_params(self, tmp_env):
+        store = run_golem.ParamStore()
+        store.set("google_custom_search_api_key", "search-key", "secret")
+        store.set("google_custom_search_engine_id", "engine-123", "str_env")
+        store.set("google_oauth_client_id", "client-id-123", "secret")
+
+        content = (tmp_env / ".env").read_text()
+        assert "GOOGLE_CUSTOM_SEARCH_API_KEY=search-key" in content
+        assert "GOOGLE_CUSTOM_SEARCH_ENGINE_ID=engine-123" in content
+        assert "GOOGLE_OAUTH_CLIENT_ID=client-id-123" in content
+
+    def test_set_persists_google_search_settings(self, tmp_env):
+        store = run_golem.ParamStore()
+        store.set("google_custom_search_enabled", True, "bool")
+        store.set("google_custom_search_hourly_quota", 4, "int")
+
+        data = yaml.safe_load((tmp_env / "config" / "settings.yaml").read_text())
+        assert data["google_custom_search_enabled"] is True
+        assert data["google_custom_search_hourly_quota"] == 4
 
     def test_get_display_masks_secrets(self, tmp_env):
         store = run_golem.ParamStore()

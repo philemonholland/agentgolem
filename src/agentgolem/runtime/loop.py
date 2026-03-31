@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlparse
+from urllib.parse import urldefrag, urlparse
 
 import httpx
 import yaml
@@ -365,6 +365,7 @@ class MainLoop:
         self._council7_source_retries = 0
         self._agent_readme_read = False  # read AGENT_README.md once after NJ
         self._browse_queue: list[str] = []
+        self._known_urls: dict[str, None] = {}
         self._recent_thoughts: list[str] = []
         self._last_autonomous_tick: datetime | None = None
         self._autonomous_interval = getattr(settings, "autonomous_interval_seconds", 60.0)
@@ -963,6 +964,11 @@ class MainLoop:
         """Build the machine-readable toolbox available to this agent."""
         from agentgolem.tools.browser import BrowserTool
         from agentgolem.tools.email_tool import EmailTool
+        from agentgolem.tools.google_search import (
+            GoogleCustomSearchBackend,
+            PersistentTokenBucket,
+            SearchTool,
+        )
         from agentgolem.tools.moltbook import MoltbookClient
 
         registry = ToolRegistry(
@@ -970,6 +976,34 @@ class MainLoop:
             approval_gate=self._approval_gate,
         )
         registry.register(BrowserTool(self._get_browser()))
+        if getattr(self._settings, "google_custom_search_enabled", False):
+            quota_path = self._data_dir.parent / "state" / "google_custom_search_quota.json"
+            registry.register(
+                SearchTool(
+                    GoogleCustomSearchBackend(
+                        api_key=self._secret_value(self._secrets.google_custom_search_api_key),
+                        engine_id=self._secrets.google_custom_search_engine_id,
+                        timeout_seconds=getattr(self._settings, "browser_timeout_seconds", 20),
+                    ),
+                    quota=PersistentTokenBucket(
+                        quota_path,
+                        capacity=getattr(
+                            self._settings,
+                            "google_custom_search_bucket_capacity",
+                            100,
+                        ),
+                        refill_rate_per_hour=float(
+                            getattr(self._settings, "google_custom_search_hourly_quota", 4)
+                        ),
+                    ),
+                    default_num_results=getattr(
+                        self._settings,
+                        "google_custom_search_default_num_results",
+                        5,
+                    ),
+                    safe_mode=getattr(self._settings, "google_custom_search_safe", "active"),
+                )
+            )
 
         if getattr(self._settings, "email_enabled", False):
             registry.register(
@@ -1000,6 +1034,58 @@ class MainLoop:
 
         # Declarative skill packs from config/skills/*.yaml
         self._load_skill_packs(registry)
+
+    def _normalize_http_url(self, url: str) -> str:
+        """Normalize an absolute HTTP URL for deduplication and trust checks."""
+        normalized, _ = urldefrag(str(url).strip())
+        if normalized.endswith("/"):
+            normalized = normalized.rstrip("/")
+        return normalized
+
+    def _remember_urls(self, urls: list[str]) -> None:
+        """Remember discovered URLs so later browse actions can be validated."""
+        for url in urls:
+            normalized = self._normalize_http_url(url)
+            if normalized.startswith(("http://", "https://")):
+                self._known_urls[normalized] = None
+        while len(self._known_urls) > 200:
+            oldest = next(iter(self._known_urls))
+            del self._known_urls[oldest]
+
+    def _is_known_url(self, url: str) -> bool:
+        """Return whether a URL was discovered through search or crawling."""
+        normalized = self._normalize_http_url(url)
+        return normalized in self._known_urls or normalized in {
+            self._normalize_http_url(queued) for queued in self._browse_queue
+        }
+
+    def _queue_model_browse_url(self, url: str) -> bool:
+        """Queue a model-suggested URL only if it was previously discovered."""
+        normalized = self._normalize_http_url(url)
+        if not normalized.startswith(("http://", "https://")):
+            self._emit("⚠️", f"Invalid URL: {url}")
+            return False
+        if (
+            self._is_seventh_council()
+            and not self._council7_broadened
+            and not self._is_allowed_council7_url(normalized)
+        ):
+            self._emit(
+                "🚧",
+                f"Council-7 ignored non-foundation browse target before broadening: {normalized}",
+            )
+            return False
+        if not self._is_known_url(normalized):
+            self._emit(
+                "🚫",
+                f"Ignored unverified browse target: {normalized}. Search or crawl first.",
+            )
+            return False
+        self._remember_urls([normalized])
+        if normalized not in self._browse_queue:
+            self._browse_queue.append(normalized)
+            self._emit("📌", f"Queued URL: {normalized}")
+        return True
 
     def _load_skill_packs(self, registry: ToolRegistry) -> None:
         """Load YAML skill manifests and register them as tools."""
@@ -2574,6 +2660,11 @@ class MainLoop:
             saved_queue = data.get("browse_queue", [])
             if saved_queue:
                 self._browse_queue = saved_queue
+                self._remember_urls(saved_queue)
+
+            saved_known_urls = data.get("known_urls", [])
+            if saved_known_urls:
+                self._remember_urls(saved_known_urls)
 
             # Timing state
             ts = data.get("last_peer_checkin")
@@ -2663,6 +2754,7 @@ class MainLoop:
             "agent_name": self.agent_name,
             "recent_thoughts": self._recent_thoughts[-10:],
             "browse_queue": self._browse_queue[:20],
+            "known_urls": list(self._known_urls.keys())[-100:],
             "last_peer_checkin": (
                 self._last_peer_checkin.isoformat() if self._last_peer_checkin else None
             ),
@@ -3286,6 +3378,7 @@ class MainLoop:
                         num = int(line.split()[1]) - 1
                         if 0 <= num < len(NISCALAJYOTI_CHAPTERS):
                             url = NISCALAJYOTI_CHAPTERS[num]["url"]
+                            self._remember_urls([url])
                             self._browse_queue.append(url)
                             self._emit(
                                 "📌",
@@ -4161,79 +4254,109 @@ class MainLoop:
             await asyncio.sleep(2.0)
             return
 
+        if capability == "search.query":
+            query = arguments.get("query", "").strip()
+            if not query:
+                self._emit("⚠️", "Capability missing query: search.query")
+                return
+            await self._autonomous_search(
+                query,
+                num=arguments.get("num"),
+                start=arguments.get("start"),
+                site_search=arguments.get("site_search", "").strip(),
+                safe=arguments.get("safe"),
+                gl=arguments.get("gl", "").strip(),
+                hl=arguments.get("hl", "").strip(),
+                lr=arguments.get("lr", "").strip(),
+            )
+            return
+
         if capability == "browser.fetch_text":
             url = arguments.get("url", "").strip()
             if not url:
                 self._emit("⚠️", "Capability missing url: browser.fetch_text")
                 return
-            await self._autonomous_browse(url)
+            normalized = self._normalize_http_url(url)
+            if not self._is_known_url(normalized):
+                self._emit(
+                    "🚫",
+                    f"Ignored unverified browse target: {normalized}. Use search first.",
+                )
+                return
+            await self._autonomous_browse(normalized)
             return
 
-        if capability.startswith("email."):
-            tool_action = capability.split(".", 1)[1]
-            result = await self._invoke_registered_tool("email", action=tool_action, **arguments)
-            if result.success:
-                self._recent_thoughts.append(f"Used {capability}")
-                self._emit("📨", f"{capability}: {result.data}")
-            else:
-                self._emit("❌", f"{capability} failed: {result.error}")
-            return
-
-        if capability.startswith("moltbook."):
-            tool_action = capability.split(".", 1)[1]
+        spec = self._tool_registry.get_capability(capability) if self._tool_registry else None
+        if spec is not None:
+            action_name = spec.action_name if spec.action_name not in ("",) else "execute"
             result = await self._invoke_registered_tool(
-                "moltbook",
-                action=tool_action,
+                spec.tool_name,
+                action=action_name,
                 **arguments,
             )
+            icon = {
+                "email": "📨",
+                "moltbook": "🍄",
+                "search": "🔎",
+                "gmail": "📮",
+                "drive": "🗂️",
+            }.get(spec.tool_name, "🧰")
             if result.success:
                 self._recent_thoughts.append(f"Used {capability}")
-                self._emit("🍄", f"{capability}: {result.data}")
+                self._emit(icon, f"{capability}: {result.data}")
             else:
                 self._emit("❌", f"{capability} failed: {result.error}")
             return
 
     async def _autonomous_browse(self, url: str) -> None:
         """Browse a URL, reflect on it, optionally share findings."""
-        self._emit("🌐", f"Browsing: {url}")
+        normalized_url = self._normalize_http_url(url)
+        self._emit("🌐", f"Browsing: {normalized_url}")
 
         try:
             result = await self._invoke_registered_tool(
                 "browser",
                 action="fetch_text",
-                url=url,
+                url=normalized_url,
                 max_chars=6000,
             )
             if not result.success:
-                self._emit("❌", f"Failed to browse {url}: {result.error}")
+                self._emit("❌", f"Failed to browse {normalized_url}: {result.error}")
                 return
 
             data = result.data or {}
             text = str(data.get("text", ""))
-            self._emit("📖", f"Read {len(text):,} chars from {url}")
+            final_url = self._normalize_http_url(str(data.get("url", normalized_url)))
+            links = [
+                self._normalize_http_url(str(link))
+                for link in data.get("links", [])
+                if str(link).startswith(("http://", "https://"))
+            ]
+            self._remember_urls([final_url, *links])
+            self._emit("📖", f"Read {len(text):,} chars from {final_url}")
 
             memory_context = await self._build_memory_context(
-                f"browse {url} {self.ethical_vector}",
+                f"browse {final_url} {self.ethical_vector}",
                 top_k=5,
             )
             memory_block = f"\n{memory_context}\n" if memory_context else ""
             prompt = (
                 f"{self._identity_preamble()}\n{memory_block}\n"
-                f"You just read this web page ({url}):\n\n"
+                f"You just read this web page ({final_url}):\n\n"
                 f"{text}\n\n"
                 f"What do you find interesting or relevant? "
                 f"Would you like to share anything with your peers? "
                 f"Respond naturally in 1–2 paragraphs."
             )
             thought = await self._complete_discussion([Message(role="system", content=prompt)])
-            self._recent_thoughts.append(f"Browsed {url}: {thought[:300]}")
+            self._recent_thoughts.append(f"Browsed {final_url}: {thought[:300]}")
             self._emit("💭", thought)
 
             # Maybe share with peers
             if self._peer_bus and len(thought) > 50:
                 await self._peer_bus.broadcast(
                     self.agent_name,
-                    f"I just read {url} and wanted to share: {thought}",
+                    f"I just read {final_url} and wanted to share: {thought}",
                 )
                 self._emit("📤", "Shared browsing insights with peers")
 
@@ -4241,10 +4364,84 @@ class MainLoop:
             self._logger.error(
                 "browse_error",
                 agent=self.agent_name,
-                url=url,
+                url=normalized_url,
                 error=repr(e),
             )
-            self._emit("❌", f"Failed to browse {url}: {e}")
+            self._emit("❌", f"Failed to browse {normalized_url}: {e}")
+
+    async def _autonomous_search(
+        self,
+        query: str,
+        *,
+        num: Any = None,
+        start: Any = None,
+        site_search: str = "",
+        safe: Any = None,
+        gl: str = "",
+        hl: str = "",
+        lr: str = "",
+    ) -> None:
+        """Search the web, remember discovered links, and queue top results."""
+        suffix = f" (site: {site_search})" if site_search else ""
+        self._emit("🔎", f"Searching: {query}{suffix}")
+
+        kwargs: dict[str, Any] = {"action": "query", "query": query}
+        if num not in (None, ""):
+            kwargs["num"] = num
+        if start not in (None, ""):
+            kwargs["start"] = start
+        if site_search:
+            kwargs["site_search"] = site_search
+        if safe not in (None, ""):
+            kwargs["safe"] = safe
+        if gl:
+            kwargs["gl"] = gl
+        if hl:
+            kwargs["hl"] = hl
+        if lr:
+            kwargs["lr"] = lr
+
+        result = await self._invoke_registered_tool("search", **kwargs)
+        if not result.success:
+            self._emit("❌", f"Search failed: {result.error}")
+            return
+
+        data = result.data or {}
+        results = data.get("results", [])
+        links = [
+            self._normalize_http_url(str(link))
+            for link in data.get("links", [])
+            if str(link).startswith(("http://", "https://"))
+        ]
+        self._remember_urls(links)
+
+        quota_remaining = data.get("quota_remaining")
+        quota_suffix = f" | quota left {quota_remaining}" if quota_remaining is not None else ""
+        self._emit("🔎", f"Found {len(results)} result(s){quota_suffix}")
+
+        preview_lines: list[str] = []
+        for item in results[:3]:
+            title = str(item.get("title", "")).strip() or "(untitled)"
+            link = self._normalize_http_url(str(item.get("link", "")))
+            snippet = str(item.get("snippet", "")).strip()
+            preview = f"- {title} — {link}"
+            if snippet:
+                preview += f" :: {snippet[:120]}"
+            preview_lines.append(preview)
+
+        if preview_lines:
+            self._emit("📚", "\n".join(preview_lines))
+
+        queued = 0
+        for link in links[:2]:
+            if link not in self._browse_queue:
+                self._browse_queue.append(link)
+                queued += 1
+        if queued:
+            self._emit("📌", f"Queued {queued} discovered URL(s) from search")
+
+        summary = preview_lines[0] if preview_lines else "(no results)"
+        self._recent_thoughts.append(f"Searched '{query}': {summary[:300]}")
 
     async def _autonomous_think(self, topic: str) -> None:
         """Reflect on a topic internally."""
@@ -4421,7 +4618,9 @@ class MainLoop:
             f"Peers: {peers}\n"
             f"Recent:\n{recent}\n{memory_block}\n"
             f"Actions:\n"
-            f"- BROWSE <url>\n- THINK <topic>\n"
+            f"- SEARCH <query>\n"
+            f"- BROWSE <url> (only if the URL was discovered through search/crawling; never guess)\n"
+            f"- THINK <topic>\n"
             f"- SHARE <message> / SHARE @<agent> <message>\n"
             f"- OPTIMIZE <setting> <value> | <reason>\n"
             f"{codebase_actions}"
@@ -4444,18 +4643,41 @@ class MainLoop:
         for line in action_line.splitlines():
             line = line.strip()
             if line.upper().startswith(
-                ("BROWSE ", "THINK ", "SHARE ", "OPTIMIZE ", "IDLE", "INSPECT ", "EVOLVE ")
+                (
+                    "SEARCH ",
+                    "BROWSE ",
+                    "THINK ",
+                    "SHARE ",
+                    "OPTIMIZE ",
+                    "IDLE",
+                    "INSPECT ",
+                    "EVOLVE ",
+                )
             ):
                 action_line = line
                 break
 
-        if action_line.upper().startswith("BROWSE "):
+        if action_line.upper().startswith("SEARCH "):
+            query = action_line[7:].strip()
+            if not query:
+                self._emit("⚠️", "Search query cannot be empty")
+                return
+            await self._autonomous_search(query)
+
+        elif action_line.upper().startswith("BROWSE "):
             url = action_line[7:].strip()
             _skip_ext = (".pdf", ".zip", ".png", ".jpg", ".jpeg", ".gif", ".svg")
             if any(url.lower().endswith(ext) for ext in _skip_ext):
                 self._emit("⏭️", f"Skipping download: {url}")
             elif url.startswith("http"):
-                await self._autonomous_browse(url)
+                normalized = self._normalize_http_url(url)
+                if self._is_known_url(normalized):
+                    await self._autonomous_browse(normalized)
+                else:
+                    self._emit(
+                        "🚫",
+                        f"Ignored unverified browse target: {normalized}. Use SEARCH first.",
+                    )
             else:
                 self._emit("⚠️", f"Invalid URL: {url}")
 
@@ -4545,7 +4767,8 @@ class MainLoop:
                 f"or open it into a sharper question.\n\n"
                 f"{self._discussion_style_guidance()}\n\n"
                 f"You may also decide to:\n"
-                f"- BROWSE <url> if they mention something worth reading\n"
+                f"- SEARCH <query> if they mention an article, concept, or site but you do not have a validated URL\n"
+                f"- BROWSE <url> only if you actually saw that exact URL in prior search results or crawled links; never guess URLs\n"
                 f"- THINK <topic> to reflect privately\n"
                 f"- Just respond naturally\n\n"
                 f"If you want to take an action, put it on its own line "
@@ -4617,8 +4840,9 @@ class MainLoop:
                     "as a loyal, good-faith devil's advocate."
                 )
                 browse_rule = (
-                    "You may optionally add BROWSE <url> on its own line after "
-                    "your response if a source would deepen the inquiry."
+                    "You may optionally add SEARCH <query> on its own line if you "
+                    "need to find a source. Only add BROWSE <url> if you actually "
+                    "saw that exact URL in prior search results or crawled links."
                 )
             else:
                 mandate = (
@@ -4627,8 +4851,10 @@ class MainLoop:
                     "than widening into general exploration."
                 )
                 browse_rule = (
-                    "You may optionally add BROWSE <url> on its own line after "
-                    "your response, but only if the URL is from SEP, Alignment "
+                    "You may optionally add SEARCH <query> on its own line, but "
+                    "keep it anchored to SEP, Alignment Forum, or LessWrong. Only "
+                    "add BROWSE <url> if you actually saw that exact URL in prior "
+                    "search results or crawled links and it is from SEP, Alignment "
                     "Forum, or LessWrong."
                 )
 
@@ -4699,22 +4925,14 @@ class MainLoop:
         """Execute any tool-ish action lines embedded after a peer response."""
         for line in response.splitlines():
             line = line.strip()
-            if line.upper().startswith("BROWSE "):
+            if line.upper().startswith("SEARCH "):
+                query = line[7:].strip()
+                if not query:
+                    continue
+                await self._autonomous_search(query)
+            elif line.upper().startswith("BROWSE "):
                 url = line[7:].strip()
-                if not url.startswith("http"):
-                    continue
-                if (
-                    self._is_seventh_council()
-                    and not self._council7_broadened
-                    and not self._is_allowed_council7_url(url)
-                ):
-                    self._emit(
-                        "🚧",
-                        f"Council-7 ignored non-foundation browse target before broadening: {url}",
-                    )
-                    continue
-                self._browse_queue.append(url)
-                self._emit("📌", f"Queued URL: {url}")
+                self._queue_model_browse_url(url)
             elif line.upper().startswith("OPTIMIZE "):
                 await self._parse_and_optimize(line[9:].strip())
             elif line.upper().startswith("INSPECT "):

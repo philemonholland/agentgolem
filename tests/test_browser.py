@@ -1,15 +1,18 @@
 """Tests for the web browsing tool."""
 from __future__ import annotations
 
-import time
-from pathlib import Path
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import httpx
 import pytest
 import respx
 
 from agentgolem.logging.audit import AuditLogger
-from agentgolem.tools.browser import WebBrowser, WebPage
+from agentgolem.tools.browser import BrowserTool, WebBrowser, WebPage
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 SIMPLE_HTML = "<html><body><p>Hello World</p></body></html>"
@@ -42,6 +45,28 @@ async def test_fetch_404():
 
     assert page.status_code == 404
     assert "Not Found" in page.content
+
+
+@pytest.mark.asyncio
+async def test_browser_tool_treats_http_404_as_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    browser = WebBrowser()
+    tool = BrowserTool(browser)
+
+    async def fake_fetch(url: str) -> WebPage:
+        return WebPage(
+            url=url,
+            status_code=404,
+            content="<html><body>Not found</body></html>",
+            headers={},
+            fetched_at=datetime.now(UTC),
+        )
+
+    monkeypatch.setattr(browser, "fetch", fake_fetch)
+
+    result = await tool.execute(action="fetch_text", url="https://example.com/missing")
+
+    assert result.success is False
+    assert "HTTP 404" in (result.error or "")
 
 
 @respx.mock

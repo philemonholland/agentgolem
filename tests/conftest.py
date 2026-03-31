@@ -51,6 +51,11 @@ def tmp_env_file(tmp_path: Path) -> Path:
         "EMAIL_IMAP_PASSWORD=test-imap-pass\n"
         "MOLTBOOK_API_KEY=mk-test-key-67890\n"
         "MOLTBOOK_BASE_URL=https://moltbook.test.com/api\n"
+        "GOOGLE_CUSTOM_SEARCH_API_KEY=google-search-key\n"
+        "GOOGLE_CUSTOM_SEARCH_ENGINE_ID=test-engine-id\n"
+        "GOOGLE_OAUTH_CLIENT_ID=test-google-client-id\n"
+        "GOOGLE_OAUTH_CLIENT_FILE=config/google_oauth_client.json\n"
+        "GOOGLE_OAUTH_TOKEN_FILE=data/google/oauth_token.json\n"
     )
     return env_path
 
@@ -83,6 +88,9 @@ def mock_settings_yaml(tmp_path: Path) -> Path:
         "soul_update_min_confidence: 0.5\n"
         "dry_run_mode: true\n"
         "email_enabled: false\n"
-        "moltbook_enabled: false\n".format(data_dir=str(tmp_path / "data").replace("\\", "/"))
+        "moltbook_enabled: false\n"
+        "google_custom_search_enabled: true\n".format(
+            data_dir=str(tmp_path / "data").replace("\\", "/")
+        )
     )
     return settings_path

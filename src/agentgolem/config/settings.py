@@ -33,6 +33,9 @@ class Settings(BaseModel):
     log_level: str = "INFO"
     email_enabled: bool = False
     moltbook_enabled: bool = False
+    google_custom_search_enabled: bool = False
+    google_gmail_api_enabled: bool = False
+    google_drive_api_enabled: bool = False
     dry_run_mode: bool = False
     approval_required_actions: list[str] = Field(
         default_factory=lambda: ["email_send", "moltbook_send"]
@@ -49,6 +52,10 @@ class Settings(BaseModel):
     quarantine_trust_useful_threshold: float = 0.3
     browser_rate_limit_per_minute: int = 10
     browser_timeout_seconds: int = 20
+    google_custom_search_default_num_results: int = 5
+    google_custom_search_hourly_quota: int = 4
+    google_custom_search_bucket_capacity: int = 100
+    google_custom_search_safe: str = "active"
     llm_request_delay_seconds: float = 3.0
 
     # Multi-agent swarm

@@ -121,6 +121,8 @@ Key settings (see the template for all defaults):
 | `sleep_membrane_decay`           | `0.82`     | Base leak factor for spiking-inspired sleep dynamics |
 | `niscalajyoti_revisit_hours`     | `6.0`      | Hours between NJ revisit cycles            |
 | `browser_rate_limit_per_minute`  | `10`       | Max web requests per minute                |
+| `google_custom_search_enabled`   | `false`    | Enable Google Custom Search backend        |
+| `google_custom_search_hourly_quota` | `4`     | Local average refill rate for search quota |
 
 Sleep also exposes spiking controls such as thresholds, refractory steps,
 STDP window/strength, dream noise, and persisted neural-state size in
@@ -138,6 +140,15 @@ If you want arbitrary OpenAI-compatible endpoints per route, you can also set:
 
 When those route-specific variables are present, they override the legacy
 OpenAI/DeepSeek fallback routing for that path.
+
+For Google search, set `GOOGLE_CUSTOM_SEARCH_API_KEY` and
+`GOOGLE_CUSTOM_SEARCH_ENGINE_ID`, then enable
+`google_custom_search_enabled: true` in `config/settings.yaml`.
+Search uses an API key plus Programmable Search Engine ID (`cx`) — not OAuth.
+
+For future Gmail / Drive integration, keep a Desktop App OAuth client JSON in
+`config/google_oauth_client.json` and let the token cache live in
+`data/google/oauth_token.json`. Both paths are gitignored and should stay local.
 
 ---
 

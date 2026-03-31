@@ -15,9 +15,12 @@ ENV/
 
 # Secrets
 .env
+config/google_oauth_client.json
+config/google_oauth_client*.json
 
 # Runtime data
 data/
+data/google/
 
 # Agent-tunable settings (keep template in repo)
 config/settings.yaml

@@ -39,6 +39,9 @@ llm_code_provider: ""          # empty = auto-detect from legacy env vars
 log_level: INFO
 email_enabled: false
 moltbook_enabled: false
+google_custom_search_enabled: false
+google_gmail_api_enabled: false
+google_drive_api_enabled: false
 dry_run_mode: false
 approval_required_actions:
 - email_send
@@ -54,6 +57,10 @@ quarantine_emotion_threshold: 0.7
 quarantine_trust_useful_threshold: 0.3
 browser_rate_limit_per_minute: 10
 browser_timeout_seconds: 20
+google_custom_search_default_num_results: 5
+google_custom_search_hourly_quota: 4
+google_custom_search_bucket_capacity: 100
+google_custom_search_safe: active
 llm_request_delay_seconds: 3.0   # cooldown between LLM requests (protected)
 agent_count: 7
 agent_offset_minutes: 0.0
@@ -61,7 +68,14 @@ autonomous_interval_seconds: 60.0
 name_discovery_cycles: 4
 peer_checkin_interval_minutes: 30.0
 peer_message_max_chars: 3000
-discussion_max_completion_tokens: 1024    # token room for discussion / reflection completions
+discussion_max_completion_tokens: 2048    # token room for discussion completions
+reflection_max_tokens: 1024               # token room for reflections / heartbeat writing
+encoding_max_tokens: 16384                # token room for memory encoding / decomposition
+discussion_target_paragraphs: 5           # prompt target for discussion response length
+llm_temperature: 0.7
+llm_top_p: 1.0
+llm_frequency_penalty: 0.0
+llm_presence_penalty: 0.0
 discussion_transcript_max_entries: 30     # rolling transcript memory for council dialogue
 repo_root: ""                  # workspace boundary (empty = auto-detect from install location)
 

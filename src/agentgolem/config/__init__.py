@@ -20,10 +20,7 @@ def get_settings(config_path: Path | None = None) -> Settings:
 def get_secrets(env_file: Path | None = None) -> Secrets:
     global _secrets
     if _secrets is None:
-        if env_file:
-            _secrets = Secrets(_env_file=str(env_file))
-        else:
-            _secrets = Secrets()
+        _secrets = Secrets(_env_file=str(env_file)) if env_file else Secrets()
     return _secrets
 
 

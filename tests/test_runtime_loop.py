@@ -6,7 +6,7 @@ import asyncio
 import json
 import threading
 from contextlib import suppress
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import httpx
@@ -15,8 +15,7 @@ import pytest
 from agentgolem.config.secrets import Secrets
 from agentgolem.config.settings import Settings
 from agentgolem.llm.base import Message
-from agentgolem.runtime.bus import AgentMessage
-from agentgolem.runtime.bus import InterAgentBus
+from agentgolem.runtime.bus import AgentMessage, InterAgentBus
 from agentgolem.runtime.loop import MainLoop
 from agentgolem.runtime.state import AgentMode
 from agentgolem.tools.base import ApprovalGate
@@ -181,7 +180,7 @@ def test_advance_persisted_phase_subtracts_real_downtime(
     secrets = Secrets(_env_file=None)
     loop = MainLoop(settings=timed_settings, secrets=secrets)
 
-    saved_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    saved_at = datetime(2026, 1, 1, tzinfo=UTC)
     loop._persisted_mode = "awake"
     loop._persisted_phase_remaining = 600.0
     loop._persisted_saved_at = saved_at
@@ -208,7 +207,7 @@ def test_advance_persisted_phase_advances_across_wind_down_and_sleep(
     secrets = Secrets(_env_file=None)
     loop = MainLoop(settings=timed_settings, secrets=secrets)
 
-    saved_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    saved_at = datetime(2026, 1, 1, tzinfo=UTC)
     loop._persisted_mode = "awake"
     loop._persisted_phase_remaining = 120.0
     loop._persisted_saved_at = saved_at
@@ -271,7 +270,7 @@ async def test_acquire_floor_with_reflection_times_out_and_falls_back(
     async def fake_wait_for(awaitable, timeout: float):
         if hasattr(awaitable, "close"):
             awaitable.close()
-        raise asyncio.TimeoutError
+        raise TimeoutError
 
     monkeypatch.setattr("agentgolem.runtime.loop.asyncio.wait_for", fake_wait_for)
 
@@ -344,7 +343,7 @@ async def test_sleep_does_not_auto_wake_when_llm_requests_suspended(
     )
     loop = MainLoop(settings=sleeping_settings, secrets=secrets)
     loop._llm_requests_suspended = True
-    loop._fell_asleep_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+    loop._fell_asleep_at = datetime.now(UTC) - timedelta(minutes=1)
     await loop.runtime_state.transition(AgentMode.ASLEEP)
     saw = {"tick_asleep": False}
 
@@ -460,6 +459,7 @@ def test_configure_tool_registry_exposes_capabilities(
         data_dir=settings.data_dir,
         email_enabled=True,
         moltbook_enabled=True,
+        google_custom_search_enabled=True,
     )
     secrets = Secrets(
         _env_file=None,
@@ -468,6 +468,8 @@ def test_configure_tool_registry_exposes_capabilities(
         email_smtp_password="secret-pass",
         moltbook_api_key="mk-test",
         moltbook_base_url="https://moltbook.example/api",
+        google_custom_search_api_key="search-key",
+        google_custom_search_engine_id="engine-id",
     )
     loop = MainLoop(settings=settings, secrets=secrets)
     loop._ensure_dirs()
@@ -479,6 +481,7 @@ def test_configure_tool_registry_exposes_capabilities(
     summary = loop._toolbox_summary()
 
     assert "browser.fetch_text" in summary
+    assert "search.query" in summary
     assert "email.send" in summary
     assert "moltbook.send" in summary
     assert "think.private" in summary
@@ -544,5 +547,37 @@ async def test_council7_embedded_browse_stays_on_foundation_domains(
     await loop._handle_embedded_response_actions("BROWSE https://example.com/post")
     assert loop._browse_queue == []
 
+    loop._remember_urls(["https://www.lesswrong.com/tag/ai"])
     await loop._handle_embedded_response_actions("BROWSE https://www.lesswrong.com/tag/ai")
     assert loop._browse_queue == ["https://www.lesswrong.com/tag/ai"]
+
+
+async def test_embedded_response_search_uses_autonomous_search(
+    loop_env: tuple[Settings, Secrets, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, secrets, _ = loop_env
+    loop = MainLoop(settings=settings, secrets=secrets)
+    seen: list[str] = []
+
+    async def fake_search(query: str, **kwargs) -> None:
+        seen.append(query)
+
+    monkeypatch.setattr(loop, "_autonomous_search", fake_search)
+
+    await loop._handle_embedded_response_actions("SEARCH interruptibility lesswrong")
+
+    assert seen == ["interruptibility lesswrong"]
+
+
+async def test_embedded_response_browse_ignores_unverified_url(
+    loop_env: tuple[Settings, Secrets, Path],
+) -> None:
+    settings, secrets, _ = loop_env
+    loop = MainLoop(settings=settings, secrets=secrets)
+
+    await loop._handle_embedded_response_actions(
+        "BROWSE https://www.lesswrong.com/posts/7XqRZ7jotkaqKjwuK/interruptibility"
+    )
+
+    assert loop._browse_queue == []

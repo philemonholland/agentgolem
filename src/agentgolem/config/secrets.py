@@ -19,6 +19,11 @@ class Secrets(BaseSettings):
     llm_discussion_base_url: str = ""
     llm_code_api_key: SecretStr = SecretStr("")
     llm_code_base_url: str = ""
+    google_custom_search_api_key: SecretStr = SecretStr("")
+    google_custom_search_engine_id: str = ""
+    google_oauth_client_id: SecretStr = SecretStr("")
+    google_oauth_client_file: str = "config/google_oauth_client.json"
+    google_oauth_token_file: str = "data/google/oauth_token.json"
     email_smtp_host: str = ""
     email_smtp_port: int = 587
     email_smtp_user: str = ""

@@ -168,6 +168,12 @@ class BrowserTool(Tool):
 
         try:
             page = await self._browser.fetch(url)
+            if page.status_code >= 400:
+                return ToolResult(
+                    success=False,
+                    error=f"Browser fetch failed with HTTP {page.status_code}",
+                    data={"url": page.url, "status_code": page.status_code},
+                )
             text = self._browser.extract_text(page)
             links = self._browser.extract_links(page)
         except Exception as exc:
