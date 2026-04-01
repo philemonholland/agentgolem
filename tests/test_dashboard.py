@@ -9,6 +9,18 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import pytest
 
+from agentgolem.experiments.ledger import ExperimentLedger
+from agentgolem.experiments.models import (
+    ExperimentApprovalStatus,
+    ExperimentBudget,
+    ExperimentChange,
+    ExperimentCommand,
+    ExperimentMetric,
+    ExperimentScopePolicy,
+    ExperimentStatus,
+    ImprovementExperiment,
+)
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -86,6 +98,38 @@ class FakeParamStore:
     def get_display(self, key: str, ptype: str) -> str:
         return str(self.get(key, ptype))
 
+
+def _seed_experiment_ledger(root: Path) -> None:
+    ledger = ExperimentLedger(root)
+    ledger.save_experiment(
+        ImprovementExperiment(
+            id="exp_dashboard",
+            title="Dashboard-visible experiment",
+            description="A seeded experiment for dashboard rendering.",
+            proposed_by="Council-1",
+            baseline_ref="HEAD",
+            status=ExperimentStatus.PROPOSED,
+            scope=ExperimentScopePolicy(allowed_prefixes=["src/agentgolem/runtime"]),
+            candidate_changes=[
+                ExperimentChange(
+                    file_path="src/agentgolem/runtime/loop.py",
+                    old_content="old",
+                    new_content="new",
+                )
+            ],
+            metrics=[ExperimentMetric(name="health_score_delta", primary=True)],
+            evaluation_commands=[
+                ExperimentCommand(
+                    name="focused-tests",
+                    command="pytest tests\\test_runtime_loop.py -q",
+                )
+            ],
+            budget=ExperimentBudget(requires_operator_approval=True),
+            approval_request_id="req_dashboard",
+            approval_status=ExperimentApprovalStatus.PENDING,
+        )
+    )
+
 @pytest.fixture()
 def app_with_state(tmp_path: Path):
     """Create a dashboard app backed by real subsystem objects."""
@@ -106,6 +150,7 @@ def app_with_state(tmp_path: Path):
 
     (tmp_path / "approvals").mkdir(exist_ok=True)
     (tmp_path / "logs").mkdir(exist_ok=True)
+    _seed_experiment_ledger(tmp_path)
 
     ds = DashboardState(
         runtime_state=runtime,
@@ -114,6 +159,7 @@ def app_with_state(tmp_path: Path):
         audit_logger=AuditLogger(tmp_path),
         approval_gate=ApprovalGate(tmp_path / "approvals", ["email_send"]),
         interrupt_manager=InterruptManager(),
+        data_dir=tmp_path,
         param_store=FakeParamStore(
             {
                 "discussion_max_completion_tokens": 2048,
@@ -197,6 +243,7 @@ async def test_dashboard_returns_html_with_status(client: httpx.AsyncClient):
     assert "text/html" in resp.headers["content-type"]
     # RuntimeState defaults to PAUSED
     assert "PAUSED" in resp.text
+    assert "Experiment Loop" in resp.text
 
 
 async def test_soul_returns_html_with_content(client: httpx.AsyncClient):
@@ -234,6 +281,14 @@ async def test_approvals_returns_html(client: httpx.AsyncClient):
     assert "Approval Queue" in resp.text
 
 
+async def test_experiments_returns_html(client: httpx.AsyncClient):
+    resp = await client.get("/dashboard/experiments")
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]
+    assert "Experiment Ledger" in resp.text
+    assert "Dashboard-visible experiment" in resp.text
+
+
 @pytest.mark.parametrize(
     "path",
     [
@@ -243,6 +298,7 @@ async def test_approvals_returns_html(client: httpx.AsyncClient):
         "/dashboard/heartbeat",
         "/dashboard/logs",
         "/dashboard/memory",
+        "/dashboard/experiments",
         "/dashboard/approvals",
     ],
 )
@@ -255,6 +311,7 @@ async def test_pages_include_navigation_links(client: httpx.AsyncClient, path: s
     assert 'href="/dashboard/heartbeat"' in html
     assert 'href="/dashboard/memory"' in html
     assert 'href="/dashboard/logs"' in html
+    assert 'href="/dashboard/experiments"' in html
     assert 'href="/dashboard/approvals"' in html
 
 

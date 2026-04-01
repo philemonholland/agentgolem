@@ -1,0 +1,158 @@
+{% extends "base.html" %}
+
+{% block title %}Experiments — AgentGolem{% endblock %}
+
+{% block content %}
+<h1>Experiment Ledger</h1>
+<p class="muted">Guarded self-improvement runs, approval state, and forwarded council proposals.</p>
+
+<section class="panel">
+    <form method="get" action="/dashboard/experiments" class="inline-filter">
+        <label>
+            Proposer
+            <select name="agent">
+                <option value="">All agents</option>
+                {% for agent_name in agent_names %}
+                <option value="{{ agent_name }}" {% if agent_name == selected_agent_name %}selected{% endif %}>{{ agent_name }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <button type="submit">Filter</button>
+        {% if experiments_snapshot.counts.pending_approvals %}
+        <a href="/dashboard/approvals{% if selected_agent_name %}?agent={{ selected_agent_name }}{% endif %}" role="button" class="secondary">
+            Review approvals
+        </a>
+        {% endif %}
+    </form>
+</section>
+
+<section class="panel">
+    <div class="summary-grid">
+        <article class="summary-card">
+            <small>Total</small>
+            <strong>{{ experiments_snapshot.counts.total }}</strong>
+        </article>
+        <article class="summary-card">
+            <small>Active</small>
+            <strong>{{ experiments_snapshot.counts.active }}</strong>
+        </article>
+        <article class="summary-card">
+            <small>Terminal</small>
+            <strong>{{ experiments_snapshot.counts.terminal }}</strong>
+        </article>
+        <article class="summary-card">
+            <small>Pending approvals</small>
+            <strong>{{ experiments_snapshot.counts.pending_approvals }}</strong>
+        </article>
+        <article class="summary-card">
+            <small>Forwarded</small>
+            <strong>{{ experiments_snapshot.counts.forwarded }}</strong>
+        </article>
+    </div>
+</section>
+
+{% if experiments_snapshot.experiments %}
+<section class="stack">
+    {% for experiment in experiments_snapshot.experiments %}
+    <article class="panel">
+        <header style="display: flex; justify-content: space-between; gap: 1rem; align-items: baseline; flex-wrap: wrap;">
+            <div>
+                <strong>{{ experiment.title }}</strong>
+                <div class="muted mono">{{ experiment.id }}</div>
+            </div>
+            <div>
+                {% set status_class = 'badge-info' %}
+                {% if experiment.status in ['kept', 'evaluated'] %}
+                    {% set status_class = 'badge-success' %}
+                {% elif experiment.status in ['discarded', 'blocked', 'cancelled', 'crashed'] %}
+                    {% set status_class = 'badge-danger' %}
+                {% elif experiment.status == 'approved' %}
+                    {% set status_class = 'badge-warning' %}
+                {% endif %}
+                <span class="badge {{ status_class }}">{{ experiment.status }}</span>
+                <span class="badge badge-muted">{{ experiment.proposed_by }}</span>
+                <span class="badge {% if experiment.approval_status == 'pending' %}badge-warning{% else %}badge-muted{% endif %}">
+                    approval: {{ experiment.approval_status }}
+                </span>
+            </div>
+        </header>
+
+        <p>{{ experiment.description or "No experiment description recorded." }}</p>
+
+        <div class="setting-meta">
+            <span class="badge badge-muted">baseline: {{ experiment.baseline_ref }}</span>
+            {% if experiment.candidate_ref %}
+            <span class="badge badge-muted">candidate: {{ experiment.candidate_ref }}</span>
+            {% endif %}
+            {% if experiment.approval_request_id %}
+            <span class="badge badge-warning">request: {{ experiment.approval_request_id }}</span>
+            {% endif %}
+        </div>
+
+        <div class="card-grid">
+            <article class="summary-card">
+                <small>Metrics</small>
+                <strong>{{ experiment.metric_names | join(", ") }}</strong>
+            </article>
+            <article class="summary-card">
+                <small>Commands</small>
+                <strong>{{ experiment.command_names | join(", ") }}</strong>
+            </article>
+            <article class="summary-card">
+                <small>Candidate files</small>
+                <strong>{{ experiment.candidate_change_count }}</strong>
+            </article>
+            <article class="summary-card">
+                <small>Forwarded proposals</small>
+                <strong>{{ experiment.review_proposal_count }}</strong>
+            </article>
+        </div>
+
+        {% if experiment.candidate_change_paths %}
+        <p><small>Changed paths: {{ experiment.candidate_change_paths | join(", ") }}</small></p>
+        {% endif %}
+        {% if experiment.review_proposal_ids %}
+        <p><small>Council proposals: {{ experiment.review_proposal_ids | join(", ") }}</small></p>
+        {% endif %}
+        {% if experiment.decision_reason %}
+        <p><small>Decision: {{ experiment.decision_reason }}</small></p>
+        {% endif %}
+    </article>
+    {% endfor %}
+</section>
+{% else %}
+<section class="panel">
+    <p>No experiments have been recorded for this view yet.</p>
+</section>
+{% endif %}
+
+<section class="panel">
+    <h2>Recent Run History</h2>
+    {% if experiments_snapshot.records %}
+    <table class="compact-table">
+        <thead>
+            <tr>
+                <th>Experiment</th>
+                <th>Status</th>
+                <th>Recorder</th>
+                <th>Candidate</th>
+                <th>Notes</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for record in experiments_snapshot.records %}
+            <tr>
+                <td class="mono">{{ record.experiment_id }}</td>
+                <td>{{ record.status }}</td>
+                <td>{{ record.recorded_by }}</td>
+                <td>{{ record.candidate_ref or "—" }}</td>
+                <td>{{ record.notes or "—" }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="muted">No run history recorded yet.</p>
+    {% endif %}
+</section>
+{% endblock %}

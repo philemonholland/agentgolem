@@ -73,6 +73,55 @@
 
 <section class="panel">
     <div style="display: flex; justify-content: space-between; gap: 1rem; align-items: baseline; flex-wrap: wrap;">
+        <h2>Experiment Loop</h2>
+        <a href="/dashboard/experiments{% if selected_agent_name %}?agent={{ selected_agent_name }}{% endif %}">Open experiment ledger</a>
+    </div>
+    <div class="summary-grid">
+        <article class="summary-card">
+            <small>Total experiments</small>
+            <strong>{{ experiments_snapshot.counts.total }}</strong>
+        </article>
+        <article class="summary-card">
+            <small>Active</small>
+            <strong>{{ experiments_snapshot.counts.active }}</strong>
+        </article>
+        <article class="summary-card">
+            <small>Pending approvals</small>
+            <strong>{{ experiments_snapshot.counts.pending_approvals }}</strong>
+        </article>
+        <article class="summary-card">
+            <small>Forwarded to council</small>
+            <strong>{{ experiments_snapshot.counts.forwarded }}</strong>
+        </article>
+    </div>
+    {% if experiments_snapshot.experiments %}
+    <div class="card-grid">
+        {% for experiment in experiments_snapshot.experiments %}
+        <article class="agent-card">
+            <header>
+                <strong>{{ experiment.title }}</strong>
+            </header>
+            <p class="muted mono">{{ experiment.id }}</p>
+            <p>
+                <span class="badge badge-info">{{ experiment.status }}</span>
+                <span class="badge badge-muted">{{ experiment.proposed_by }}</span>
+                <span class="badge {% if experiment.approval_status == 'pending' %}badge-warning{% else %}badge-muted{% endif %}">
+                    approval: {{ experiment.approval_status }}
+                </span>
+            </p>
+            <p>{{ experiment.description or "No experiment description recorded." }}</p>
+            <p><small>Files: {{ experiment.candidate_change_paths | join(", ") if experiment.candidate_change_paths else "none yet" }}</small></p>
+            <p><small>Commands: {{ experiment.command_names | join(", ") }}</small></p>
+        </article>
+        {% endfor %}
+    </div>
+    {% else %}
+    <p class="muted">No experiment records yet for this view.</p>
+    {% endif %}
+</section>
+
+<section class="panel">
+    <div style="display: flex; justify-content: space-between; gap: 1rem; align-items: baseline; flex-wrap: wrap;">
         <h2>Recent Settings Activity</h2>
         <a href="/dashboard/settings">Open Settings Control Center</a>
     </div>

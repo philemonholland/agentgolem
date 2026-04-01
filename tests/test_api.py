@@ -3,16 +3,26 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
 
 from agentgolem.consciousness.relationships import RelationshipStore
 from agentgolem.dashboard.api import DashboardState, create_app
+from agentgolem.experiments.ledger import ExperimentLedger, ExperimentRunRecord
+from agentgolem.experiments.models import (
+    ExperimentApprovalStatus,
+    ExperimentBudget,
+    ExperimentChange,
+    ExperimentCommand,
+    ExperimentMetric,
+    ExperimentScopePolicy,
+    ExperimentStatus,
+    ImprovementExperiment,
+)
 from agentgolem.identity.heartbeat import HeartbeatManager
 from agentgolem.identity.soul import SoulManager
 from agentgolem.logging.audit import AuditLogger
@@ -22,6 +32,9 @@ from agentgolem.memory.store import SQLiteMemoryStore
 from agentgolem.runtime.interrupts import InterruptManager
 from agentgolem.runtime.state import RuntimeState
 from agentgolem.tools.base import ApprovalGate
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Helpers & fixtures
@@ -58,7 +71,7 @@ class FakeParamStore:
 
 class FakeBus:
     def __init__(self) -> None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         self.floor_holder = "Council-1"
         self._messages = [
             SimpleNamespace(
@@ -107,7 +120,7 @@ def _make_council_agent(
         mode=SimpleNamespace(value=mode),
         current_task=task,
         pending_tasks=[],
-        started_at=datetime.now(timezone.utc),
+        started_at=datetime.now(UTC),
     )
     audit_logger = AuditLogger(agent_dir)
     interrupt_manager = InterruptManager()
@@ -137,6 +150,76 @@ def _make_council_agent(
         _settings=None,
         _peer_msg_limit=3000,
         _discussion_max_completion_tokens=2048,
+    )
+
+
+def _seed_experiment_ledger(root: Path) -> None:
+    ledger = ExperimentLedger(root)
+    ledger.save_experiment(
+        ImprovementExperiment(
+            id="exp_pending",
+            title="Tune browse scoring",
+            description="Awaiting approval before the experiment can run.",
+            proposed_by="Council-1",
+            baseline_ref="HEAD",
+            status=ExperimentStatus.PROPOSED,
+            scope=ExperimentScopePolicy(allowed_prefixes=["src/agentgolem/runtime"]),
+            candidate_changes=[
+                ExperimentChange(
+                    file_path="src/agentgolem/runtime/loop.py",
+                    old_content="before",
+                    new_content="after",
+                )
+            ],
+            metrics=[ExperimentMetric(name="health_score_delta", primary=True)],
+            evaluation_commands=[
+                ExperimentCommand(
+                    name="focused-tests",
+                    command="pytest tests\\test_runtime_loop.py -q",
+                )
+            ],
+            budget=ExperimentBudget(requires_operator_approval=True),
+            approval_request_id="req_exp_pending",
+            approval_status=ExperimentApprovalStatus.PENDING,
+        )
+    )
+    ledger.save_experiment(
+        ImprovementExperiment(
+            id="exp_kept",
+            title="Forward runtime tweak",
+            description="Experiment succeeded and was forwarded to council review.",
+            proposed_by="Council-6",
+            baseline_ref="HEAD~1",
+            candidate_ref="candidate-keep",
+            status=ExperimentStatus.KEPT,
+            scope=ExperimentScopePolicy(allowed_prefixes=["src/agentgolem/runtime"]),
+            candidate_changes=[
+                ExperimentChange(
+                    file_path="src/agentgolem/runtime/loop.py",
+                    old_content="old",
+                    new_content="new",
+                )
+            ],
+            metrics=[ExperimentMetric(name="health_score_delta", primary=True)],
+            evaluation_commands=[
+                ExperimentCommand(
+                    name="focused-tests",
+                    command="pytest tests\\test_runtime_loop.py -q",
+                )
+            ],
+            budget=ExperimentBudget(requires_operator_approval=False),
+            review_proposal_ids=["evo_keep123"],
+        )
+    )
+    ledger.append_record(
+        ExperimentRunRecord(
+            experiment_id="exp_kept",
+            recorded_by="Council-6",
+            status=ExperimentStatus.EVALUATED,
+            baseline_ref="HEAD~1",
+            candidate_ref="candidate-keep",
+            notes="Focused tests passed; forwarding to council review.",
+        )
     )
 
 
@@ -170,6 +253,8 @@ def _make_base_state(tmp_path: Path) -> DashboardState:
     with open(activity_log, "w", encoding="utf-8") as fh:
         for entry in entries:
             fh.write(json.dumps(entry) + "\n")
+
+    _seed_experiment_ledger(tmp_path)
 
     return DashboardState(
         runtime_state=runtime,
@@ -246,6 +331,7 @@ def _make_council_state(tmp_path: Path) -> DashboardState:
             "reason": "More room for council synthesis",
         },
     )
+    _seed_experiment_ledger(tmp_path)
 
     def apply_setting_change(key: str, raw_value: str) -> dict[str, Any]:
         value = int(raw_value)
@@ -498,6 +584,30 @@ async def test_update_browse_depth_setting_via_api(
     assert resp.status_code == 200
     assert council_state.param_store.get("autonomous_browse_max_depth", "int") == 7
     assert resp.json()["setting"]["current_display"] == "7"
+
+
+async def test_get_experiments_returns_snapshot(council_client: httpx.AsyncClient) -> None:
+    resp = await council_client.get("/api/experiments")
+    assert resp.status_code == 200
+    data = resp.json()
+
+    assert data["counts"]["total"] == 2
+    assert data["counts"]["pending_approvals"] == 1
+    assert data["counts"]["forwarded"] == 1
+    assert {experiment["id"] for experiment in data["experiments"]} == {
+        "exp_pending",
+        "exp_kept",
+    }
+
+
+async def test_get_experiment_returns_detail(council_client: httpx.AsyncClient) -> None:
+    resp = await council_client.get("/api/experiments/exp_kept")
+    assert resp.status_code == 200
+    data = resp.json()
+
+    assert data["id"] == "exp_kept"
+    assert data["review_proposal_ids"] == ["evo_keep123"]
+    assert data["records"][0]["experiment_id"] == "exp_kept"
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,55 @@
+{
+  "id": "exp_dashboard",
+  "title": "Dashboard-visible experiment",
+  "description": "A seeded experiment for dashboard rendering.",
+  "proposed_by": "Council-1",
+  "baseline_ref": "HEAD",
+  "candidate_ref": "",
+  "rationale": "",
+  "decision_reason": "",
+  "status": "proposed",
+  "scope": {
+    "allowed_paths": [],
+    "allowed_prefixes": [
+      "src/agentgolem/runtime"
+    ]
+  },
+  "candidate_changes": [
+    {
+      "file_path": "src/agentgolem/runtime/loop.py",
+      "old_content": "old",
+      "new_content": "new",
+      "description": ""
+    }
+  ],
+  "metrics": [
+    {
+      "name": "health_score_delta",
+      "goal": "minimize",
+      "unit": "",
+      "primary": true,
+      "notes": ""
+    }
+  ],
+  "evaluation_commands": [
+    {
+      "name": "focused-tests",
+      "command": "pytest tests\\test_runtime_loop.py -q",
+      "timeout_seconds": 600.0,
+      "required": true,
+      "working_directory": ""
+    }
+  ],
+  "budget": {
+    "time_budget_seconds": 300.0,
+    "command_timeout_seconds": 600.0,
+    "requires_operator_approval": true,
+    "exclusive_resources": []
+  },
+  "approval_request_id": "req_dashboard",
+  "approval_status": "pending",
+  "review_proposal_ids": [],
+  "created_at": "2026-04-01T05:15:16.464237+00:00",
+  "started_at": null,
+  "completed_at": null
+}

@@ -3,16 +3,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import parse_qs
 
 import yaml
 from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel
+
+from agentgolem.experiments.ledger import ExperimentLedger
 
 
 @dataclass
@@ -310,6 +313,16 @@ def _resolve_agent(st: DashboardState, agent_name: str | None = None) -> Any | N
     return None
 
 
+def _experiment_data_dir(st: DashboardState, agent_name: str | None = None) -> Path | None:
+    """Return the shared data root that holds experiment state and proposals."""
+    if st.agents:
+        resolved = _resolve_agent(st, agent_name)
+        agent_dir = getattr(resolved, "_data_dir", None) if resolved is not None else None
+        if agent_dir is not None:
+            return agent_dir.parent
+    return _get_data_dir(st)
+
+
 def _dedupe_names(values: list[Any]) -> list[str]:
     deduped: list[str] = []
     seen: set[str] = set()
@@ -535,6 +548,76 @@ def _get_data_dir(st: DashboardState) -> Path | None:
         if d is not None:
             return d.parent
     return None
+
+
+def _experiment_to_dict(experiment: Any) -> dict[str, Any]:
+    payload = experiment.model_dump(mode="json")
+    payload["metric_names"] = [metric.name for metric in experiment.metrics]
+    payload["command_names"] = [command.name for command in experiment.evaluation_commands]
+    payload["candidate_change_paths"] = [
+        change.file_path for change in experiment.candidate_changes
+    ]
+    payload["candidate_change_count"] = len(experiment.candidate_changes)
+    payload["review_proposal_count"] = len(experiment.review_proposal_ids)
+    return payload
+
+
+def build_experiment_snapshot(
+    st: DashboardState,
+    *,
+    agent_name: str | None = None,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """Return a dashboard-friendly summary of experiment state and recent runs."""
+    data_dir = _experiment_data_dir(st, agent_name)
+    empty_counts = {
+        "total": 0,
+        "active": 0,
+        "terminal": 0,
+        "pending_approvals": 0,
+        "forwarded": 0,
+    }
+    if data_dir is None:
+        return {"counts": empty_counts, "status_counts": {}, "experiments": [], "records": []}
+
+    ledger = ExperimentLedger(data_dir)
+    experiments = ledger.list_experiments()
+    if agent_name:
+        lowered = agent_name.lower()
+        experiments = [
+            experiment
+            for experiment in experiments
+            if experiment.proposed_by.lower() == lowered
+        ]
+
+    experiments = sorted(experiments, key=lambda item: item.created_at, reverse=True)
+    experiment_ids = {experiment.id for experiment in experiments}
+    records = ledger.load_records(limit=max(limit * 3, 20))
+    if experiment_ids:
+        records = [record for record in records if record.experiment_id in experiment_ids]
+    else:
+        records = []
+
+    counts = dict(empty_counts)
+    status_counts: dict[str, int] = {}
+    for experiment in experiments:
+        counts["total"] += 1
+        if experiment.is_terminal:
+            counts["terminal"] += 1
+        else:
+            counts["active"] += 1
+        if experiment.approval_status.value == "pending":
+            counts["pending_approvals"] += 1
+        if experiment.review_proposal_ids:
+            counts["forwarded"] += 1
+        status_counts[experiment.status.value] = status_counts.get(experiment.status.value, 0) + 1
+
+    return {
+        "counts": counts,
+        "status_counts": status_counts,
+        "experiments": [_experiment_to_dict(experiment) for experiment in experiments[:limit]],
+        "records": [record.model_dump(mode="json") for record in reversed(records[-limit:])],
+    }
 
 
 def _find_activity_log_path_for_agent(agent: Any) -> Path | None:
@@ -1401,6 +1484,33 @@ def create_app(dashboard_state: DashboardState | None = None) -> FastAPI:
         limit: int = Query(25, ge=1, le=200),
     ) -> list[dict[str, Any]]:
         return _setting_history(_state, key=key, limit=limit)
+
+    @app.get("/api/experiments")
+    async def get_experiments(
+        agent: str | None = Query(None),
+        limit: int = Query(10, ge=1, le=100),
+    ) -> dict[str, Any]:
+        return build_experiment_snapshot(_state, agent_name=agent, limit=limit)
+
+    @app.get("/api/experiments/{experiment_id}")
+    async def get_experiment(
+        experiment_id: str,
+        agent: str | None = Query(None),
+    ) -> dict[str, Any]:
+        data_dir = _experiment_data_dir(_state, agent)
+        if data_dir is None:
+            raise HTTPException(404, "Experiment ledger not initialised")
+
+        ledger = ExperimentLedger(data_dir)
+        experiment = ledger.load_experiment(experiment_id)
+        if experiment is None:
+            raise HTTPException(404, f"Unknown experiment: {experiment_id}")
+
+        records = ledger.load_records(limit=25, experiment_id=experiment_id)
+        return {
+            **_experiment_to_dict(experiment),
+            "records": [record.model_dump(mode="json") for record in reversed(records)],
+        }
 
     @app.get("/api/settings/{key}")
     async def get_setting(key: str) -> dict[str, Any]:

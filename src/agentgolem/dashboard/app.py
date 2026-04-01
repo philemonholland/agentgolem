@@ -134,6 +134,10 @@ def create_dashboard_app() -> FastAPI:
         selected_name = _selected_agent_name(agent, overview)
         dialogue = api_mod.build_dialogue_snapshot(ds)
         settings_history = api_mod._setting_history(ds, limit=5)
+        experiment_filter = selected_name if (getattr(ds, "agents", None) or agent) else None
+        experiments_snapshot = api_mod.build_experiment_snapshot(
+            ds, agent_name=experiment_filter, limit=4
+        )
         return templates.TemplateResponse(
             request,
             "consciousness.html",
@@ -142,6 +146,7 @@ def create_dashboard_app() -> FastAPI:
                 "selected_snapshot": _selected_snapshot(overview, selected_name),
                 "dialogue": dialogue,
                 "settings_history": settings_history,
+                "experiments_snapshot": experiments_snapshot,
             },
         )
 
@@ -914,6 +919,24 @@ def create_dashboard_app() -> FastAPI:
             {
                 **_common_context(request, overview, selected_agent_name=selected_name),
                 "approvals": approvals,
+            },
+        )
+
+    @app.get("/dashboard/experiments", response_class=HTMLResponse)
+    async def experiments_page(
+        request: Request,
+        agent: str | None = Query(None),
+    ) -> HTMLResponse:
+        overview = api_mod.build_council_overview(ds)
+        filter_name = _selected_agent_name(agent, overview) if agent else None
+        selected_name = filter_name or ""
+        snapshot = api_mod.build_experiment_snapshot(ds, agent_name=filter_name, limit=12)
+        return templates.TemplateResponse(
+            request,
+            "experiments.html",
+            {
+                **_common_context(request, overview, selected_agent_name=selected_name),
+                "experiments_snapshot": snapshot,
             },
         )
 

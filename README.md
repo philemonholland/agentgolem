@@ -23,6 +23,7 @@ unanimous, Vow-aligned consensus.
 - **Read-Only Mycelium** — Agents can surface entangled peer memories through owner-written exports while keeping foreign memories explicitly separate
 - **Self-Optimisation** — Agents tune their own settings (sleep/wake duration is protected)
 - **Self-Evolution** — Agents may modify their own source code with unanimous Vow-aligned consensus
+- **Guarded Experiment Loop** — Fixed-budget self-improvement experiments use audited ledgers, approval gates, resource locks, and existing council review
 - **Web Exploration** — After completing their initial formation tracks, agents broaden into wider web exploration
 - **Human Interruptibility** — `/speak` to pause, `/continue` to resume; `@Name` to address a specific agent
 - **Tool Access** — Web browsing, email, Moltbook integration (all rate-limited, audited)
@@ -268,6 +269,11 @@ or custom experiments, but they are no longer the default “real benchmark” p
 `agentgolem.benchmarks.compare` is for offline benchmark reports only; live
 lifecycle audit reports use a different schema and are rejected there on
 purpose.
+
+Self-improvement experiments now build on these same evaluation commands. The
+shared experiment ledger stores proposals, approvals, run history, and
+forwarded council proposals under `data\experiments\`, and the dashboard
+surfaces that state on the **Experiments** page.
 
 For the suite format and planned extensions, see
 **[docs/benchmarking.md](docs/benchmarking.md)**.
