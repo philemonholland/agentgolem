@@ -320,3 +320,81 @@ class LiveMemoryLifecycleRunReport(BaseModel):
     overall_status: BenchmarkStatus = BenchmarkStatus.NOT_APPLICABLE
     aggregate: LiveMemoryLifecycleAggregateReport
     agent_reports: list[LiveMemoryLifecycleAgentReport]
+
+
+# ── Trace-based benchmark models ─────────────────────────────────────
+
+
+class AutonomyMetrics(BaseModel):
+    """Autonomy usefulness metrics from execution traces."""
+
+    total_actions: MetricSummary = Field(default_factory=lambda: MetricSummary(value=0.0))
+    productive_rate: MetricSummary = Field(default_factory=lambda: MetricSummary(value=0.0))
+    goal_directed_rate: MetricSummary = Field(default_factory=lambda: MetricSummary(value=0.0))
+    search_to_browse_rate: MetricSummary = Field(default_factory=lambda: MetricSummary(value=0.0))
+    browse_to_share_rate: MetricSummary = Field(default_factory=lambda: MetricSummary(value=0.0))
+    tool_failure_rate: MetricSummary = Field(default_factory=lambda: MetricSummary(value=0.0))
+    idle_rate: MetricSummary = Field(default_factory=lambda: MetricSummary(value=0.0))
+
+
+class CostLatencyMetrics(BaseModel):
+    """Cost and latency metrics from execution traces."""
+
+    total_context_tokens: MetricSummary = Field(default_factory=lambda: MetricSummary(value=0.0))
+    total_completion_tokens: MetricSummary = Field(default_factory=lambda: MetricSummary(value=0.0))
+    avg_context_tokens: MetricSummary = Field(default_factory=lambda: MetricSummary(value=0.0))
+    avg_completion_tokens: MetricSummary = Field(default_factory=lambda: MetricSummary(value=0.0))
+    retrieval_hit_rate: MetricSummary = Field(default_factory=lambda: MetricSummary(value=0.0))
+    context_efficiency: MetricSummary = Field(default_factory=lambda: MetricSummary(value=0.0))
+
+
+class MultiAgentMetrics(BaseModel):
+    """Multi-agent quality metrics from execution traces."""
+
+    agent_count: int = 0
+    peer_engagement_rate: MetricSummary = Field(default_factory=lambda: MetricSummary(value=0.0))
+    speaker_fairness: MetricSummary = Field(default_factory=lambda: MetricSummary(value=0.0))
+    action_diversity: MetricSummary = Field(default_factory=lambda: MetricSummary(value=0.0))
+    purpose_distribution_variance: MetricSummary = Field(
+        default_factory=lambda: MetricSummary(value=0.0)
+    )
+
+
+class VowAdherenceMetrics(BaseModel):
+    """Vow adherence metrics from execution traces."""
+
+    calibration_frequency: MetricSummary = Field(
+        default_factory=lambda: MetricSummary(value=0.0)
+    )
+    vow_refresh_count: MetricSummary = Field(
+        default_factory=lambda: MetricSummary(value=0.0)
+    )
+    foundation_trace_fraction: MetricSummary = Field(
+        default_factory=lambda: MetricSummary(value=0.0)
+    )
+
+
+class TraceAgentReport(BaseModel):
+    """Per-agent trace benchmark report."""
+
+    agent_name: str
+    trace_count: int = 0
+    autonomy: AutonomyMetrics = Field(default_factory=AutonomyMetrics)
+    cost_latency: CostLatencyMetrics = Field(default_factory=CostLatencyMetrics)
+    vow_adherence: VowAdherenceMetrics = Field(default_factory=VowAdherenceMetrics)
+    status: BenchmarkStatus = BenchmarkStatus.NOT_APPLICABLE
+
+
+class TraceBenchmarkRunReport(BaseModel):
+    """Aggregate trace-based benchmark report across agents."""
+
+    run_label: str = ""
+    target: str
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    agent_count: int = 0
+    overall_status: BenchmarkStatus = BenchmarkStatus.NOT_APPLICABLE
+    autonomy: AutonomyMetrics = Field(default_factory=AutonomyMetrics)
+    cost_latency: CostLatencyMetrics = Field(default_factory=CostLatencyMetrics)
+    multi_agent: MultiAgentMetrics = Field(default_factory=MultiAgentMetrics)
+    vow_adherence: VowAdherenceMetrics = Field(default_factory=VowAdherenceMetrics)
+    agent_reports: list[TraceAgentReport] = Field(default_factory=list)

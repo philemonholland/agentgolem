@@ -44,6 +44,7 @@ from agentgolem.benchmarks.models import (
     RetrievalAggregateMetrics,
     RetrievalBenchmarkReport,
     RetrievalCaseResult,
+    TraceBenchmarkRunReport,
     TrustAggregateMetrics,
     TrustBenchmarkReport,
     TrustCaseResult,
@@ -67,7 +68,12 @@ from agentgolem.tools.browser import BrowserTool, WebPage
 
 logger = structlog.get_logger(__name__)
 
-ReportPayload = BenchmarkReport | BenchmarkRunReport | LiveMemoryLifecycleRunReport
+ReportPayload = (
+    BenchmarkReport
+    | BenchmarkRunReport
+    | LiveMemoryLifecycleRunReport
+    | TraceBenchmarkRunReport
+)
 
 
 def interpret_report(report: BenchmarkReport, output_path: Path | None = None) -> str:
@@ -272,6 +278,10 @@ def interpret_run_report(
 
 def interpret_payload(payload: ReportPayload, output_path: Path | None = None) -> str:
     """Return a human-readable summary for any benchmark report payload."""
+    if isinstance(payload, TraceBenchmarkRunReport):
+        from agentgolem.benchmarks.trace_benchmarks import interpret_trace_report
+
+        return interpret_trace_report(payload)
     if isinstance(payload, LiveMemoryLifecycleRunReport):
         return interpret_live_memory_run_report(payload, output_path=output_path)
     if isinstance(payload, BenchmarkRunReport):
@@ -909,8 +919,15 @@ async def _run_from_args(args: argparse.Namespace) -> int:
         raise ValueError("Cannot combine --live-data with a suite path or --preset.")
     if args.preset and args.suite is not None:
         raise ValueError("Cannot specify both suite path and --preset.")
+    trace_data = getattr(args, "trace_data", None)
+    if trace_data is not None and (args.live_data or args.preset or args.suite):
+        raise ValueError("Cannot combine --trace-data with other data options.")
 
-    if args.live_data is not None:
+    if trace_data is not None:
+        from agentgolem.benchmarks.trace_benchmarks import run_trace_benchmarks
+
+        payload = await run_trace_benchmarks(trace_data, run_label=args.label)
+    elif args.live_data is not None:
         payload = await run_live_memory_target(args.live_data, run_label=args.label)
     elif args.preset:
         payload = await run_preset(args.preset, run_label=args.label)
@@ -927,7 +944,15 @@ async def _run_from_args(args: argparse.Namespace) -> int:
         return 0
 
     if args.output is not None:
-        if isinstance(payload, LiveMemoryLifecycleRunReport):
+        if isinstance(payload, TraceBenchmarkRunReport):
+            summary = {
+                "run_label": payload.run_label,
+                "output": str(args.output),
+                "agent_count": payload.agent_count,
+                "overall_status": payload.overall_status.value,
+                "productive_rate": payload.autonomy.productive_rate.value,
+            }
+        elif isinstance(payload, LiveMemoryLifecycleRunReport):
             summary = {
                 "run_label": payload.run_label,
                 "output": str(args.output),
@@ -1001,6 +1026,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Optional path to a live data root, an agent directory, or a "
             "`graph.db` file for a read-only memory lifecycle audit."
+        ),
+    )
+    parser.add_argument(
+        "--trace-data",
+        type=Path,
+        default=None,
+        help=(
+            "Optional path to a data root containing agent trace directories "
+            "for autonomy, cost, multi-agent, and vow adherence benchmarks."
         ),
     )
     parser.add_argument(
