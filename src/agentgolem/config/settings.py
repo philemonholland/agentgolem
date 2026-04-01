@@ -71,6 +71,7 @@ class Settings(BaseModel):
     quarantine_trust_useful_threshold: float = 0.3
     browser_rate_limit_per_minute: int = 10
     browser_timeout_seconds: int = 20
+    autonomous_browse_max_depth: int = 5
     google_custom_search_default_num_results: int = 5
     google_custom_search_hourly_quota: int = 4
     google_custom_search_bucket_capacity: int = 100

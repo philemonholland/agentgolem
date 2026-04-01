@@ -191,6 +191,7 @@ def _make_council_state(tmp_path: Path) -> DashboardState:
     store = FakeParamStore(
         {
             "discussion_max_completion_tokens": 2048,
+            "autonomous_browse_max_depth": 5,
             "dashboard_refresh_interval_seconds": 5,
         }
     )
@@ -201,6 +202,13 @@ def _make_council_state(tmp_path: Path) -> DashboardState:
             description="Maximum completion tokens for discussion wrap-up.",
             ptype="int",
             group="Dialogue",
+        ),
+        FakeParamSpec(
+            key="autonomous_browse_max_depth",
+            display_name="Browse Max Depth",
+            description="Maximum linked-page hop depth for autonomous browsing.",
+            ptype="int",
+            group="Browser",
         ),
         FakeParamSpec(
             key="dashboard_refresh_interval_seconds",
@@ -221,6 +229,7 @@ def _make_council_state(tmp_path: Path) -> DashboardState:
         param_specs=specs,
         default_values={
             "discussion_max_completion_tokens": 1024,
+            "autonomous_browse_max_depth": 5,
             "dashboard_refresh_interval_seconds": 5,
         },
         locked_settings={"repo_root"},
@@ -477,6 +486,18 @@ async def test_update_setting_via_api(
     assert resp.status_code == 200
     assert council_state.param_store.get("discussion_max_completion_tokens", "int") == 3072
     assert resp.json()["setting"]["current_display"] == "3072"
+
+
+async def test_update_browse_depth_setting_via_api(
+    council_client: httpx.AsyncClient, council_state: DashboardState
+) -> None:
+    resp = await council_client.post(
+        "/api/settings/autonomous_browse_max_depth",
+        data={"value": "7"},
+    )
+    assert resp.status_code == 200
+    assert council_state.param_store.get("autonomous_browse_max_depth", "int") == 7
+    assert resp.json()["setting"]["current_display"] == "7"
 
 
 # ---------------------------------------------------------------------------

@@ -22,7 +22,7 @@ from agentgolem.runtime.loop import (
     MainLoop,
 )
 from agentgolem.runtime.state import AgentMode
-from agentgolem.tools.base import ApprovalGate
+from agentgolem.tools.base import ApprovalGate, ToolResult
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -760,3 +760,142 @@ async def test_embedded_response_browse_ignores_unverified_url(
     )
 
     assert loop._browse_queue == []
+
+
+async def test_autonomous_browse_queues_follow_on_with_incremented_depth(
+    loop_env: tuple[Settings, Secrets, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, secrets, _ = loop_env
+    settings = Settings(data_dir=settings.data_dir, autonomous_browse_max_depth=5)
+    loop = MainLoop(settings=settings, secrets=secrets)
+
+    async def fake_invoke_registered_tool(tool_name: str, **kwargs) -> ToolResult:
+        assert tool_name == "browser"
+        return ToolResult(
+            success=True,
+            data={
+                "url": "https://example.com/tag/ai",
+                "text": "seed " * 300,
+                "links": [
+                    "https://example.com/about",
+                    "https://example.com/posts/deeper-article",
+                    "https://example.com/archive",
+                ],
+            },
+        )
+
+    async def fake_build_memory_context(context: str, top_k: int = 5) -> str:
+        return ""
+
+    async def fake_complete_discussion(messages: list[Message], trace_meta=None) -> str:
+        return "Useful browsing reflection."
+
+    monkeypatch.setattr(loop, "_invoke_registered_tool", fake_invoke_registered_tool)
+    monkeypatch.setattr(loop, "_build_memory_context", fake_build_memory_context)
+    monkeypatch.setattr(loop, "_complete_discussion", fake_complete_discussion)
+    monkeypatch.setattr(loop, "_identity_preamble", lambda: "You are TestAgent.")
+
+    await loop._autonomous_browse("https://example.com/tag/ai", current_depth=0)
+
+    assert loop._browse_queue == ["https://example.com/posts/deeper-article"]
+    assert loop._browse_depth_for("https://example.com/posts/deeper-article") == 1
+
+
+async def test_autonomous_browse_respects_depth_limit(
+    loop_env: tuple[Settings, Secrets, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, secrets, _ = loop_env
+    settings = Settings(data_dir=settings.data_dir, autonomous_browse_max_depth=1)
+    loop = MainLoop(settings=settings, secrets=secrets)
+
+    async def fake_invoke_registered_tool(tool_name: str, **kwargs) -> ToolResult:
+        assert tool_name == "browser"
+        return ToolResult(
+            success=True,
+            data={
+                "url": "https://example.com/posts/seed",
+                "text": "seed " * 300,
+                "links": ["https://example.com/posts/deeper-article"],
+            },
+        )
+
+    async def fake_build_memory_context(context: str, top_k: int = 5) -> str:
+        return ""
+
+    async def fake_complete_discussion(messages: list[Message], trace_meta=None) -> str:
+        return "Useful browsing reflection."
+
+    monkeypatch.setattr(loop, "_invoke_registered_tool", fake_invoke_registered_tool)
+    monkeypatch.setattr(loop, "_build_memory_context", fake_build_memory_context)
+    monkeypatch.setattr(loop, "_complete_discussion", fake_complete_discussion)
+    monkeypatch.setattr(loop, "_identity_preamble", lambda: "You are TestAgent.")
+
+    await loop._autonomous_browse("https://example.com/posts/seed", current_depth=1)
+
+    assert loop._browse_queue == []
+
+
+async def test_expand_browse_chain_follows_article_links(
+    loop_env: tuple[Settings, Secrets, Path],
+) -> None:
+    settings, secrets, _ = loop_env
+    settings = Settings(data_dir=settings.data_dir, autonomous_browse_max_depth=5)
+    loop = MainLoop(settings=settings, secrets=secrets, agent_name="Council-7")
+
+    post_one = "https://www.lesswrong.com/posts/abc123/first-post"
+    post_two = "https://www.lesswrong.com/posts/def456/second-post"
+    pages = {
+        post_one: {
+            "text": "post one " * 300,
+            "links": [post_two],
+        },
+        post_two: {
+            "text": "post two " * 300,
+            "links": [],
+        },
+    }
+
+    class FakeBrowser:
+        async def fetch(self, url: str) -> str:
+            return url
+
+        def extract_text(self, page: str) -> str:
+            return pages[page]["text"]
+
+        def extract_links(self, page: str) -> list[str]:
+            return list(pages[page]["links"])
+
+    combined_text, followed_urls = await loop._expand_browse_chain(
+        FakeBrowser(),
+        "https://www.lesswrong.com/tag/ai",
+        "hub " * 300,
+        [
+            "https://www.lesswrong.com/about",
+            post_one,
+        ],
+        max_depth=2,
+    )
+
+    assert followed_urls == [post_one, post_two]
+    assert "PAGE 2" in combined_text
+    assert post_one in combined_text
+    assert post_two in combined_text
+
+
+def test_load_session_state_defaults_legacy_browse_depth_to_zero(
+    loop_env: tuple[Settings, Secrets, Path],
+) -> None:
+    settings, secrets, _ = loop_env
+    initial = MainLoop(settings=settings, secrets=secrets)
+    initial._session_state_path.parent.mkdir(parents=True, exist_ok=True)
+    initial._session_state_path.write_text(
+        json.dumps({"browse_queue": ["https://example.com/posts/legacy"]}),
+        encoding="utf-8",
+    )
+
+    restored = MainLoop(settings=settings, secrets=secrets)
+
+    assert restored._browse_queue == ["https://example.com/posts/legacy"]
+    assert restored._browse_depth_for("https://example.com/posts/legacy") == 0

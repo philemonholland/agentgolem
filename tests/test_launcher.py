@@ -192,6 +192,24 @@ class TestParseInput:
             run_golem.parse_input("abc", "int")
 
 
+class TestApplyLiveSettingChange:
+    def test_rejects_browse_depth_above_max(self, tmp_env):
+        store = run_golem.ParamStore()
+        loop = asyncio.new_event_loop()
+        try:
+            with pytest.raises(ValueError, match="above maximum"):
+                run_golem.apply_live_setting_change(
+                    store,
+                    [],
+                    loop,
+                    None,
+                    "autonomous_browse_max_depth",
+                    "99",
+                )
+        finally:
+            loop.close()
+
+
 # ---------------------------------------------------------------------------
 # mask_secret
 # ---------------------------------------------------------------------------
@@ -574,6 +592,7 @@ class TestParamDefs:
         assert s.reflection_max_tokens == 1024
         assert s.encoding_max_tokens == 16384
         assert s.discussion_max_completion_tokens == 2048
+        assert s.autonomous_browse_max_depth == 5
 
     def test_help_text_documents_all_slash_commands(self):
         """The HELP_TEXT constant must mention every /command."""

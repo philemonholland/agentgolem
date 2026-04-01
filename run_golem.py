@@ -612,6 +612,13 @@ PARAM_DEFS: list[ParamDef] = [
         "Browser",
     ),
     param(
+        "autonomous_browse_max_depth",
+        "Browse Max Depth",
+        "Maximum linked-page hop depth for autonomous browsing and Council-7 source expansion",
+        "int",
+        "Browser",
+    ),
+    param(
         "google_custom_search_default_num_results",
         "Search Default Results",
         "Default number of search results returned per query",
@@ -1646,6 +1653,7 @@ def _hot_reload_live_setting(
         "attention_influence_weight",
         "internal_state_mycelium_share",
         "metacognition_novelty_bias",
+        "autonomous_browse_max_depth",
     ) or key in {
         "sleep_cycle_minutes",
         "sleep_max_nodes_per_cycle",
@@ -1679,6 +1687,11 @@ def apply_live_setting_change(
     if spec is None:
         raise KeyError(f"Unknown parameter: {key}")
 
+    try:
+        from agentgolem.runtime.loop import OPTIMIZABLE_SETTINGS as runtime_optimizable_settings
+    except Exception:  # pragma: no cover - defensive import fallback
+        runtime_optimizable_settings = {}
+
     if spec.ptype == "secret" and raw_value == "":
         return {
             "key": spec.key,
@@ -1689,6 +1702,15 @@ def apply_live_setting_change(
         }
 
     value = parse_input(raw_value, spec.ptype)
+    meta = runtime_optimizable_settings.get(spec.key)
+    if meta is not None:
+        if "min" in meta and value < meta["min"]:
+            raise ValueError(f"Value {value} for {spec.key} is below minimum {meta['min']}")
+        if "max" in meta and value > meta["max"]:
+            raise ValueError(f"Value {value} for {spec.key} is above maximum {meta['max']}")
+        if "choices" in meta and value not in meta["choices"]:
+            raise ValueError(f"Value '{value}' for {spec.key} not in {meta['choices']}")
+
     store.set(spec.key, value, spec.ptype)
     _hot_reload_live_setting(
         agents,

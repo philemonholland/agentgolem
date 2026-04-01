@@ -95,6 +95,7 @@ OPTIMIZABLE_SETTINGS: dict[str, dict[str, Any]] = {
     "quarantine_trust_useful_threshold": {"type": float, "min": 0.0, "max": 1.0},
     "browser_rate_limit_per_minute": {"type": int, "min": 1, "max": 120},
     "browser_timeout_seconds": {"type": int, "min": 5, "max": 120},
+    "autonomous_browse_max_depth": {"type": int, "min": 1, "max": 10},
     "peer_checkin_interval_minutes": {"type": float, "min": 1.0, "max": 120.0},
     "peer_message_max_chars": {"type": int, "min": 500, "max": 10000},
     "discussion_max_completion_tokens": {"type": int, "min": 128, "max": 16384},
@@ -108,6 +109,41 @@ OPTIMIZABLE_SETTINGS: dict[str, dict[str, Any]] = {
     "log_level": {"type": str, "choices": ["DEBUG", "INFO", "WARNING", "ERROR"]},
     "dry_run_mode": {"type": bool},
 }
+
+BROWSE_DOWNLOAD_EXTENSIONS: tuple[str, ...] = (
+    ".pdf",
+    ".zip",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".svg",
+)
+BROWSE_LINK_SCAN_LIMIT = 25
+BROWSE_HUB_SEGMENTS: frozenset[str] = frozenset(
+    {
+        "tag",
+        "tags",
+        "topic",
+        "topics",
+        "archive",
+        "archives",
+        "index",
+        "toc",
+        "contents",
+        "latest",
+    }
+)
+BROWSE_HUB_PATHS: frozenset[str] = frozenset({"posts", "all-posts"})
+BROWSE_SKIP_PATH_FRAGMENTS: tuple[str, ...] = (
+    "/login",
+    "/signin",
+    "/signup",
+    "/register",
+    "/privacy",
+    "/terms",
+    "/about",
+)
 
 # Ordered chapter list for niscalajyoti.org — agents read one per wake cycle
 NISCALAJYOTI_CHAPTERS: list[dict[str, str]] = [
@@ -380,6 +416,7 @@ class MainLoop:
         self._council7_source_retries = 0
         self._agent_readme_read = False  # read AGENT_README.md once after NJ
         self._browse_queue: list[str] = []
+        self._browse_queue_depths: dict[str, int] = {}
         self._known_urls: dict[str, None] = {}
         self._recent_thoughts: list[str] = []
         self._last_autonomous_tick: datetime | None = None
@@ -1131,6 +1168,125 @@ class MainLoop:
             oldest = next(iter(self._known_urls))
             del self._known_urls[oldest]
 
+    def _browse_max_depth(self) -> int:
+        """Return the configured maximum hop depth for autonomous browsing."""
+        return max(0, int(getattr(self._settings, "autonomous_browse_max_depth", 5)))
+
+    def _browse_queue_limit(self) -> int:
+        """Return the browse queue size budget derived from crawl depth."""
+        return max(5, self._browse_max_depth() + 2)
+
+    def _browse_depth_for(self, url: str) -> int:
+        """Return the queued hop depth for *url*."""
+        normalized = self._normalize_http_url(url)
+        return max(0, int(self._browse_queue_depths.get(normalized, 0)))
+
+    def _queue_browse_url(self, url: str, *, depth: int = 0) -> bool:
+        """Queue a URL for autonomous browsing, tracking its current hop depth."""
+        normalized = self._normalize_http_url(url)
+        if not normalized.startswith(("http://", "https://")):
+            return False
+
+        normalized_depth = max(0, int(depth))
+        if normalized in self._browse_queue:
+            current_depth = self._browse_depth_for(normalized)
+            self._browse_queue_depths[normalized] = min(current_depth, normalized_depth)
+            return False
+
+        if len(self._browse_queue) >= self._browse_queue_limit():
+            return False
+
+        self._browse_queue.append(normalized)
+        self._browse_queue_depths[normalized] = normalized_depth
+        return True
+
+    def _dequeue_browse_url(self) -> tuple[str, int] | None:
+        """Pop the next queued browse target and its hop depth."""
+        if not self._browse_queue:
+            return None
+
+        normalized = self._browse_queue.pop(0)
+        depth = self._browse_depth_for(normalized)
+        self._browse_queue_depths.pop(normalized, None)
+        return normalized, depth
+
+    def _url_path_segments(self, url: str) -> tuple[str, ...]:
+        """Return normalized non-empty path segments for *url*."""
+        return tuple(segment for segment in urlparse(url).path.lower().split("/") if segment)
+
+    def _looks_like_hub_url(self, url: str) -> bool:
+        """Heuristically detect index, archive, tag, and TOC-style pages."""
+        segments = self._url_path_segments(url)
+        if not segments:
+            return True
+
+        joined = "/".join(segments)
+        if joined in BROWSE_HUB_PATHS:
+            return True
+
+        if segments[0] in {"tag", "tags", "topic", "topics"}:
+            return True
+
+        return segments[-1] in BROWSE_HUB_SEGMENTS
+
+    def _pick_follow_on_link(
+        self,
+        current_url: str,
+        links: list[str],
+        *,
+        visited: set[str] | None = None,
+    ) -> str | None:
+        """Pick the most article-like follow-on link from a page."""
+        current_normalized = self._normalize_http_url(current_url)
+        current_host = urlparse(current_normalized).netloc.lower()
+        current_segments = self._url_path_segments(current_normalized)
+        visited_urls = {self._normalize_http_url(item) for item in (visited or set())}
+        seen: set[str] = set()
+        ranked: list[tuple[int, int, int, int, str]] = []
+
+        for index, candidate in enumerate(links[:BROWSE_LINK_SCAN_LIMIT]):
+            normalized = self._normalize_http_url(candidate)
+            lower = normalized.lower()
+            if (
+                normalized in seen
+                or normalized == current_normalized
+                or normalized in visited_urls
+                or not normalized.startswith(("http://", "https://"))
+                or any(lower.endswith(ext) for ext in BROWSE_DOWNLOAD_EXTENSIONS)
+                or any(fragment in lower for fragment in BROWSE_SKIP_PATH_FRAGMENTS)
+            ):
+                continue
+            if (
+                self._is_seventh_council()
+                and not self._council7_broadened
+                and not self._is_allowed_council7_url(normalized)
+            ):
+                continue
+
+            seen.add(normalized)
+            host = urlparse(normalized).netloc.lower()
+            segments = self._url_path_segments(normalized)
+            if not segments:
+                continue
+
+            score = 0
+            if host == current_host:
+                score += 100
+            if not self._looks_like_hub_url(normalized):
+                score += 60
+            if len(segments) > len(current_segments):
+                score += 15
+            if len(segments[-1]) >= 6:
+                score += 5
+
+            ranked.append((score, len(segments), len(normalized), -index, normalized))
+
+        if not ranked:
+            return None
+
+        ranked.sort(reverse=True)
+        return ranked[0][-1]
+
     def _is_known_url(self, url: str) -> bool:
         """Return whether a URL was discovered through search or crawling."""
         normalized = self._normalize_http_url(url)
@@ -1161,8 +1317,7 @@ class MainLoop:
             )
             return False
         self._remember_urls([normalized])
-        if normalized not in self._browse_queue:
-            self._browse_queue.append(normalized)
+        if self._queue_browse_url(normalized, depth=0):
             self._emit("📌", f"Queued URL: {normalized}")
         return True
 
@@ -2451,9 +2606,11 @@ class MainLoop:
 
         # Priority 4: browse queued URLs (skip PDFs and downloads)
         if self._browse_queue:
-            url = self._browse_queue.pop(0)
-            _skip_ext = (".pdf", ".zip", ".png", ".jpg", ".jpeg", ".gif", ".svg")
-            if any(url.lower().endswith(ext) for ext in _skip_ext):
+            queued = self._dequeue_browse_url()
+            if queued is None:
+                return
+            url, depth = queued
+            if any(url.lower().endswith(ext) for ext in BROWSE_DOWNLOAD_EXTENSIONS):
                 return
             if (
                 self._is_seventh_council()
@@ -2465,7 +2622,7 @@ class MainLoop:
                     f"Skipping non-foundation URL before broadening: {url}",
                 )
                 return
-            await self._autonomous_browse(url)
+            await self._autonomous_browse(url, current_depth=depth)
             return
 
         if (
@@ -3439,8 +3596,28 @@ class MainLoop:
             # Browse queue
             saved_queue = data.get("browse_queue", [])
             if saved_queue:
-                self._browse_queue = saved_queue
-                self._remember_urls(saved_queue)
+                depth_map = data.get("browse_queue_depths", {})
+                normalized_queue: list[str] = []
+                normalized_depths: dict[str, int] = {}
+                for item in saved_queue:
+                    if isinstance(item, str):
+                        normalized = self._normalize_http_url(item)
+                        depth = depth_map.get(item, depth_map.get(normalized, 0))
+                    elif isinstance(item, dict):
+                        normalized = self._normalize_http_url(str(item.get("url", "")))
+                        depth = item.get("depth", 0)
+                    else:
+                        continue
+
+                    if not normalized.startswith(("http://", "https://")):
+                        continue
+
+                    normalized_queue.append(normalized)
+                    normalized_depths[normalized] = max(0, int(depth))
+
+                self._browse_queue = normalized_queue
+                self._browse_queue_depths = normalized_depths
+                self._remember_urls(normalized_queue)
 
             saved_known_urls = data.get("known_urls", [])
             if saved_known_urls:
@@ -3535,6 +3712,10 @@ class MainLoop:
             "name_history": self._name_history,
             "recent_thoughts": self._recent_thoughts[-10:],
             "browse_queue": self._browse_queue[:20],
+            "browse_queue_depths": {
+                url: self._browse_depth_for(url)
+                for url in self._browse_queue[:20]
+            },
             "known_urls": list(self._known_urls.keys())[-100:],
             "last_peer_checkin": (
                 self._last_peer_checkin.isoformat() if self._last_peer_checkin else None
@@ -4066,6 +4247,12 @@ class MainLoop:
         try:
             page = await browser.fetch(url)
             text = browser.extract_text(page)
+            links = [
+                self._normalize_http_url(str(link))
+                for link in browser.extract_links(page)
+                if str(link).startswith(("http://", "https://"))
+            ]
+            self._remember_urls([url, *links])
         except Exception as e:
             self._logger.error(
                 "council7_source_fetch_error",
@@ -4083,6 +4270,23 @@ class MainLoop:
             self._council7_foundation_index += 1
             self._save_council7_state()
             return
+
+        if self._looks_like_hub_url(url):
+            expanded_text, followed_urls = await self._expand_browse_chain(
+                browser,
+                url,
+                text,
+                links,
+                max_depth=self._browse_max_depth(),
+            )
+            if followed_urls:
+                self._remember_urls(followed_urls)
+                self._emit(
+                    "🧭",
+                    f"Expanded '{title}' through {len(followed_urls)} linked page(s) "
+                    f"(max depth {self._browse_max_depth()})",
+                )
+                text = expanded_text
 
         text = text[:80000]
         self._emit(
@@ -4434,12 +4638,12 @@ class MainLoop:
                         if 0 <= num < len(NISCALAJYOTI_CHAPTERS):
                             url = NISCALAJYOTI_CHAPTERS[num]["url"]
                             self._remember_urls([url])
-                            self._browse_queue.append(url)
-                            self._emit(
-                                "📌",
-                                f"Queued revisit: ch.{num + 1} "
-                                f"'{NISCALAJYOTI_CHAPTERS[num]['title']}'",
-                            )
+                            if self._queue_browse_url(url, depth=0):
+                                self._emit(
+                                    "📌",
+                                    f"Queued revisit: ch.{num + 1} "
+                                    f"'{NISCALAJYOTI_CHAPTERS[num]['title']}'",
+                                )
                     except (ValueError, IndexError):
                         pass
 
@@ -5443,10 +5647,82 @@ class MainLoop:
                 self._record_tool_failure(spec.tool_name, result.error or "unknown")
             return
 
-    async def _autonomous_browse(self, url: str) -> None:
+    async def _expand_browse_chain(
+        self,
+        browser: Any,
+        seed_url: str,
+        seed_text: str,
+        seed_links: list[str],
+        *,
+        max_depth: int | None = None,
+    ) -> tuple[str, list[str]]:
+        """Follow a promising link chain from a hub page and combine the text."""
+        max_hops = self._browse_max_depth() if max_depth is None else max(0, int(max_depth))
+        if max_hops <= 0:
+            return seed_text[:80000], []
+
+        pages: list[tuple[str, str]] = [(seed_url, seed_text)]
+        followed_urls: list[str] = []
+        visited = {self._normalize_http_url(seed_url)}
+        current_url = seed_url
+        current_links = list(seed_links)
+
+        for _ in range(max_hops):
+            next_url = self._pick_follow_on_link(current_url, current_links, visited=visited)
+            if next_url is None:
+                break
+
+            try:
+                page = await browser.fetch(next_url)
+                next_text = browser.extract_text(page)
+                next_links = [
+                    self._normalize_http_url(str(link))
+                    for link in browser.extract_links(page)
+                    if str(link).startswith(("http://", "https://"))
+                ]
+            except Exception as exc:
+                self._logger.warning(
+                    "browse_chain_fetch_error",
+                    agent=self.agent_name,
+                    url=next_url,
+                    error=repr(exc),
+                )
+                break
+
+            if not next_text or len(next_text) < 200:
+                break
+
+            visited.add(next_url)
+            followed_urls.append(next_url)
+            pages.append((next_url, next_text))
+            current_url = next_url
+            current_links = next_links
+
+        remaining = 80000
+        sections: list[str] = []
+        for index, (page_url, page_text) in enumerate(pages):
+            header = f"=== PAGE {index + 1}: {page_url} ===\n"
+            page_cap = 18000 if index == 0 else 12000
+            budget = min(page_cap, max(0, remaining - len(header)))
+            if budget <= 0:
+                break
+
+            snippet = page_text[:budget]
+            sections.append(f"{header}{snippet}")
+            remaining -= len(header) + len(snippet) + 2
+            if remaining <= 0:
+                break
+
+        combined_text = "\n\n".join(sections)
+        return combined_text or seed_text[:80000], followed_urls
+
+    async def _autonomous_browse(self, url: str, *, current_depth: int = 0) -> None:
         """Browse a URL, reflect on it, optionally share findings."""
         normalized_url = self._normalize_http_url(url)
-        self._emit("🌐", f"Browsing: {normalized_url}")
+        self._emit(
+            "🌐",
+            f"Browsing: {normalized_url} (depth {current_depth}/{self._browse_max_depth()})",
+        )
 
         try:
             result = await self._invoke_registered_tool(
@@ -5499,18 +5775,19 @@ class MainLoop:
                 )
                 self._emit("📤", "Shared browsing insights with peers")
 
-            # Queue one follow-on link from the page for shallow crawling
-            _skip_ext = (".pdf", ".zip", ".png", ".jpg", ".jpeg", ".gif", ".svg")
-            for candidate in links[:5]:
-                if (
-                    candidate not in self._browse_queue
-                    and candidate != final_url
-                    and not any(candidate.lower().endswith(ext) for ext in _skip_ext)
-                    and len(self._browse_queue) < 3
-                ):
-                    self._browse_queue.append(candidate)
-                    self._emit("📌", f"Follow-on: queued {candidate}")
-                    break
+            # Continue the crawl by following an article-like linked page.
+            if current_depth < self._browse_max_depth():
+                candidate = self._pick_follow_on_link(
+                    final_url,
+                    links,
+                    visited=set(self._browse_queue) | {final_url},
+                )
+                if candidate and self._queue_browse_url(candidate, depth=current_depth + 1):
+                    self._emit(
+                        "📌",
+                        f"Follow-on: queued {candidate} "
+                        f"(depth {current_depth + 1}/{self._browse_max_depth()})",
+                    )
 
         except Exception as e:
             self._logger.error(
@@ -5589,8 +5866,7 @@ class MainLoop:
 
         queued = 0
         for link in links[:2]:
-            if link not in self._browse_queue:
-                self._browse_queue.append(link)
+            if self._queue_browse_url(link, depth=0):
                 queued += 1
         if queued:
             self._emit("📌", f"Queued {queued} discovered URL(s) from search")
@@ -5853,13 +6129,12 @@ class MainLoop:
 
         elif action_line.upper().startswith("BROWSE "):
             url = action_line[7:].strip()
-            _skip_ext = (".pdf", ".zip", ".png", ".jpg", ".jpeg", ".gif", ".svg")
-            if any(url.lower().endswith(ext) for ext in _skip_ext):
+            if any(url.lower().endswith(ext) for ext in BROWSE_DOWNLOAD_EXTENSIONS):
                 self._emit("⏭️", f"Skipping download: {url}")
             elif url.startswith("http"):
                 normalized = self._normalize_http_url(url)
                 if self._is_known_url(normalized):
-                    await self._autonomous_browse(normalized)
+                    await self._autonomous_browse(normalized, current_depth=0)
                 else:
                     self._emit(
                         "🚫",

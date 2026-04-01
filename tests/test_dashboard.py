@@ -115,6 +115,7 @@ def app_with_state(tmp_path: Path):
         param_store=FakeParamStore(
             {
                 "discussion_max_completion_tokens": 2048,
+                "autonomous_browse_max_depth": 5,
                 "dashboard_refresh_interval_seconds": 5,
             }
         ),
@@ -127,6 +128,13 @@ def app_with_state(tmp_path: Path):
                 "Dialogue",
             ),
             FakeParamSpec(
+                "autonomous_browse_max_depth",
+                "Browse Max Depth",
+                "Maximum linked-page hop depth for autonomous browsing.",
+                "int",
+                "Browser",
+            ),
+            FakeParamSpec(
                 "dashboard_refresh_interval_seconds",
                 "Dashboard Refresh",
                 "Refresh cadence for live panels.",
@@ -136,6 +144,7 @@ def app_with_state(tmp_path: Path):
         ],
         default_values={
             "discussion_max_completion_tokens": 1024,
+            "autonomous_browse_max_depth": 5,
             "dashboard_refresh_interval_seconds": 5,
         },
         optimizable_settings={"discussion_max_completion_tokens"},
@@ -284,6 +293,7 @@ async def test_settings_page_returns_html_with_setting_content(client: httpx.Asy
     assert resp.status_code == 200
     assert "Settings Control Center" in resp.text
     assert "Discussion Max Tokens" in resp.text
+    assert "Browse Max Depth" in resp.text
 
 
 async def test_dialogue_partial_returns_html(client: httpx.AsyncClient):
