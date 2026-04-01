@@ -807,6 +807,7 @@ def test_configure_tool_registry_exposes_capabilities(
 
     assert "browser.fetch_text" in summary
     assert "search.query" in summary
+    assert "workspace.write" in summary
     assert "email.send" in summary
     assert "moltbook.send" in summary
     assert "think.private" in summary
@@ -834,6 +835,36 @@ async def test_search_tool_returns_configured_error_when_backend_disabled(
     assert result.success is False
     assert result.error is not None
     assert "Search is not configured" in result.error
+
+
+def test_workspace_reminder_mentions_agent_creations(
+    loop_env: tuple[Settings, Secrets, Path],
+) -> None:
+    settings, secrets, _ = loop_env
+    loop = MainLoop(settings=settings, secrets=secrets)
+    loop.configure_tool_registry()
+
+    reminder = loop._workspace_capability_reminder()
+
+    assert "agent_creations" in reminder
+    assert "workspace.list/read/write/append" in reminder
+
+
+async def test_legacy_workspace_action_writes_shared_artifact(
+    loop_env: tuple[Settings, Secrets, Path],
+) -> None:
+    settings, secrets, tmp_path = loop_env
+    settings = Settings(data_dir=settings.data_dir, repo_root=str(tmp_path))
+    loop = MainLoop(settings=settings, secrets=secrets)
+    loop._ensure_dirs()
+    loop.configure_tool_registry()
+
+    await loop._execute_autonomous_action("WORKSPACE WRITE shared\\story.txt | Once")
+    await loop._execute_autonomous_action("WORKSPACE APPEND shared\\story.txt | upon a time")
+
+    assert (tmp_path / "agent_creations" / "shared" / "story.txt").read_text(
+        encoding="utf-8"
+    ) == "Onceupon a time"
 
 
 async def test_council7_reads_foundation_before_free_exploration(

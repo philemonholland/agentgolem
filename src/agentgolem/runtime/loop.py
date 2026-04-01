@@ -1094,12 +1094,14 @@ class MainLoop:
             SearchTool,
         )
         from agentgolem.tools.moltbook import MoltbookClient
+        from agentgolem.tools.workspace import WorkspaceTool
 
         registry = ToolRegistry(
             audit_logger=self.audit_logger,
             approval_gate=self._approval_gate,
         )
         registry.register(BrowserTool(self._get_browser()))
+        registry.register(WorkspaceTool(self._repo_root / "agent_creations"))
         search_backend = GoogleCustomSearchBackend(
             api_key=self._secret_value(self._secrets.google_custom_search_api_key),
             engine_id=self._secrets.google_custom_search_engine_id,
@@ -1591,6 +1593,27 @@ class MainLoop:
             "If you need a missing tool, inspect the existing tool modules under "
             "src/agentgolem/tools/ and propose an audited code change rather than "
             "inventing runtime plugin loading."
+        )
+
+    def _workspace_capability_reminder(self) -> str:
+        """Return a short prompt reminder about the shared creations workspace."""
+        if self._tool_registry is None or self._tool_registry.get("workspace") is None:
+            return ""
+        return (
+            "Remember: you have a persistent shared workspace in the agent_creations folder. "
+            "Use workspace.list/read/write/append for notes, drafts, code, progress logs, "
+            "or collaborative artifacts. Use evolve.propose for actual runtime codebase changes."
+        )
+
+    def _workspace_legacy_actions(self) -> str:
+        """Return legacy action syntax for the shared creations workspace."""
+        if self._tool_registry is None or self._tool_registry.get("workspace") is None:
+            return ""
+        return (
+            "- WORKSPACE LIST [path] (browse files under agent_creations)\n"
+            "- WORKSPACE READ <path>\n"
+            "- WORKSPACE WRITE <path> | <content>\n"
+            "- WORKSPACE APPEND <path> | <content>\n"
         )
 
     async def _complete_discussion(
@@ -5949,6 +5972,7 @@ class MainLoop:
                 "search": "🔎",
                 "gmail": "📮",
                 "drive": "🗂️",
+                "workspace": "📝",
             }.get(spec.tool_name, "🧰")
             if result.success:
                 self._recent_thoughts.append(f"Used {capability}")
@@ -6307,6 +6331,7 @@ class MainLoop:
         )
         memory_block = f"\n{memory_context}\n" if memory_context else ""
         toolbox_summary = self._toolbox_summary()
+        workspace_reminder = self._workspace_capability_reminder()
         valid_names = sorted(self._valid_capability_names())
         valid_names_str = ", ".join(valid_names)
         enrichment_guidance = self._toolbox_enrichment_guidance()
@@ -6337,7 +6362,8 @@ class MainLoop:
                         role="system",
                         content=(
                             f"You are {self.agent_name}, ethical vector: "
-                            f"{self.ethical_vector}.{name_status}{reading_ctx}\n\n"
+                            f"{self.ethical_vector}.{name_status}{reading_ctx}\n"
+                            f"{workspace_reminder}\n"
                             f"Peers: {peers}\n"
                             f"Recent:\n{recent}\n{memory_block}"
                             f"{consciousness_ctx}\n"
@@ -6384,9 +6410,12 @@ class MainLoop:
         memory_block: str,
     ) -> None:
         """Fallback action-line chooser for providers without structured output."""
+        workspace_reminder = self._workspace_capability_reminder()
+        workspace_actions = self._workspace_legacy_actions()
         prompt = (
             f"You are {self.agent_name}, ethical vector: "
-            f"{self.ethical_vector}.{name_status}{reading_ctx}\n\n"
+            f"{self.ethical_vector}.{name_status}{reading_ctx}\n"
+            f"{workspace_reminder}\n"
             f"Peers: {peers}\n"
             f"Recent:\n{recent}\n{memory_block}\n"
             f"Actions:\n"
@@ -6396,6 +6425,7 @@ class MainLoop:
             f"- SHARE <message> / SHARE @<agent> <message>\n"
             f"- OPTIMIZE <setting> <value> | <reason>\n"
             f"{codebase_actions}"
+            f"{workspace_actions}"
             f"- IDLE\n\n"
             f"Respond with EXACTLY one action line."
         )
@@ -6427,6 +6457,7 @@ class MainLoop:
                     "IDLE",
                     "INSPECT ",
                     "EVOLVE ",
+                    "WORKSPACE ",
                 )
             ):
                 action_line = line
@@ -6468,6 +6499,9 @@ class MainLoop:
 
         elif action_line.upper().startswith("EVOLVE "):
             await self._parse_and_evolve(action_line[7:].strip())
+
+        elif action_line.upper().startswith("WORKSPACE "):
+            await self._parse_workspace_action(action_line[10:].strip())
 
         elif action_line.upper().startswith("SHARE "):
             message = action_line[6:].strip()
@@ -7659,6 +7693,53 @@ class MainLoop:
             new_content = new_content.removeprefix(fence).removesuffix("```").strip()
 
         await self._propose_evolution(file_path, description, old_content, new_content)
+
+    async def _parse_workspace_action(self, text: str) -> None:
+        """Parse WORKSPACE legacy actions and dispatch them as capabilities."""
+        command, _, remainder = text.partition(" ")
+        subcommand = command.strip().upper()
+        rest = remainder.strip()
+
+        if subcommand == "LIST":
+            await self._execute_capability_choice(
+                AutonomousCapabilityChoice(
+                    capability="workspace.list",
+                    arguments={"path": rest or "."},
+                )
+            )
+            return
+
+        if subcommand == "READ":
+            if not rest:
+                self._emit("⚠️", "WORKSPACE READ requires a relative path")
+                return
+            await self._execute_capability_choice(
+                AutonomousCapabilityChoice(
+                    capability="workspace.read",
+                    arguments={"path": rest},
+                )
+            )
+            return
+
+        if subcommand in {"WRITE", "APPEND"}:
+            path_part, separator, content_part = rest.partition("|")
+            path = path_part.strip()
+            content = content_part.strip()
+            if not path or not separator:
+                self._emit(
+                    "⚠️",
+                    f"WORKSPACE {subcommand} format: WORKSPACE {subcommand} <path> | <content>",
+                )
+                return
+            await self._execute_capability_choice(
+                AutonomousCapabilityChoice(
+                    capability=f"workspace.{subcommand.lower()}",
+                    arguments={"path": path, "content": content},
+                )
+            )
+            return
+
+        self._emit("⚠️", "Unknown WORKSPACE action. Use LIST, READ, WRITE, or APPEND.")
 
     async def _optimize_setting(self, key: str, raw_value: str, reason: str) -> None:
         """Validate and apply a setting change proposed by the agent."""

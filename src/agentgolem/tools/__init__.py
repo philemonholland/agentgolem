@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from agentgolem.tools.base import ApprovalGate, Tool, ToolRegistry, ToolResult
 from agentgolem.tools.skill_pack import SkillManifest, SkillPackRegistry, SkillPackTool
+from agentgolem.tools.workspace import WorkspaceTool
 
 __all__ = [
     "ApprovalGate",
@@ -12,4 +13,5 @@ __all__ = [
     "Tool",
     "ToolRegistry",
     "ToolResult",
+    "WorkspaceTool",
 ]
