@@ -531,6 +531,141 @@ class TestCommandDispatch:
         assert "/help" in captured
         loop.close()
 
+    def test_requests_and_goals_use_shared_data_dir(self, tmp_env, capsys):
+        from agentgolem.runtime.attention import AttentionRequest, save_request
+        from agentgolem.runtime.team_goals import TeamGoal, save_team_goal
+
+        store = run_golem.ParamStore()
+        loop = asyncio.new_event_loop()
+        shared_dir = tmp_env / "data"
+        agent_dir = shared_dir / "council_1"
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        agent = SimpleNamespace(
+            agent_name="Council-1",
+            _initial_agent_name="Council-1",
+            _data_dir=agent_dir,
+            interrupt_manager=InterruptManager(),
+            _conversation_paused=False,
+        )
+        save_request(
+            AttentionRequest(
+                agent_name="Council-1",
+                reason="tool_failure",
+                context="Search unavailable",
+            ),
+            shared_dir,
+        )
+        save_team_goal(
+            TeamGoal(
+                description="Fix search handling",
+                status="active",
+                subtasks={"Council-1": {"description": "Patch runtime", "status": "in_progress"}},
+            ),
+            shared_dir,
+        )
+        console = run_golem.RuntimeConsole(
+            store=store,
+            loop_ref=None,
+            async_loop=loop,
+            agents=[agent],
+        )
+
+        console._dispatch_command("/requests")
+        requests_out = capsys.readouterr().out
+        assert "Pending Attention Requests" in requests_out
+        assert "Search unavailable" in requests_out
+
+        console._dispatch_command("/goals")
+        goals_out = capsys.readouterr().out
+        assert "Team Goal" in goals_out
+        assert "Fix search handling" in goals_out
+        loop.close()
+
+    def test_attend_resolves_request_without_settings_attribute(
+        self,
+        tmp_env,
+        monkeypatch,
+        capsys,
+    ):
+        from agentgolem.runtime.attention import AttentionRequest, list_pending, save_request
+
+        store = run_golem.ParamStore()
+        loop = asyncio.new_event_loop()
+        shared_dir = tmp_env / "data"
+        agent_dir = shared_dir / "council_1"
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        agent = SimpleNamespace(
+            agent_name="Council-1",
+            _initial_agent_name="Council-1",
+            _data_dir=agent_dir,
+            interrupt_manager=InterruptManager(),
+            _conversation_paused=True,
+        )
+        save_request(
+            AttentionRequest(
+                agent_name="Council-1",
+                reason="tool_failure",
+                context="Search unavailable",
+            ),
+            shared_dir,
+        )
+        console = run_golem.RuntimeConsole(
+            store=store,
+            loop_ref=None,
+            async_loop=loop,
+            agents=[agent],
+            human_speaking_event=threading.Event(),
+            transient_pause_event=threading.Event(),
+        )
+
+        class _ImmediateFuture:
+            def result(self, timeout=None):
+                return None
+
+        def _run_sync(coro, async_loop):
+            async_loop.run_until_complete(coro)
+            return _ImmediateFuture()
+
+        monkeypatch.setattr(run_golem.asyncio, "run_coroutine_threadsafe", _run_sync)
+
+        console._dispatch_command("/attend thanks")
+        captured = capsys.readouterr().out
+
+        assert "Resolved request" in captured
+        assert list_pending(shared_dir) == []
+        assert agent.interrupt_manager.has_messages() is True
+        assert agent._conversation_paused is False
+        loop.close()
+
+    def test_requests_support_single_agent_shared_data_dir(self, tmp_env, capsys):
+        from agentgolem.runtime.attention import AttentionRequest, save_request
+
+        store = run_golem.ParamStore()
+        loop = asyncio.new_event_loop()
+        shared_dir = tmp_env / "data"
+        shared_dir.mkdir(parents=True, exist_ok=True)
+        loop_ref = SimpleNamespace(_data_dir=shared_dir)
+        save_request(
+            AttentionRequest(
+                agent_name="Council-1",
+                reason="need_input",
+                context="Single-agent request",
+            ),
+            shared_dir,
+        )
+        console = run_golem.RuntimeConsole(
+            store=store,
+            loop_ref=loop_ref,
+            async_loop=loop,
+        )
+
+        console._dispatch_command("/requests")
+        captured = capsys.readouterr().out
+
+        assert "Pending Attention Requests" in captured
+        assert "Single-agent request" in captured
+        loop.close()
+
 
 # ---------------------------------------------------------------------------
 # PARAM_DEFS completeness

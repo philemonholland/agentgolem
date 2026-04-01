@@ -814,6 +814,28 @@ def test_configure_tool_registry_exposes_capabilities(
     assert "approval=moltbook_send" in summary
 
 
+async def test_search_tool_returns_configured_error_when_backend_disabled(
+    loop_env: tuple[Settings, Secrets, Path],
+) -> None:
+    settings, _, _ = loop_env
+    settings = Settings(data_dir=settings.data_dir, google_custom_search_enabled=False)
+    secrets = Secrets(_env_file=None)
+    loop = MainLoop(settings=settings, secrets=secrets)
+    loop._ensure_dirs()
+    loop._approval_gate = ApprovalGate(settings.data_dir / "approvals", [])
+    loop.configure_tool_registry()
+
+    result = await loop._invoke_registered_tool(
+        "search",
+        action="query",
+        query="epistemic basing relation",
+    )
+
+    assert result.success is False
+    assert result.error is not None
+    assert "Search is not configured" in result.error
+
+
 async def test_council7_reads_foundation_before_free_exploration(
     loop_env: tuple[Settings, Secrets, Path],
     monkeypatch: pytest.MonkeyPatch,

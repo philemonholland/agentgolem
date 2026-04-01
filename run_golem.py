@@ -2091,6 +2091,29 @@ class RuntimeConsole:
         for agent in self._agents:
             agent._conversation_paused = paused
 
+    def _shared_data_dir(self) -> Path | None:
+        """Return the council-shared data directory used by attention/goals files."""
+        def _normalize(data_dir: Path) -> Path:
+            return (
+                data_dir.parent
+                if data_dir.name.startswith("council_")
+                else data_dir
+            )
+
+        for agent in self._agents:
+            data_dir = getattr(agent, "_data_dir", None)
+            if data_dir is not None:
+                return _normalize(data_dir)
+
+        loop_data_dir = getattr(self._loop_ref, "_data_dir", None)
+        if loop_data_dir is not None:
+            return _normalize(loop_data_dir)
+
+        try:
+            return self._store.reload_into_settings_object().data_dir
+        except Exception:
+            return None
+
     def _resolve_agent(self, selector: str) -> Any | None:
         """Resolve by current name, initial council id, or council number."""
         selector = selector.strip()
@@ -2323,7 +2346,10 @@ class RuntimeConsole:
             resolve_oldest_blocking,
         )
 
-        data_dir = self._settings.data_dir
+        data_dir = self._shared_data_dir()
+        if data_dir is None:
+            cprint("  Unable to locate the runtime data directory.", C.RED)
+            return
         resolved = resolve_oldest_blocking(data_dir, message)
         if resolved is None:
             cprint("  No pending blocking attention requests.", C.DIM)
@@ -2337,15 +2363,15 @@ class RuntimeConsole:
         if message:
             cprint(f"  📨 Your message: {message}", C.DIM)
             # Deliver as human message to the requesting agent
-            for agent in self._agents:
-                if agent.agent_name == resolved.agent_name:
-                    asyncio.run_coroutine_threadsafe(
-                        agent.interrupt_manager.send_message(
-                            f"[Attention response] {message}"
-                        ),
-                        self._loop,
-                    )
-                    break
+            agent = self._resolve_agent(resolved.agent_name)
+            if agent is not None:
+                future = asyncio.run_coroutine_threadsafe(
+                    agent.interrupt_manager.send_message(
+                        f"[Attention response] {message}"
+                    ),
+                    self._async_loop,
+                )
+                future.result(timeout=5.0)
 
         # Clear pause if no more blocking requests remain
         remaining = [
@@ -2354,8 +2380,7 @@ class RuntimeConsole:
         if not remaining:
             self._human_speaking.clear()
             self._transient_pause.clear()
-            for agent in self._agents:
-                agent._conversation_paused = False
+            self._set_conversation_paused(False)
             cprint("  ▶ All blocking requests resolved. Agents resumed.", C.GREEN)
         else:
             cprint(
@@ -2367,7 +2392,11 @@ class RuntimeConsole:
         """List all pending attention requests."""
         from agentgolem.runtime.attention import list_pending
 
-        pending = list_pending(self._settings.data_dir)
+        data_dir = self._shared_data_dir()
+        if data_dir is None:
+            cprint("  Unable to locate the runtime data directory.", C.RED)
+            return
+        pending = list_pending(data_dir)
         if not pending:
             cprint("  No pending attention requests.", C.DIM)
             return
@@ -2384,7 +2413,11 @@ class RuntimeConsole:
         """Show active team goal and individual goals."""
         from agentgolem.runtime.team_goals import load_active_team_goal
 
-        tg = load_active_team_goal(self._settings.data_dir)
+        data_dir = self._shared_data_dir()
+        if data_dir is None:
+            cprint("  Unable to locate the runtime data directory.", C.RED)
+            return
+        tg = load_active_team_goal(data_dir)
         if tg is not None:
             cprint(f"\n  {C.BOLD}🎯 Team Goal: {tg.description}{C.RESET}", C.CYAN)
             cprint(f"     Status: {tg.status}", C.DIM)

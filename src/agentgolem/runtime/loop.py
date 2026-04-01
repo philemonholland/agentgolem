@@ -1100,34 +1100,37 @@ class MainLoop:
             approval_gate=self._approval_gate,
         )
         registry.register(BrowserTool(self._get_browser()))
+        search_backend = GoogleCustomSearchBackend(
+            api_key=self._secret_value(self._secrets.google_custom_search_api_key),
+            engine_id=self._secrets.google_custom_search_engine_id,
+            timeout_seconds=getattr(self._settings, "browser_timeout_seconds", 20),
+        )
+        search_quota = None
         if getattr(self._settings, "google_custom_search_enabled", False):
             quota_path = self._data_dir.parent / "state" / "google_custom_search_quota.json"
-            registry.register(
-                SearchTool(
-                    GoogleCustomSearchBackend(
-                        api_key=self._secret_value(self._secrets.google_custom_search_api_key),
-                        engine_id=self._secrets.google_custom_search_engine_id,
-                        timeout_seconds=getattr(self._settings, "browser_timeout_seconds", 20),
-                    ),
-                    quota=PersistentTokenBucket(
-                        quota_path,
-                        capacity=getattr(
-                            self._settings,
-                            "google_custom_search_bucket_capacity",
-                            100,
-                        ),
-                        refill_rate_per_hour=float(
-                            getattr(self._settings, "google_custom_search_hourly_quota", 4)
-                        ),
-                    ),
-                    default_num_results=getattr(
-                        self._settings,
-                        "google_custom_search_default_num_results",
-                        5,
-                    ),
-                    safe_mode=getattr(self._settings, "google_custom_search_safe", "active"),
-                )
+            search_quota = PersistentTokenBucket(
+                quota_path,
+                capacity=getattr(
+                    self._settings,
+                    "google_custom_search_bucket_capacity",
+                    100,
+                ),
+                refill_rate_per_hour=float(
+                    getattr(self._settings, "google_custom_search_hourly_quota", 4)
+                ),
             )
+        registry.register(
+            SearchTool(
+                search_backend,
+                quota=search_quota,
+                default_num_results=getattr(
+                    self._settings,
+                    "google_custom_search_default_num_results",
+                    5,
+                ),
+                safe_mode=getattr(self._settings, "google_custom_search_safe", "active"),
+            )
+        )
 
         if getattr(self._settings, "email_enabled", False):
             registry.register(
