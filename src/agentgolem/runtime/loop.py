@@ -362,6 +362,8 @@ class MainLoop:
         self._vow_foundation_complete = False
         self._last_calibration_tick: datetime | None = None
         self._last_calibration_summary: CalibrationSummary | None = None
+        self._calibration_count: int = 0  # total calibrations for self-benchmark cadence
+        self._last_self_benchmark: dict[str, Any] | None = None
 
         # Legacy NJ reading state (kept for reference / web browsing)
         self._niscalajyoti_reading_complete = False
@@ -493,6 +495,7 @@ class MainLoop:
         self._recent_outgoing_texts: list[str] = []  # last N outgoing peer msgs
         self._pending_memory_node_ids: list[str] = []  # set by _build_memory_context
         self._memory_node_text_cache: dict[str, str] = {}  # id → text for hit detection
+        self._template_registry: Any = None  # TemplateRegistry, set in _initialize_graph
 
         # Attention escalation system
         self._consecutive_tool_failures: dict[str, int] = {}  # tool_name → count
@@ -2895,6 +2898,28 @@ class MainLoop:
         except Exception:
             pass  # never block calibration on trace loading failure
 
+        # Inject self-benchmark results if available
+        self_benchmark_block = ""
+        if self._last_self_benchmark:
+            try:
+                from agentgolem.benchmarks.self_eval import (
+                    SelfBenchmarkResult,
+                    format_self_benchmark_for_calibration,
+                    load_self_benchmarks,
+                )
+
+                current = SelfBenchmarkResult.from_dict(self._last_self_benchmark)
+                history = load_self_benchmarks(self._data_dir, limit=5)
+                self_benchmark_block = (
+                    "\n" + format_self_benchmark_for_calibration(current, history) + "\n"
+                    "Use these objective metrics to guide your self-audit. "
+                    "If retrieval precision is below 50%, consider if your memory "
+                    "organization needs improvement. If health score is declining, "
+                    "identify the root cause.\n"
+                )
+            except Exception:
+                pass
+
         # Build goal review for calibration
         goal_review = self._build_goal_context_for_prompt()
 
@@ -2908,6 +2933,7 @@ class MainLoop:
             f"--- END PROTOCOL ---\n\n"
             f"Your recent thoughts and actions:\n{recent}\n"
             f"{diagnostic_block}\n"
+            f"{self_benchmark_block}"
             f"{goal_review}"
             f"Perform a thorough self-audit:\n"
             f"1. For each of the Five Vows, assess your recent alignment "
@@ -2945,7 +2971,132 @@ class MainLoop:
             )
 
         self._last_calibration_tick = datetime.now(UTC)
+        self._calibration_count += 1
         self._save_vow_foundation_state()
+
+        # Run self-benchmark every 3rd calibration
+        if self._calibration_count % 3 == 0:
+            try:
+                await self._run_self_benchmark()
+            except Exception as exc:
+                self._logger.warning(
+                    "self_benchmark_error",
+                    agent=self.agent_name,
+                    error=repr(exc),
+                )
+
+    async def _run_self_benchmark(self) -> None:
+        """Lightweight self-benchmark — Meta-Harness Phase 3.
+
+        Tests the agent's own retrieval precision, trust coherence, and
+        context efficiency against its memory graph and recent traces.
+        Results are persisted and injected into future calibrations.
+        """
+        from agentgolem.benchmarks.self_eval import (
+            SelfBenchmarkResult,
+            append_self_benchmark,
+            compute_health_score,
+        )
+        from agentgolem.harness.trace import load_traces
+
+        self._emit("🔬", "Running self-benchmark...")
+
+        result = SelfBenchmarkResult(
+            agent_name=self.agent_name,
+            timestamp=datetime.now(UTC).isoformat(),
+        )
+
+        # ── 1. Retrieval precision ────────────────────────────────────
+        # Pick recent high-value memory nodes and test if retrieval finds them
+        if self._memory_store and self._memory_retriever:
+            from agentgolem.memory.models import NodeFilter, NodeStatus
+
+            high_value = await self._memory_store.query_nodes(
+                NodeFilter(
+                    status=NodeStatus.ACTIVE,
+                    usefulness_min=0.5,
+                    limit=20,
+                )
+            )
+            if high_value:
+                hits = 0
+                tested = 0
+                for node in high_value[:10]:
+                    query_text = (node.search_text or node.text or "")[:80]
+                    if len(query_text) < 10:
+                        continue
+                    tested += 1
+                    try:
+                        retrieved = await self._memory_retriever.retrieve(
+                            query_text, top_k=10,
+                        )
+                        found_ids = {n.id for n in retrieved}
+                        if node.id in found_ids:
+                            hits += 1
+                    except Exception:
+                        pass
+
+                result.retrieval_queries_tested = tested
+                result.retrieval_hits = hits
+                result.retrieval_misses = tested - hits
+                result.retrieval_precision = hits / tested if tested else 0.0
+
+        # ── 2. Trust coherence ────────────────────────────────────────
+        # Check if trust scores correlate with source reliability
+        if self._memory_store:
+            from agentgolem.memory.models import NodeFilter, NodeStatus
+
+            sample_nodes = await self._memory_store.query_nodes(
+                NodeFilter(status=NodeStatus.ACTIVE, limit=50)
+            )
+            if len(sample_nodes) >= 5:
+                trust_scores = [n.trustworthiness for n in sample_nodes]
+                useful_scores = [n.trust_useful for n in sample_nodes]
+                # Coherence: how well trust and trust_useful correlate
+                # Simple: fraction of nodes where trust > 0.3 that also have
+                # trust_useful > 0.2 (both signals should agree directionally)
+                coherent = 0
+                for n in sample_nodes:
+                    if n.trustworthiness > 0.3 and n.trust_useful > 0.2:
+                        coherent += 1
+                    elif n.trustworthiness <= 0.3 and n.trust_useful <= 0.2:
+                        coherent += 1
+                result.trust_coherence = coherent / len(sample_nodes)
+                result.trust_nodes_sampled = len(sample_nodes)
+
+        # ── 3. Context efficiency from recent traces ──────────────────
+        traces = load_traces(self._data_dir, limit=50)
+        if traces:
+            ctx_tokens = [t.context_tokens for t in traces if t.context_tokens > 0]
+            if ctx_tokens:
+                result.avg_context_tokens = sum(ctx_tokens) / len(ctx_tokens)
+
+            hit_rates = [
+                t.retrieval_hit_rate for t in traces
+                if t.retrieval_hit_rate is not None
+            ]
+            if hit_rates:
+                result.avg_retrieval_hit_rate = sum(hit_rates) / len(hit_rates)
+
+            productive = sum(
+                1 for t in traces
+                if t.action_taken and t.action_taken.lower() not in ("idle", "")
+            )
+            result.productive_action_rate = productive / len(traces)
+
+        # ── Compute overall health ────────────────────────────────────
+        result.health_score = compute_health_score(result)
+
+        # Persist
+        append_self_benchmark(result, self._data_dir)
+        self._last_self_benchmark = result.to_dict()
+
+        self._emit(
+            "🔬",
+            f"Self-benchmark: health={result.health_score:.2f} "
+            f"retrieval={result.retrieval_precision:.0%} "
+            f"trust={result.trust_coherence:.2f}",
+        )
 
     def _format_calibration_memory(
         self,
@@ -6688,6 +6839,13 @@ class MainLoop:
                     llm=self._llm,
                     audit_logger=self.audit_logger,
                 )
+            # Initialize template registry for Meta-Harness Phase 2
+            try:
+                from agentgolem.harness.template_registry import TemplateRegistry
+
+                self._template_registry = TemplateRegistry(self._data_dir)
+            except Exception:
+                pass
 
     async def _recall_relevant_memories(self, context: str, top_k: int = 5) -> str:
         """Retrieve memories relevant to the given context and format them.

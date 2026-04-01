@@ -1047,6 +1047,7 @@ def _build_agent_snapshot(st: DashboardState, agent: Any) -> dict[str, Any]:
             "peer_message_max_chars": getattr(agent, "_peer_msg_limit", None),
         },
         "trace_diagnostics": _compact_trace_diagnostics(agent),
+        "self_benchmark": getattr(agent, "_last_self_benchmark", None),
         "changed_recently": changed,
         "has_recent_changes": any(changed.values()),
         "last_updated": {
@@ -1326,6 +1327,28 @@ def create_app(dashboard_state: DashboardState | None = None) -> FastAPI:
         traces = load_traces(data_dir, limit=limit)
         stats = compute_outcome_stats(traces)
         return stats.to_dict()
+
+    @app.get("/api/council/agents/{agent_name}/self-benchmarks")
+    async def get_agent_self_benchmarks(
+        agent_name: str,
+        limit: int = Query(20, ge=1, le=100),
+    ) -> list[dict[str, Any]]:
+        from agentgolem.benchmarks.self_eval import load_self_benchmarks
+
+        agent = _find_agent(_state, agent_name)
+        data_dir = getattr(agent, "_data_dir", None)
+        if data_dir is None:
+            return []
+        results = load_self_benchmarks(data_dir, limit=limit)
+        return [r.to_dict() for r in results]
+
+    @app.get("/api/council/agents/{agent_name}/templates")
+    async def get_agent_templates(agent_name: str) -> dict[str, Any]:
+        agent = _find_agent(_state, agent_name)
+        registry = getattr(agent, "_template_registry", None)
+        if registry is None:
+            return {"templates": {}}
+        return {"templates": registry.to_dict()}
 
     @app.get("/api/dialogue")
     async def get_dialogue() -> dict[str, Any]:

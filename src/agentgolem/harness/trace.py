@@ -43,6 +43,9 @@ class ExecutionTrace:
     outcome_value: str = ""  # compact description of what happened
     goal_id: str = ""        # which goal this action served (if any)
 
+    # Template versioning (Meta-Harness Phase 2)
+    template_version: str = ""  # "name:version" of prompt template used
+
     timestamp: str = field(
         default_factory=lambda: datetime.now(UTC).isoformat()
     )
