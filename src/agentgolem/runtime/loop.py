@@ -2748,17 +2748,17 @@ class MainLoop:
             self._last_vow_review = datetime.now(UTC)
             return
 
-        # Build a short targeted prompt — not full reflection, just refresh
-        prompt = (
-            f"{self._identity_preamble()}\n\n"
-            f"Re-read this summary of the Five Vows:\n\n"
-            f"{foundation_text[:3000]}\n\n"
-            f"In 1-2 sentences, note how this connects to what you've been "
-            f"thinking about recently. This is a subconscious refresh, not a "
-            f"full audit."
-        )
-
         try:
+            # Build a short targeted prompt — not full reflection, just refresh
+            prompt = (
+                f"{self._identity_preamble()}\n\n"
+                f"Re-read this summary of the Five Vows:\n\n"
+                f"{foundation_text[:3000]}\n\n"
+                f"In 1-2 sentences, note how this connects to what you've been "
+                f"thinking about recently. This is a subconscious refresh, not a "
+                f"full audit."
+            )
+
             thought = await self._complete_discussion(
                 [Message(role="system", content=prompt)],
                 trace_meta={
@@ -2781,8 +2781,8 @@ class MainLoop:
                 agent=self.agent_name,
                 error=repr(exc),
             )
-
-        self._last_vow_review = datetime.now(UTC)
+        finally:
+            self._last_vow_review = datetime.now(UTC)
 
     async def _vow_ethics_discussion(self) -> None:
         """Stage 2: Discuss ethics with peers based on absorbed vow documents."""
@@ -2921,7 +2921,7 @@ class MainLoop:
                 pass
 
         # Build goal review for calibration
-        goal_review = self._build_goal_context_for_prompt()
+        goal_review = await self._build_goal_context_for_prompt()
 
         prompt = (
             f"{self._identity_preamble()}\n\n"
@@ -5724,7 +5724,7 @@ class MainLoop:
         enrichment_guidance = self._toolbox_enrichment_guidance()
 
         # Build goal context for action selection
-        goal_ctx = self._build_goal_context_for_prompt()
+        goal_ctx = await self._build_goal_context_for_prompt()
 
         # Consciousness kernel: compute attention directive
         attention_preamble = ""
@@ -6569,7 +6569,7 @@ class MainLoop:
 
             # Gather active goal summaries
             goal_labels: list[str] = []
-            for g in self._get_active_goals()[:5]:
+            for g in (await self._get_active_goals())[:5]:
                 goal_labels.append(g.get("description", "?")[:80])
 
             prompt = self._metacognitive_monitor.build_reflection_prompt(
@@ -6773,7 +6773,7 @@ class MainLoop:
                 dev.total_narrative_chapters = len(self._narrative_synthesizer.chapters)
             if hasattr(self, "_relationship_store") and self._relationship_store is not None:
                 dev.total_peer_exchanges = sum(
-                    r.shared_experiences
+                    len(r.shared_experiences)
                     for r in self._relationship_store.relationships.values()
                 )
 
@@ -7227,7 +7227,7 @@ class MainLoop:
 
     # ── Individual goal system ────────────────────────────────────────
 
-    def _build_goal_context_for_prompt(self) -> str:
+    async def _build_goal_context_for_prompt(self) -> str:
         """Build a goal context block for action selection prompts."""
         parts: list[str] = []
 
@@ -7278,7 +7278,7 @@ class MainLoop:
             pass
 
         # Personal goals
-        active_goals = self._get_active_goals()
+        active_goals = await self._get_active_goals()
         if active_goals:
             parts.append("--- YOUR PERSONAL GOALS ---")
             for i, g in enumerate(active_goals[:5], 1):
@@ -7322,31 +7322,35 @@ class MainLoop:
             return "\n".join(parts) + "\n\n"
         return ""
 
-    def _get_active_goals(self) -> list[dict]:
+    async def _get_active_goals(self) -> list[dict]:
         """Return active personal goals from the memory graph."""
         if self._memory_store is None:
             return []
         try:
-            all_nodes = self._memory_store.list_nodes()
+            from agentgolem.memory.models import NodeFilter
+
+            matching = await self._memory_store.query_nodes(
+                NodeFilter(text_contains="GOAL|ACTIVE|", limit=200)
+            )
         except Exception:
             return []
         goals = []
-        for node in all_nodes:
+        for node in matching:
             st = getattr(node, "search_text", "") or ""
             if st.startswith("GOAL|ACTIVE|"):
                 parts = st.split("|", 5)
                 goals.append({
                     "id": node.id,
-                    "description": parts[4] if len(parts) > 4 else node.content[:80],
+                    "description": parts[4] if len(parts) > 4 else (node.text or "")[:80],
                     "criteria": parts[3] if len(parts) > 3 else "",
                     "created": parts[5] if len(parts) > 5 else "",
-                    "content": node.content,
+                    "content": node.text or "",
                 })
         return goals
 
     async def _set_personal_goal(self, description: str, criteria: str) -> None:
         """Create a new personal goal as a GOAL node in the memory graph."""
-        active = self._get_active_goals()
+        active = await self._get_active_goals()
         max_goals = getattr(self._settings, "max_active_goals", 3)
         if len(active) >= max_goals:
             self._emit(
