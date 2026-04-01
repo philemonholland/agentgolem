@@ -65,8 +65,11 @@ def _selected_agent_name(
     return agents[0]["name"] if agents else None
 
 
-def _graph_agent_paths(ds: Any, agent_name: str) -> tuple[str, Path | None, Path | None]:
-    """Resolve a graph agent selector to database and audit-log paths."""
+def _graph_agent_paths(
+    ds: Any,
+    agent_name: str,
+) -> tuple[str, Path | None, Path | None, Path | None]:
+    """Resolve a graph agent selector to graph, audit, and sleep-state paths."""
     if agent_name:
         resolved = api_mod._resolve_agent(ds, agent_name)
         if resolved is not None:
@@ -77,15 +80,17 @@ def _graph_agent_paths(ds: Any, agent_name: str) -> tuple[str, Path | None, Path
                     display_name,
                     agent_dir / "memory" / "graph.db",
                     agent_dir / "logs" / "audit.jsonl",
+                    agent_dir / "state" / "sleep_state.json",
                 )
 
     data_dir = api_mod._get_data_dir(ds)
     if data_dir is None or not agent_name:
-        return agent_name, None, None
+        return agent_name, None, None, None
     return (
         agent_name,
         data_dir / agent_name / "memory" / "graph.db",
         data_dir / agent_name / "logs" / "audit.jsonl",
+        data_dir / agent_name / "state" / "sleep_state.json",
     )
 
 
@@ -549,11 +554,13 @@ def create_dashboard_app() -> FastAPI:
     ) -> JSONResponse:
         """Return graph data (nodes, edges, clusters, stats) for D3 rendering."""
         import asyncio
+        import hashlib
+        import json
         import sqlite3
         from datetime import UTC, datetime, timedelta
 
         recent_window = api_mod.dashboard_recent_change_seconds(ds)
-        resolved_agent_name, db_path, audit_path = _graph_agent_paths(ds, agent)
+        resolved_agent_name, db_path, audit_path, sleep_state_path = _graph_agent_paths(ds, agent)
         empty_live = {
             "graph_hash": "0:0:",
             "recent_window_seconds": recent_window,
@@ -662,6 +669,7 @@ def create_dashboard_app() -> FastAPI:
                 stats["_total_edges"] = total_edges
                 stats["_total_nodes"] = sum(v for k, v in stats.items() if not k.startswith("_"))
                 latest_node = _q("SELECT MAX(created_at) as ts FROM nodes")
+                latest_accessed = _q("SELECT MAX(last_accessed) as ts FROM nodes")
                 latest_edge = _q(
                     "SELECT MAX("
                     "CASE WHEN modified_at != '' THEN modified_at ELSE created_at END"
@@ -675,19 +683,37 @@ def create_dashboard_app() -> FastAPI:
                 )
                 latest_activity_ts = ""
                 recent_cutoff = datetime.now(UTC) - timedelta(seconds=recent_window)
-                recent_activity: list[dict[str, str]] = []
+                recent_activity: list[dict[str, Any]] = []
                 activated_node_ids: set[str] = set()
                 activated_edge_ids: set[str] = set()
                 edge_ids = {str(edge.get("id", "")) for edge in edges if edge.get("id")}
 
+                for node in nodes:
+                    node_id = str(node.get("id", ""))
+                    accessed_at = str(node.get("last_accessed", ""))
+                    access_count = int(node.get("access_count", 0) or 0)
+                    parsed = _parse_iso_timestamp(accessed_at)
+                    if not node_id or access_count <= 0 or parsed is None or parsed < recent_cutoff:
+                        continue
+                    activated_node_ids.add(node_id)
+                    latest_activity_ts = _latest_timestamp(latest_activity_ts, accessed_at)
+                    recent_activity.append(
+                        {
+                            "timestamp": accessed_at,
+                            "mutation_type": "node_access",
+                            "target_id": node_id,
+                            "target_kind": "node",
+                        }
+                    )
+
                 for entry in audit_entries:
                     timestamp = str(entry.get("timestamp", ""))
-                    latest_activity_ts = latest_activity_ts or timestamp
                     parsed = _parse_iso_timestamp(timestamp)
                     if parsed is None:
                         continue
                     if parsed < recent_cutoff:
                         break
+                    latest_activity_ts = _latest_timestamp(latest_activity_ts, timestamp)
 
                     target_id = str(entry.get("target_id", ""))
                     target_kind = "other"
@@ -707,6 +733,50 @@ def create_dashboard_app() -> FastAPI:
                         }
                     )
 
+                if sleep_state_path is not None and sleep_state_path.exists():
+                    try:
+                        sleep_state = json.loads(sleep_state_path.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                        sleep_state = {}
+                    last_cycle_activity = dict(sleep_state.get("last_cycle_activity", {}))
+                    sleep_timestamp = str(
+                        last_cycle_activity.get(
+                            "timestamp",
+                            sleep_state.get("last_cycle_time", ""),
+                        )
+                    )
+                    parsed_sleep_ts = _parse_iso_timestamp(sleep_timestamp)
+                    if parsed_sleep_ts is not None and parsed_sleep_ts >= recent_cutoff:
+                        sleep_phase = str(
+                            last_cycle_activity.get(
+                                "phase",
+                                sleep_state.get("current_phase", "consolidation"),
+                            )
+                        )
+                        sleep_node_ids = {
+                            str(node_id)
+                            for node_id in last_cycle_activity.get("node_ids", [])
+                            if str(node_id) in node_ids
+                        }
+                        sleep_edge_ids = {
+                            str(edge_id)
+                            for edge_id in last_cycle_activity.get("edge_ids", [])
+                            if str(edge_id) in edge_ids
+                        }
+                        activated_node_ids.update(sleep_node_ids)
+                        activated_edge_ids.update(sleep_edge_ids)
+                        latest_activity_ts = _latest_timestamp(latest_activity_ts, sleep_timestamp)
+                        recent_activity.append(
+                            {
+                                "timestamp": sleep_timestamp,
+                                "mutation_type": f"sleep_{sleep_phase}_walk",
+                                "target_id": "",
+                                "target_kind": "sleep_cycle",
+                                "node_count": len(sleep_node_ids),
+                                "edge_count": len(sleep_edge_ids),
+                            }
+                        )
+
                 if activated_node_ids:
                     for edge in edges:
                         source_id = str(edge.get("source_id", ""))
@@ -717,20 +787,33 @@ def create_dashboard_app() -> FastAPI:
                         ):
                             activated_edge_ids.add(edge_id)
 
+                recent_activity.sort(key=lambda item: str(item.get("timestamp", "")), reverse=True)
+                activity_fingerprint = hashlib.sha1(
+                    json.dumps(
+                        {
+                            "latest_activity_ts": latest_activity_ts,
+                            "activated_node_ids": sorted(activated_node_ids),
+                            "activated_edge_ids": sorted(activated_edge_ids),
+                            "recent_activity": recent_activity[:24],
+                        },
+                        sort_keys=True,
+                    ).encode("utf-8")
+                ).hexdigest()[:16]
                 stats["_latest_ts"] = _latest_timestamp(
                     latest_node[0]["ts"] if latest_node else None,
+                    latest_accessed[0]["ts"] if latest_accessed else None,
                     latest_edge[0]["ts"] if latest_edge else None,
                     latest_activity_ts,
                 )
 
                 live = {
                     "graph_hash": (
-                        f"{len(nodes)}:{len(edges)}:{stats['_latest_ts']}:{latest_activity_ts}"
+                        f"{len(nodes)}:{len(edges)}:{stats['_latest_ts']}:{activity_fingerprint}"
                     ),
                     "recent_window_seconds": recent_window,
                     "latest_activity_ts": latest_activity_ts,
                     "activity_count": len(recent_activity),
-                    "recent_activity": recent_activity,
+                    "recent_activity": recent_activity[:48],
                     "activated_node_ids": sorted(activated_node_ids),
                     "activated_edge_ids": sorted(activated_edge_ids),
                 }
@@ -757,7 +840,7 @@ def create_dashboard_app() -> FastAPI:
         import asyncio
         import sqlite3
 
-        resolved_agent_name, db_path, _audit_path = _graph_agent_paths(ds, agent)
+        resolved_agent_name, db_path, _audit_path, _sleep_state_path = _graph_agent_paths(ds, agent)
         if db_path is None:
             return JSONResponse({"error": "no data dir"}, status_code=404)
 

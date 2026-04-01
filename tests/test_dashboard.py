@@ -424,6 +424,86 @@ async def test_graph_api_returns_live_activity_for_resolved_agent(
     assert data["live"]["graph_hash"]
 
 
+async def test_graph_api_includes_recent_access_and_sleep_cycle_activity(
+    client: httpx.AsyncClient,
+    tmp_path: Path,
+):
+    import json
+    from datetime import UTC, datetime
+
+    import agentgolem.dashboard.api as api_mod
+    from agentgolem.memory.models import ConceptualNode, EdgeType, MemoryEdge, NodeType
+    from agentgolem.memory.schema import close_db, init_db
+    from agentgolem.memory.store import SQLiteMemoryStore
+
+    original_agents = list(getattr(api_mod.state, "agents", []))
+    original_data_dir = getattr(api_mod.state, "data_dir", None)
+    agent_dir = tmp_path / "council_1"
+    (agent_dir / "memory").mkdir(parents=True, exist_ok=True)
+    (agent_dir / "logs").mkdir(parents=True, exist_ok=True)
+    (agent_dir / "state").mkdir(parents=True, exist_ok=True)
+
+    api_mod.state.data_dir = tmp_path
+    api_mod.state.agents = [
+        types.SimpleNamespace(
+            agent_name="Council-1",
+            _initial_agent_name="Council-1",
+            _data_dir=agent_dir,
+        )
+    ]
+
+    now = datetime.now(UTC)
+    db = await init_db(agent_dir / "memory" / "graph.db")
+    store = SQLiteMemoryStore(db)
+    await store.add_node(ConceptualNode(id="node-a", text="Recently accessed", type=NodeType.FACT))
+    await store.add_node(ConceptualNode(id="node-b", text="Slept on", type=NodeType.FACT))
+    await store.add_edge(
+        MemoryEdge(
+            id="edge-ab",
+            source_id="node-a",
+            target_id="node-b",
+            edge_type=EdgeType.RELATED_TO,
+        )
+    )
+    assert await store.get_node("node-a") is not None
+    (agent_dir / "state" / "sleep_state.json").write_text(
+        json.dumps(
+            {
+                "last_cycle_time": now.isoformat(),
+                "cycles_completed": 1,
+                "items_queued": 0,
+                "current_phase": "dream",
+                "phase_step": 0,
+                "neural_state": {},
+                "last_cycle_activity": {
+                    "timestamp": now.isoformat(),
+                    "phase": "dream",
+                    "walks_completed": 5,
+                    "node_ids": ["node-b"],
+                    "edge_ids": ["edge-ab"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    try:
+        resp = await client.get("/dashboard/api/graph?agent=Council-1")
+        assert resp.status_code == 200
+        data = resp.json()
+    finally:
+        await close_db(db)
+        api_mod.state.agents = original_agents
+        api_mod.state.data_dir = original_data_dir
+
+    mutation_types = {item["mutation_type"] for item in data["live"]["recent_activity"]}
+    assert "node-a" in data["live"]["activated_node_ids"]
+    assert "node-b" in data["live"]["activated_node_ids"]
+    assert "edge-ab" in data["live"]["activated_edge_ids"]
+    assert "node_access" in mutation_types
+    assert "sleep_dream_walk" in mutation_types
+
+
 async def test_graph_node_api_returns_error_no_agent(client: httpx.AsyncClient):
     resp = await client.get("/dashboard/api/graph/node?agent=nonexistent&id=abc")
     assert resp.status_code == 404

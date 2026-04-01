@@ -41,6 +41,7 @@ class SleepState:
     current_phase: str = "consolidation"
     phase_step: int = 0
     neural_state: dict[str, Any] = field(default_factory=dict)
+    last_cycle_activity: dict[str, Any] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +154,13 @@ class SleepScheduler:
         if hasattr(walker, "export_neural_state"):
             self._state.neural_state = walker.export_neural_state(top_k=self.persist_top_k)
 
-        self._state.last_cycle_time = datetime.now(timezone.utc).isoformat()
+        cycle_timestamp = datetime.now(timezone.utc).isoformat()
+        self._state.last_cycle_time = cycle_timestamp
+        self._state.last_cycle_activity = _summarize_cycle_activity(
+            walk_results,
+            phase=phase,
+            timestamp=cycle_timestamp,
+        )
         self._state.cycles_completed += 1
         self._state.items_queued += total_changes
         self._advance_phase()
@@ -196,6 +203,7 @@ class SleepScheduler:
                 current_phase=str(data.get("current_phase", "consolidation")),
                 phase_step=int(data.get("phase_step", 0)),
                 neural_state=dict(data.get("neural_state", {})),
+                last_cycle_activity=dict(data.get("last_cycle_activity", {})),
             )
         except (json.JSONDecodeError, TypeError, ValueError):
             return SleepState()
@@ -236,3 +244,42 @@ class SleepScheduler:
 
 def _elapsed_ms(start: float) -> float:
     return (time.monotonic() - start) * 1000.0
+
+
+def _summarize_cycle_activity(
+    walk_results: list[WalkResult],
+    *,
+    phase: str,
+    timestamp: str,
+) -> dict[str, Any]:
+    """Return a compact activation summary for the latest completed sleep cycle."""
+    activated_node_ids: list[str] = []
+    seen_node_ids: set[str] = set()
+    edge_strengths: dict[str, float] = {}
+
+    for walk_result in walk_results:
+        for node_id in walk_result.visited_node_ids:
+            if not node_id or node_id in seen_node_ids:
+                continue
+            seen_node_ids.add(node_id)
+            activated_node_ids.append(node_id)
+        for edge_id, activation in walk_result.edge_activations.items():
+            if not edge_id:
+                continue
+            edge_strengths[edge_id] = max(edge_strengths.get(edge_id, 0.0), float(activation))
+
+    activated_edge_ids = [
+        edge_id
+        for edge_id, _activation in sorted(
+            edge_strengths.items(),
+            key=lambda item: item[1],
+            reverse=True,
+        )[:64]
+    ]
+    return {
+        "timestamp": timestamp,
+        "phase": phase,
+        "walks_completed": len(walk_results),
+        "node_ids": activated_node_ids[:64],
+        "edge_ids": activated_edge_ids,
+    }

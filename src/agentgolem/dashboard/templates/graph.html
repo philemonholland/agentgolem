@@ -277,7 +277,7 @@
     const parts = Object.entries(stats).filter(([k])=>!k.startsWith('_'))
                     .map(([k,v])=>`${k}: ${v}`).join(' · ');
     const activityCount = Number(live.activity_count || 0);
-    const activityText = activityCount ? ` · ${activityCount} live mutation${activityCount === 1 ? '' : 's'}` : '';
+    const activityText = activityCount ? ` · ${activityCount} live activation${activityCount === 1 ? '' : 's'}` : '';
     document.getElementById('graph-stats').textContent =
       `${stats._total_nodes||0} nodes · ${stats._total_edges||0} edges — ${parts}${activityText}`;
   }
@@ -292,8 +292,8 @@
     const activityCount = Number(live.activity_count || 0);
     const windowSeconds = Number(live.recent_window_seconds || 0);
     badge.textContent = activityCount
-      ? `Live · ${activityCount} recent mutation${activityCount === 1 ? '' : 's'} / ${windowSeconds}s`
-      : 'Live · waiting for mutations';
+      ? `Live · ${activityCount} recent activation${activityCount === 1 ? '' : 's'} / ${windowSeconds}s`
+      : 'Live · waiting for activity';
     badge.classList.add('active');
   }
 

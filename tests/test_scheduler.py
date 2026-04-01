@@ -321,6 +321,13 @@ def test_state_persistence(tmp_path: Path) -> None:
         current_phase="dream",
         phase_step=1,
         neural_state={"timestep": 11, "membrane_potentials": {"n1": 0.8}},
+        last_cycle_activity={
+            "timestamp": "2025-01-01T00:00:00+00:00",
+            "phase": "dream",
+            "walks_completed": 5,
+            "node_ids": ["n1", "n2"],
+            "edge_ids": ["e1"],
+        },
     )
     state_file = tmp_path / "sleep_state.json"
     state_file.write_text(json.dumps({
@@ -330,6 +337,7 @@ def test_state_persistence(tmp_path: Path) -> None:
         "current_phase": state.current_phase,
         "phase_step": state.phase_step,
         "neural_state": state.neural_state,
+        "last_cycle_activity": state.last_cycle_activity,
     }))
 
     sched = SleepScheduler(state_path=tmp_path)
@@ -341,6 +349,8 @@ def test_state_persistence(tmp_path: Path) -> None:
     assert loaded.current_phase == "dream"
     assert loaded.phase_step == 1
     assert loaded.neural_state["timestep"] == 11
+    assert loaded.last_cycle_activity["phase"] == "dream"
+    assert loaded.last_cycle_activity["node_ids"] == ["n1", "n2"]
 
 
 async def test_cycles_completed_increments(
@@ -370,3 +380,42 @@ async def test_state_persisted_after_cycle(tmp_path: Path, walker: MockWalker) -
     assert sched2.get_state().last_cycle_time != ""
     assert sched2.get_state().neural_state["timestep"] == 5
     assert sched2.get_state().neural_state["top_k"] == 128
+    assert sched2.get_state().last_cycle_activity["walks_completed"] == 5
+    assert len(sched2.get_state().last_cycle_activity["node_ids"]) == 5
+
+
+async def test_run_cycle_tracks_last_cycle_activity(tmp_path: Path) -> None:
+    """Each completed cycle persists the nodes and edges activated in that cycle."""
+
+    class ActivityWalker(MockWalker):
+        async def bounded_walk(
+            self,
+            seed_id: str,
+            max_steps: int = 50,
+            max_time_ms: int = 5000,
+            interrupt_check=None,
+            phase: str = "consolidation",
+        ) -> WalkResult:
+            result = await super().bounded_walk(
+                seed_id,
+                max_steps=max_steps,
+                max_time_ms=max_time_ms,
+                interrupt_check=interrupt_check,
+                phase=phase,
+            )
+            result.visited_node_ids = [seed_id, "shared-node"]
+            result.edge_activations = {
+                f"edge-{seed_id}": 0.4,
+                "edge-shared": 0.9,
+            }
+            return result
+
+    sched = SleepScheduler(state_path=tmp_path)
+    await sched.run_cycle(ActivityWalker())
+
+    activity = sched.get_state().last_cycle_activity
+    assert activity["phase"] == "consolidation"
+    assert activity["walks_completed"] == 5
+    assert activity["timestamp"]
+    assert "shared-node" in activity["node_ids"]
+    assert activity["edge_ids"][0] == "edge-shared"
