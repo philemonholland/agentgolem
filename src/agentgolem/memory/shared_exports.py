@@ -153,6 +153,7 @@ def find_export_paths(exports_dir: Path) -> dict[str, Path]:
 
 
 def _row_to_exported_memory(row: aiosqlite.Row) -> ExportedMemory:
+    keys = set(row.keys())
     return ExportedMemory(
         agent_id=row["agent_id"],
         agent_label=row["agent_label"],
@@ -165,7 +166,7 @@ def _row_to_exported_memory(row: aiosqlite.Row) -> ExportedMemory:
         centrality=float(row["centrality"]),
         emotion_label=row["emotion_label"],
         emotion_score=float(row["emotion_score"]),
-        source_hint=row["source_hint"],
+        source_hint=row["source_hint"] if "source_hint" in keys else "",
         last_accessed=row["last_accessed"],
         exported_at=row["exported_at"],
     )

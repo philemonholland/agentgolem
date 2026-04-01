@@ -86,8 +86,9 @@ class FederatedMemoryRetriever:
             placeholders = ", ".join("?" for _ in node_ids)
             async with aiosqlite.connect(path) as db:
                 db.row_factory = aiosqlite.Row
+                query_text = await _select_export_rows_query(db)
                 async with db.execute(
-                    f"SELECT * FROM exported_nodes WHERE node_id IN ({placeholders})",
+                    f"{query_text} WHERE node_id IN ({placeholders})",
                     tuple(node_ids),
                 ) as cur:
                     rows = await cur.fetchall()
@@ -162,20 +163,27 @@ class FederatedMemoryRetriever:
         if not words:
             return []
 
-        clauses = " OR ".join(
-            "(text LIKE ? OR search_text LIKE ? OR source_hint LIKE ?)" for _ in words
-        )
-        params: list[str | int] = []
-        for word in words:
-            params.extend([f"%{word}%", f"%{word}%", f"%{word}%"])
-        params.append(limit)
-
         async with aiosqlite.connect(export_path) as db:
             db.row_factory = aiosqlite.Row
+            has_source_hint = await _exported_nodes_has_column(db, "source_hint")
+            clauses = " OR ".join(
+                (
+                    "(text LIKE ? OR search_text LIKE ? OR source_hint LIKE ?)"
+                    if has_source_hint
+                    else "(text LIKE ? OR search_text LIKE ?)"
+                )
+                for _ in words
+            )
+            params: list[str | int] = []
+            for word in words:
+                params.extend([f"%{word}%", f"%{word}%"])
+                if has_source_hint:
+                    params.append(f"%{word}%")
+            params.append(limit)
+            query_text = await _select_export_rows_query(db)
             async with db.execute(
                 f"""
-                SELECT *
-                FROM exported_nodes
+                {query_text}
                 WHERE {clauses}
                 ORDER BY trust_useful DESC, salience DESC, centrality DESC
                 LIMIT ?
@@ -232,3 +240,18 @@ class FederatedMemoryRetriever:
             scored.append((score, row))
         scored.sort(key=lambda item: item[0], reverse=True)
         return [row for _, row in scored]
+
+
+async def _exported_nodes_has_column(
+    db: aiosqlite.Connection,
+    column_name: str,
+) -> bool:
+    async with db.execute("PRAGMA table_info(exported_nodes)") as cur:
+        rows = await cur.fetchall()
+    return any(row["name"] == column_name for row in rows)
+
+
+async def _select_export_rows_query(db: aiosqlite.Connection) -> str:
+    if await _exported_nodes_has_column(db, "source_hint"):
+        return "SELECT * FROM exported_nodes"
+    return "SELECT exported_nodes.*, '' AS source_hint FROM exported_nodes"
