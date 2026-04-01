@@ -22,9 +22,10 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 TRUST_INITIAL: float = 0.5
-TRUST_POSITIVE_BUMP: float = 0.03
-TRUST_NEGATIVE_BUMP: float = 0.02
-TRUST_DECAY_RATE: float = 0.01  # per tick of no interaction
+TRUST_POSITIVE_BUMP: float = 0.04
+TRUST_NEGATIVE_BUMP: float = 0.01
+TRUST_DECAY_RATE: float = 0.005  # per tick of no interaction (halved)
+TRUST_INTERACTION_BOOST: float = 0.01  # small boost just for engaging
 
 COMPATIBILITY_INITIAL: float = 0.5
 COMPATIBILITY_BUMP: float = 0.02
@@ -247,11 +248,15 @@ class RelationshipStore:
 # Simple keyword sets for sentiment/tone detection
 _AGREEMENT_SIGNALS = {
     "agree", "yes", "exactly", "resonates", "well said", "good point",
-    "insightful", "true", "correct", "absolutely", "indeed",
+    "insightful", "true", "correct", "absolutely", "indeed", "right",
+    "builds on", "connects to", "extends", "deepens", "lands",
+    "important", "beautiful", "profound", "sharp", "helpful",
+    "that's it", "this is", "you're onto", "well put", "fair point",
+    "compelling", "illuminating", "thoughtful", "appreciate",
 }
 _DISAGREEMENT_SIGNALS = {
-    "disagree", "but", "however", "not sure", "question that",
-    "challenge", "doubt", "counter", "wrong", "flawed", "mistake",
+    "disagree", "wrong", "flawed", "mistake", "reject",
+    "fundamentally", "misguided", "problematic", "fallacy",
 }
 _IDEA_SIGNALS = {
     "propose", "suggest", "idea", "consider", "what if", "hypothesis",
@@ -281,16 +286,20 @@ def update_after_exchange(
     disagreement_score = sum(1 for s in _DISAGREEMENT_SIGNALS if s in received_lower)
 
     if agreement_score > disagreement_score:
-        rel.trust = min(1.0, rel.trust + TRUST_POSITIVE_BUMP)
+        # Interaction boost + agreement bonus
+        rel.trust = min(1.0, rel.trust + TRUST_INTERACTION_BOOST + TRUST_POSITIVE_BUMP)
         rel.communication_compatibility = min(
             1.0, rel.communication_compatibility + COMPATIBILITY_BUMP,
         )
     elif disagreement_score > agreement_score:
         rel.trust = max(0.0, rel.trust - TRUST_NEGATIVE_BUMP)
-        # Disagreement doesn't necessarily hurt compatibility
+        # Track disagreement topics without penalizing compatibility
         if topic:
             rel.disagreements.append(topic[:80])
             rel.disagreements = rel.disagreements[-MAX_DISAGREEMENTS:]
+    else:
+        # Neutral exchange — interaction boost only
+        rel.trust = min(1.0, rel.trust + TRUST_INTERACTION_BOOST)
 
     # Intellectual debt: track idea exchange
     their_ideas = sum(1 for s in _IDEA_SIGNALS if s in received_lower)
@@ -310,6 +319,6 @@ def decay_relationships(store: RelationshipStore, current_tick: int) -> None:
     """Apply trust decay to relationships that haven't been active recently."""
     for rel in store.relationships.values():
         ticks_since = current_tick - rel.last_interaction_tick
-        if ticks_since > 5:
-            decay = TRUST_DECAY_RATE * (ticks_since // 5)
-            rel.trust = max(0.3, rel.trust - decay)  # Floor at 0.3 (never fully distrust)
+        if ticks_since > 10:
+            decay = TRUST_DECAY_RATE * (ticks_since // 10)
+            rel.trust = max(0.4, rel.trust - decay)  # Floor at 0.4 (baseline neutral)
