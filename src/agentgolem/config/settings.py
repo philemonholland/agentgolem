@@ -20,7 +20,7 @@ def _migrate_legacy_retention_fields(data: dict) -> list[str]:
     for old_key, new_key in legacy_map.items():
         if old_key in data:
             if new_key not in data:
-                data[new_key] = int(data[old_key]) * _HOURS_PER_DAY
+                data[new_key] = float(data[old_key]) * _HOURS_PER_DAY
                 migrated.append(new_key)
             del data[old_key]
     return migrated
@@ -61,8 +61,8 @@ class Settings(BaseModel):
     niscalajyoti_revisit_hours: float = 6.0
     calibration_interval_hours: float = 24.0
     calibration_heartbeat_cadence: int = 3  # run calibration every N heartbeats
-    retention_archive_hours: int = 120
-    retention_purge_hours: int = 720
+    retention_archive_hours: float = 120.0
+    retention_purge_hours: float = 720.0
     retention_min_trust_useful: float = 0.1
     retention_min_centrality: float = 0.05
     retention_promote_min_accesses: int = 10

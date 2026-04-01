@@ -1,7 +1,7 @@
 """Tests for the archive / purge / promote retention pipeline."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -20,8 +20,8 @@ from agentgolem.memory.schema import close_db, init_db
 from agentgolem.memory.store import SQLiteMemoryStore
 from agentgolem.trust.retention import RetentionManager
 
-OLD = datetime.now(timezone.utc) - timedelta(days=60)
-VERY_OLD = datetime.now(timezone.utc) - timedelta(days=120)
+OLD = datetime.now(UTC) - timedelta(days=60)
+VERY_OLD = datetime.now(UTC) - timedelta(days=120)
 
 
 @pytest.fixture
@@ -92,6 +92,26 @@ async def test_archive_candidates_skips_strong(setup):
 
     candidates = await rm.archive_candidates()
     assert strong.id not in candidates
+
+
+async def test_archive_candidates_support_fractional_hours(setup):
+    store, _, audit = setup
+    rm = RetentionManager(store, audit, archive_hours=0.5)
+    stale = _weak_old_node(
+        text="stale weak memory",
+        last_accessed=datetime.now(UTC) - timedelta(minutes=45),
+    )
+    recent = _weak_old_node(
+        text="recent weak memory",
+        last_accessed=datetime.now(UTC) - timedelta(minutes=20),
+    )
+    await store.add_node(stale)
+    await store.add_node(recent)
+
+    candidates = await rm.archive_candidates()
+
+    assert stale.id in candidates
+    assert recent.id not in candidates
 
 
 # ------------------------------------------------------------------

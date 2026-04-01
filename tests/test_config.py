@@ -88,8 +88,8 @@ def test_settings_defaults_when_no_yaml(tmp_path: Path) -> None:
     assert settings.google_custom_search_hourly_quota == 4
     assert settings.google_custom_search_bucket_capacity == 100
     assert settings.google_custom_search_safe == "active"
-    assert settings.retention_archive_hours == 120
-    assert settings.retention_purge_hours == 720
+    assert settings.retention_archive_hours == 120.0
+    assert settings.retention_purge_hours == 720.0
     assert settings.approval_required_actions == ["email_send", "moltbook_send"]
 
 
@@ -254,8 +254,21 @@ def test_load_settings_converts_legacy_retention_days_to_hours(tmp_path: Path) -
 
     settings = load_settings(yaml_path)
 
-    assert settings.retention_archive_hours == 120
-    assert settings.retention_purge_hours == 720
+    assert settings.retention_archive_hours == 120.0
+    assert settings.retention_purge_hours == 720.0
+
+
+def test_load_settings_accepts_fractional_retention_hours(tmp_path: Path) -> None:
+    yaml_path = tmp_path / "settings.yaml"
+    yaml_path.write_text(
+        "retention_archive_hours: 0.5\nretention_purge_hours: 1.5\n",
+        encoding="utf-8",
+    )
+
+    settings = load_settings(yaml_path)
+
+    assert settings.retention_archive_hours == 0.5
+    assert settings.retention_purge_hours == 1.5
 
 
 def test_migrate_settings_rewrites_legacy_retention_days_keys(tmp_path: Path) -> None:
@@ -270,8 +283,8 @@ def test_migrate_settings_rewrites_legacy_retention_days_keys(tmp_path: Path) ->
 
     assert "retention_archive_hours" in added
     assert "retention_purge_hours" in added
-    assert rewritten["retention_archive_hours"] == 120
-    assert rewritten["retention_purge_hours"] == 720
+    assert rewritten["retention_archive_hours"] == 120.0
+    assert rewritten["retention_purge_hours"] == 720.0
     assert "retention_archive_days" not in rewritten
     assert "retention_purge_days" not in rewritten
 

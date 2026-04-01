@@ -65,6 +65,30 @@ def _selected_agent_name(
     return agents[0]["name"] if agents else None
 
 
+def _graph_agent_paths(ds: Any, agent_name: str) -> tuple[str, Path | None, Path | None]:
+    """Resolve a graph agent selector to database and audit-log paths."""
+    if agent_name:
+        resolved = api_mod._resolve_agent(ds, agent_name)
+        if resolved is not None:
+            agent_dir = getattr(resolved, "_data_dir", None)
+            display_name = getattr(resolved, "agent_name", agent_name)
+            if agent_dir is not None:
+                return (
+                    display_name,
+                    agent_dir / "memory" / "graph.db",
+                    agent_dir / "logs" / "audit.jsonl",
+                )
+
+    data_dir = api_mod._get_data_dir(ds)
+    if data_dir is None or not agent_name:
+        return agent_name, None, None
+    return (
+        agent_name,
+        data_dir / agent_name / "memory" / "graph.db",
+        data_dir / agent_name / "logs" / "audit.jsonl",
+    )
+
+
 def _approval_items(ds: Any, agent_name: str | None = None) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     if agent_name:
@@ -344,7 +368,11 @@ def create_dashboard_app() -> FastAPI:
 
         if log_type == "activity":
             selected_agent = api_mod._resolve_agent(ds, selected_name)
-            log_path = api_mod._find_activity_log_path_for_agent(selected_agent) if selected_agent else None
+            log_path = (
+                api_mod._find_activity_log_path_for_agent(selected_agent)
+                if selected_agent
+                else None
+            )
             if log_path and log_path.exists():
                 entries = api_mod._load_jsonl_entries(log_path, limit=limit, search=search)
         else:
@@ -522,16 +550,32 @@ def create_dashboard_app() -> FastAPI:
         """Return graph data (nodes, edges, clusters, stats) for D3 rendering."""
         import asyncio
         import sqlite3
-        from functools import partial
+        from datetime import UTC, datetime, timedelta
 
-        data_dir = api_mod._get_data_dir(ds)
-        if data_dir is None:
-            return JSONResponse({"nodes": [], "edges": [], "clusters": [], "stats": {}})
+        recent_window = api_mod.dashboard_recent_change_seconds(ds)
+        resolved_agent_name, db_path, audit_path = _graph_agent_paths(ds, agent)
+        empty_live = {
+            "graph_hash": "0:0:",
+            "recent_window_seconds": recent_window,
+            "latest_activity_ts": "",
+            "activity_count": 0,
+            "recent_activity": [],
+            "activated_node_ids": [],
+            "activated_edge_ids": [],
+        }
+        empty_response = {
+            "nodes": [],
+            "edges": [],
+            "clusters": [],
+            "stats": {},
+            "live": empty_live,
+        }
+        if db_path is None:
+            return JSONResponse(empty_response)
 
         def _sync_graph() -> dict:
-            db_path = data_dir / agent / "memory" / "graph.db"
             if not db_path.is_file():
-                return {"nodes": [], "edges": [], "clusters": [], "stats": {}}
+                return empty_response
 
             conn = sqlite3.connect(str(db_path))
             conn.execute("PRAGMA query_only = ON")
@@ -539,6 +583,25 @@ def create_dashboard_app() -> FastAPI:
 
             def _q(sql: str, params: tuple = ()) -> list[dict]:
                 return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+            def _parse_iso_timestamp(value: str | None) -> datetime | None:
+                if not value:
+                    return None
+                normalized = str(value).strip().replace("Z", "+00:00")
+                try:
+                    return datetime.fromisoformat(normalized)
+                except ValueError:
+                    return None
+
+            def _latest_timestamp(*values: str | None) -> str:
+                parsed = [
+                    (ts, raw)
+                    for raw in values
+                    if (ts := _parse_iso_timestamp(raw)) is not None
+                ]
+                if not parsed:
+                    return ""
+                return max(parsed, key=lambda item: item[0])[1]
 
             try:
                 clauses, params_list = [], []
@@ -559,7 +622,7 @@ def create_dashboard_app() -> FastAPI:
                     (*params_list, safe_limit),
                 )
                 for n in nodes:
-                    n["owner_agent"] = agent
+                    n["owner_agent"] = resolved_agent_name
                     n["node_id"] = n["id"]
                     n["is_peer_ghost"] = False
                     n["trust_useful"] = float(n.get("base_usefulness", 0.0)) * float(
@@ -598,13 +661,86 @@ def create_dashboard_app() -> FastAPI:
                 total_edges = _q("SELECT COUNT(*) as cnt FROM edges")[0]["cnt"]
                 stats["_total_edges"] = total_edges
                 stats["_total_nodes"] = sum(v for k, v in stats.items() if not k.startswith("_"))
-                try:
-                    latest = _q("SELECT MAX(updated_at) as ts FROM nodes")
-                    stats["_latest_ts"] = latest[0]["ts"] if latest else ""
-                except Exception:
-                    stats["_latest_ts"] = ""
+                latest_node = _q("SELECT MAX(created_at) as ts FROM nodes")
+                latest_edge = _q(
+                    "SELECT MAX("
+                    "CASE WHEN modified_at != '' THEN modified_at ELSE created_at END"
+                    ") as ts FROM edges"
+                )
 
-                return {"nodes": nodes, "edges": edges, "clusters": clusters, "stats": stats}
+                audit_entries = (
+                    api_mod._load_jsonl_entries(audit_path, limit=200)
+                    if audit_path is not None and audit_path.exists()
+                    else []
+                )
+                latest_activity_ts = ""
+                recent_cutoff = datetime.now(UTC) - timedelta(seconds=recent_window)
+                recent_activity: list[dict[str, str]] = []
+                activated_node_ids: set[str] = set()
+                activated_edge_ids: set[str] = set()
+                edge_ids = {str(edge.get("id", "")) for edge in edges if edge.get("id")}
+
+                for entry in audit_entries:
+                    timestamp = str(entry.get("timestamp", ""))
+                    latest_activity_ts = latest_activity_ts or timestamp
+                    parsed = _parse_iso_timestamp(timestamp)
+                    if parsed is None:
+                        continue
+                    if parsed < recent_cutoff:
+                        break
+
+                    target_id = str(entry.get("target_id", ""))
+                    target_kind = "other"
+                    if target_id in node_ids:
+                        activated_node_ids.add(target_id)
+                        target_kind = "node"
+                    elif target_id in edge_ids:
+                        activated_edge_ids.add(target_id)
+                        target_kind = "edge"
+
+                    recent_activity.append(
+                        {
+                            "timestamp": timestamp,
+                            "mutation_type": str(entry.get("mutation_type", "")),
+                            "target_id": target_id,
+                            "target_kind": target_kind,
+                        }
+                    )
+
+                if activated_node_ids:
+                    for edge in edges:
+                        source_id = str(edge.get("source_id", ""))
+                        target_id = str(edge.get("target_id", ""))
+                        edge_id = str(edge.get("id", ""))
+                        if edge_id and (
+                            source_id in activated_node_ids or target_id in activated_node_ids
+                        ):
+                            activated_edge_ids.add(edge_id)
+
+                stats["_latest_ts"] = _latest_timestamp(
+                    latest_node[0]["ts"] if latest_node else None,
+                    latest_edge[0]["ts"] if latest_edge else None,
+                    latest_activity_ts,
+                )
+
+                live = {
+                    "graph_hash": (
+                        f"{len(nodes)}:{len(edges)}:{stats['_latest_ts']}:{latest_activity_ts}"
+                    ),
+                    "recent_window_seconds": recent_window,
+                    "latest_activity_ts": latest_activity_ts,
+                    "activity_count": len(recent_activity),
+                    "recent_activity": recent_activity,
+                    "activated_node_ids": sorted(activated_node_ids),
+                    "activated_edge_ids": sorted(activated_edge_ids),
+                }
+                return {
+                    "nodes": nodes,
+                    "edges": edges,
+                    "clusters": clusters,
+                    "stats": stats,
+                    "live": live,
+                }
             finally:
                 conn.close()
 
@@ -621,12 +757,11 @@ def create_dashboard_app() -> FastAPI:
         import asyncio
         import sqlite3
 
-        data_dir = api_mod._get_data_dir(ds)
-        if data_dir is None:
+        resolved_agent_name, db_path, _audit_path = _graph_agent_paths(ds, agent)
+        if db_path is None:
             return JSONResponse({"error": "no data dir"}, status_code=404)
 
         def _sync_node() -> dict:
-            db_path = data_dir / agent / "memory" / "graph.db"
             if not db_path.is_file():
                 return {"error": "no graph.db"}
 
@@ -642,7 +777,7 @@ def create_dashboard_app() -> FastAPI:
                 if not rows:
                     return {"error": "node not found"}
                 node = rows[0]
-                node["owner_agent"] = agent
+                node["owner_agent"] = resolved_agent_name
 
                 edges_out_raw = _q("SELECT * FROM edges WHERE source_id = ?", (id,))
                 edges_in_raw = _q("SELECT * FROM edges WHERE target_id = ?", (id,))
@@ -709,7 +844,11 @@ def create_dashboard_app() -> FastAPI:
         agent_name = str(form.get("agent", "")).strip() or None
         reason = str(form.get("reason", "")).strip()
         resolved = api_mod._resolve_agent(ds, agent_name)
-        gate = getattr(resolved, "_approval_gate", None) if resolved is not None else ds.approval_gate
+        gate = (
+            getattr(resolved, "_approval_gate", None)
+            if resolved is not None
+            else ds.approval_gate
+        )
         if gate is None:
             return templates.TemplateResponse(
                 request,

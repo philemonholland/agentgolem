@@ -105,6 +105,8 @@ class TestParamStore:
 
         assert archive.key == "retention_archive_hours"
         assert purge.key == "retention_purge_hours"
+        assert archive.ptype == "float"
+        assert purge.ptype == "float"
 
     def test_get_display_masks_secrets(self, tmp_env):
         store = run_golem.ParamStore()
@@ -208,6 +210,27 @@ class TestApplyLiveSettingChange:
                 )
         finally:
             loop.close()
+
+    def test_accepts_fractional_retention_hours(self, tmp_env):
+        store = run_golem.ParamStore()
+        loop = asyncio.new_event_loop()
+        try:
+            result = run_golem.apply_live_setting_change(
+                store,
+                [],
+                loop,
+                None,
+                "retention_purge_hours",
+                "0.5",
+            )
+        finally:
+            loop.close()
+
+        data = yaml.safe_load((tmp_env / "config" / "settings.yaml").read_text())
+
+        assert result["value"] == 0.5
+        assert result["ptype"] == "float"
+        assert data["retention_purge_hours"] == 0.5
 
 
 # ---------------------------------------------------------------------------

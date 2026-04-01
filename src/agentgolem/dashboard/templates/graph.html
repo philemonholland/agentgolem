@@ -24,10 +24,16 @@
   #graph-stats { position: absolute; bottom: 10px; left: 10px; font-size: 0.72rem;
                  color: #8b949e; background: #0d1117dd; padding: 6px 10px; border-radius: 6px;
                  backdrop-filter: blur(4px); }
+  #graph-live-badge { position: absolute; top: 10px; right: 10px; font-size: 0.72rem;
+                      color: #8b949e; background: #0d1117dd; padding: 6px 10px;
+                      border-radius: 999px; border: 1px solid #30363d;
+                      backdrop-filter: blur(4px); z-index: 6; }
+  #graph-live-badge.active { color: #c9d1d9; border-color: rgba(56,189,248,0.45);
+                             box-shadow: 0 0 0 1px rgba(56,189,248,0.08); }
   #graph-tooltip { position: absolute; background: #1c2129ee; border: 1px solid #30363d;
-                   border-radius: 6px; padding: 8px 12px; font-size: 0.78rem; pointer-events: none;
-                   max-width: 300px; z-index: 10; display: none;
-                   box-shadow: 0 2px 8px #00000044; line-height: 1.5; color: #c9d1d9; }
+                    border-radius: 6px; padding: 8px 12px; font-size: 0.78rem; pointer-events: none;
+                    max-width: 300px; z-index: 10; display: none;
+                    box-shadow: 0 2px 8px #00000044; line-height: 1.5; color: #c9d1d9; }
   #graph-legend { position: absolute; top: 8px; left: 8px; background: #161b22dd;
                   border: 1px solid #30363d; border-radius: 6px; padding: 8px 10px;
                   font-size: 0.72rem; backdrop-filter: blur(4px); color: #c9d1d9; }
@@ -80,9 +86,19 @@
   .link-part_of { stroke: #58a6ff; }
   .link-derived_from { stroke: #56d4dd; }
   .link-merge_candidate { stroke: #ffa657; stroke-dasharray: 4 2; }
+  .node-live-active { stroke: #e2e8f0; stroke-width: 2.5px; }
+  .link-live-active { stroke: #7dd3fc; stroke-opacity: 0.95; stroke-width: 3px;
+                      stroke-dasharray: 10 6; animation: edge-flow 1.2s linear infinite; }
+  .node-pulse-ring { fill: none; stroke: rgba(125,211,252,0.9); stroke-width: 2;
+                     pointer-events: none; }
   text.node-label { fill: #c9d1d9; font-size: 10px; pointer-events: none;
-                    text-anchor: middle; dominant-baseline: central;
-                    text-shadow: 0 0 3px #0d1117, 0 0 6px #0d1117; }
+                     text-anchor: middle; dominant-baseline: central;
+                     text-shadow: 0 0 3px #0d1117, 0 0 6px #0d1117; }
+
+  @keyframes edge-flow {
+    from { stroke-dashoffset: 16; }
+    to { stroke-dashoffset: 0; }
+  }
 </style>
 
 <h2>🧠 Memory Graph</h2>
@@ -129,6 +145,7 @@
 <div id="graph-wrap">
   <svg id="graph-svg"></svg>
   <div id="graph-stats"></div>
+  <div id="graph-live-badge">Live off</div>
   <div id="graph-tooltip"></div>
 
   <div id="graph-legend">
@@ -162,104 +179,352 @@
 <script src="https://d3js.org/d3.v7.min.js"></script>
 <script>
 (function() {
-  let simulation = null, currentZoom = null, graphG = null;
-  let allNodeData = [], allNodeCircles = null;
-  let labelsVisible = true, liveActive = false, liveInterval = null, lastHash = '';
+  let simulation = null;
+  let currentZoom = null;
+  let graphG = null;
+  let linkLayer = null;
+  let pulseLayer = null;
+  let nodeLayer = null;
+  let labelLayer = null;
+  let emptyStateText = null;
+  let allNodeData = [];
+  let allLinkData = [];
+  let allNodeCircles = null;
+  let allLinkLines = null;
+  let allLabels = null;
+  let labelsVisible = true;
+  let liveActive = false;
+  let liveInterval = null;
+  let lastHash = '';
+  const LIVE_INTERVAL_MS = 5000;
 
   function currentAgent() { return document.getElementById('g-agent').value; }
-
-  // ── Load graph data ──
-  window.loadGraph = async function() {
-    const agent = currentAgent();
-    if (!agent) return;
-    const params = new URLSearchParams({
-      agent,
+  function radiusForNode(d) { return Math.max(4, 3 + Number(d.centrality || 0) * 20); }
+  function edgeKey(d) { return d.id || `${d.source_id}|${d.target_id}|${d.edge_type}`; }
+  function graphHash(data) {
+    if (data.live && data.live.graph_hash) return data.live.graph_hash;
+    return `${(data.nodes || []).length}:${(data.edges || []).length}:${data?.stats?._latest_ts || ''}`;
+  }
+  function buildParams() {
+    return new URLSearchParams({
+      agent: currentAgent(),
       type: document.getElementById('g-type').value,
       status: document.getElementById('g-status').value,
       search: document.getElementById('g-search').value,
       limit: document.getElementById('g-limit').value,
     });
+  }
+
+  function ensureGraphScaffold() {
+    const svg = d3.select('#graph-svg');
+    const container = document.getElementById('graph-wrap');
+    const width = container.clientWidth;
+    const height = container.clientHeight;
+    svg.attr('width', width).attr('height', height);
+
+    if (!graphG) {
+      svg.selectAll('*').remove();
+
+      const defs = svg.append('defs');
+      const nodeGlow = defs.append('filter').attr('id', 'node-glow');
+      nodeGlow.append('feGaussianBlur').attr('stdDeviation', 3).attr('result', 'blur');
+      const nodeMerge = nodeGlow.append('feMerge');
+      nodeMerge.append('feMergeNode').attr('in', 'blur');
+      nodeMerge.append('feMergeNode').attr('in', 'SourceGraphic');
+
+      const edgeGlow = defs.append('filter').attr('id', 'edge-glow');
+      edgeGlow.append('feGaussianBlur').attr('stdDeviation', 2).attr('result', 'blur');
+      const edgeMerge = edgeGlow.append('feMerge');
+      edgeMerge.append('feMergeNode').attr('in', 'blur');
+      edgeMerge.append('feMergeNode').attr('in', 'SourceGraphic');
+
+      graphG = svg.append('g');
+      linkLayer = graphG.append('g').attr('class', 'links-layer');
+      pulseLayer = graphG.append('g').attr('class', 'pulse-layer');
+      nodeLayer = graphG.append('g').attr('class', 'nodes-layer');
+      labelLayer = graphG.append('g').attr('class', 'labels-group');
+      emptyStateText = svg.append('text')
+        .attr('fill', '#8b949e')
+        .attr('font-size', '15px')
+        .attr('text-anchor', 'middle')
+        .style('display', 'none');
+
+      currentZoom = d3.zoom().scaleExtent([0.05, 15])
+        .on('zoom', event => { graphG.attr('transform', event.transform); });
+      svg.call(currentZoom);
+      svg.on('click', () => closeSidebar());
+    }
+
+    emptyStateText.attr('x', width / 2).attr('y', height / 2);
+    return { svg, width, height };
+  }
+
+  // ── Load graph data ──
+  window.loadGraph = async function() {
+    const agent = currentAgent();
+    if (!agent) return;
     try {
-      const r = await fetch('/dashboard/api/graph?' + params);
+      const r = await fetch('/dashboard/api/graph?' + buildParams());
       const data = await r.json();
-      lastHash = `${data.stats._total_nodes}:${data.stats._total_edges}:${data.stats._latest_ts||''}`;
-      renderGraph(data);
-      renderStats(data.stats);
+      lastHash = graphHash(data);
+      updateGraphData(data, { animate: false, fitAfter: true });
     } catch(e) {
       document.getElementById('graph-stats').textContent = 'Error: ' + e.message;
     }
   };
 
-  function renderStats(stats) {
+  function renderStats(stats = {}, live = {}) {
     const parts = Object.entries(stats).filter(([k])=>!k.startsWith('_'))
                     .map(([k,v])=>`${k}: ${v}`).join(' · ');
+    const activityCount = Number(live.activity_count || 0);
+    const activityText = activityCount ? ` · ${activityCount} live mutation${activityCount === 1 ? '' : 's'}` : '';
     document.getElementById('graph-stats').textContent =
-      `${stats._total_nodes||0} nodes · ${stats._total_edges||0} edges — ${parts}`;
+      `${stats._total_nodes||0} nodes · ${stats._total_edges||0} edges — ${parts}${activityText}`;
   }
 
-  function renderGraph(data) {
-    const svg = d3.select('#graph-svg');
-    svg.selectAll('*').remove();
-    const container = document.getElementById('graph-wrap');
-    const width = container.clientWidth;
-    const height = container.clientHeight;
-    svg.attr('width', width).attr('height', height);
-    if (!data.nodes || !data.nodes.length) {
-      svg.append('text').attr('x',width/2).attr('y',height/2)
-        .attr('text-anchor','middle').attr('fill','#8b949e').attr('font-size','15px')
-        .text('No nodes found.');
+  function renderLiveBadge(live = {}) {
+    const badge = document.getElementById('graph-live-badge');
+    if (!liveActive) {
+      badge.textContent = 'Live off';
+      badge.classList.remove('active');
       return;
     }
-    graphG = svg.append('g');
-    allNodeData = data.nodes;
+    const activityCount = Number(live.activity_count || 0);
+    const windowSeconds = Number(live.recent_window_seconds || 0);
+    badge.textContent = activityCount
+      ? `Live · ${activityCount} recent mutation${activityCount === 1 ? '' : 's'} / ${windowSeconds}s`
+      : 'Live · waiting for mutations';
+    badge.classList.add('active');
+  }
 
-    currentZoom = d3.zoom().scaleExtent([0.05,15])
-      .on('zoom', e => { graphG.attr('transform', e.transform); });
-    svg.call(currentZoom);
-
-    const nodeMap = new Map(data.nodes.map(n=>[n.id,n]));
-    const edges = data.edges.filter(e=>nodeMap.has(e.source_id)&&nodeMap.has(e.target_id))
-                    .map(e=>({...e, source:e.source_id, target:e.target_id}));
-
-    const link = graphG.append('g').selectAll('line').data(edges).enter().append('line')
-      .attr('class', d=>`link link-${d.edge_type}`)
-      .attr('stroke-width', d=>Math.max(0.5, d.weight*1.5));
-
-    allNodeCircles = graphG.append('g').selectAll('circle').data(data.nodes).enter().append('circle')
-      .attr('class', d=>`node-${d.type}`)
-      .attr('r', d=>Math.max(4, 3+d.centrality*20))
-      .attr('stroke','#0d1117').attr('stroke-width',1)
-      .style('cursor','pointer')
-      .on('click', (e,d)=>{ e.stopPropagation(); showNodeDetail(d); })
-      .on('dblclick', (e,d)=>{ e.stopPropagation(); focusNode(d); })
-      .on('mouseover', showTooltip).on('mouseout', hideTooltip)
-      .call(d3.drag().on('start',dragStart).on('drag',dragging).on('end',dragEnd));
-
-    const labels = graphG.append('g').attr('class','labels-group').selectAll('text')
-      .data(data.nodes).enter().append('text')
-      .attr('class','node-label')
-      .text(d=>d.text.length>35?d.text.slice(0,33)+'…':d.text)
-      .attr('dy', d=>Math.max(4, 3+d.centrality*20)+12);
-
-    if (!labelsVisible) graphG.select('.labels-group').style('display','none');
-
-    svg.on('click', ()=> closeSidebar());
-
+  function showEmptyState(width, height) {
+    allNodeData = [];
+    allLinkData = [];
     if (simulation) simulation.stop();
-    simulation = d3.forceSimulation(data.nodes)
-      .force('link', d3.forceLink(edges).id(d=>d.id).distance(80).strength(d=>d.weight*0.3))
-      .force('charge', d3.forceManyBody().strength(-120).distanceMax(400))
-      .force('center', d3.forceCenter(width/2, height/2))
-      .force('collision', d3.forceCollide(14))
-      .on('tick', ()=>{
-        link.attr('x1',d=>d.source.x).attr('y1',d=>d.source.y)
-            .attr('x2',d=>d.target.x).attr('y2',d=>d.target.y);
-        allNodeCircles.attr('cx',d=>d.x).attr('cy',d=>d.y);
-        labels.attr('x',d=>d.x).attr('y',d=>d.y);
-      });
+    if (linkLayer) linkLayer.selectAll('*').remove();
+    if (pulseLayer) pulseLayer.selectAll('*').remove();
+    if (nodeLayer) nodeLayer.selectAll('*').remove();
+    if (labelLayer) labelLayer.selectAll('*').remove();
+    if (emptyStateText) {
+      emptyStateText
+        .attr('x', width / 2)
+        .attr('y', height / 2)
+        .style('display', null)
+        .text('No nodes found.');
+    }
+  }
 
-    // Auto-fit after settle
-    setTimeout(()=> fitToScreen(), 1500);
+  function cloneNodesWithPositions(rawNodes, width, height) {
+    const previous = new Map(allNodeData.map(node => [node.id, node]));
+    return rawNodes.map(rawNode => {
+      const node = { ...rawNode };
+      const prior = previous.get(node.id);
+      if (prior) {
+        node.x = prior.x;
+        node.y = prior.y;
+        node.vx = prior.vx;
+        node.vy = prior.vy;
+        node.fx = prior.fx ?? null;
+        node.fy = prior.fy ?? null;
+      } else {
+        node.x = width / 2 + (Math.random() - 0.5) * 40;
+        node.y = height / 2 + (Math.random() - 0.5) * 40;
+      }
+      return node;
+    });
+  }
+
+  function tickGraph() {
+    if (allLinkLines) {
+      allLinkLines
+        .attr('x1', d => d.source.x)
+        .attr('y1', d => d.source.y)
+        .attr('x2', d => d.target.x)
+        .attr('y2', d => d.target.y);
+    }
+    if (allNodeCircles) {
+      allNodeCircles.attr('cx', d => d.x).attr('cy', d => d.y);
+    }
+    if (allLabels) {
+      allLabels.attr('x', d => d.x).attr('y', d => d.y);
+    }
+  }
+
+  function spawnPulse(node, delayMs) {
+    if (!pulseLayer || node.x == null || node.y == null) return;
+    pulseLayer.append('circle')
+      .attr('class', 'node-pulse-ring')
+      .attr('cx', node.x)
+      .attr('cy', node.y)
+      .attr('r', radiusForNode(node) + 1)
+      .style('opacity', 0)
+      .transition()
+      .delay(delayMs)
+      .duration(50)
+      .style('opacity', 0.85)
+      .transition()
+      .duration(950)
+      .attr('r', radiusForNode(node) + 18)
+      .style('opacity', 0)
+      .remove();
+  }
+
+  function animateLiveActivity(live = {}) {
+    renderLiveBadge(live);
+    const activeNodeIds = new Set(live.activated_node_ids || []);
+    const activeEdgeIds = new Set(live.activated_edge_ids || []);
+
+    if (!activeNodeIds.size && !activeEdgeIds.size) return;
+
+    const activeNodes = allNodeData.filter(node => activeNodeIds.has(node.id));
+    activeNodes.forEach(node => {
+      spawnPulse(node, 0);
+      spawnPulse(node, 140);
+    });
+
+    if (allNodeCircles) {
+      const nodeSelection = allNodeCircles.filter(node => activeNodeIds.has(node.id));
+      nodeSelection
+        .interrupt('live-node')
+        .classed('node-live-active', true)
+        .attr('filter', 'url(#node-glow)')
+        .transition('live-node')
+        .duration(1400)
+        .on('end', function() {
+          d3.select(this).classed('node-live-active', false).attr('filter', null);
+        });
+    }
+
+    if (allLinkLines) {
+      const edgeSelection = allLinkLines.filter(edge => activeEdgeIds.has(edgeKey(edge)));
+      edgeSelection.interrupt('live-edge');
+      edgeSelection.classed('link-live-active', true).attr('filter', 'url(#edge-glow)');
+      window.setTimeout(() => {
+        edgeSelection.classed('link-live-active', false).attr('filter', null);
+      }, 1500);
+    }
+  }
+
+  function updateGraphData(data, options = {}) {
+    const { animate = false, fitAfter = false } = options;
+    const { width, height } = ensureGraphScaffold();
+    const stats = data.stats || {};
+    const live = data.live || {};
+    renderStats(stats, live);
+    renderLiveBadge(live);
+
+    const rawNodes = data.nodes || [];
+    if (!rawNodes.length) {
+      showEmptyState(width, height);
+      return;
+    }
+    if (emptyStateText) emptyStateText.style('display', 'none');
+
+    const nodes = cloneNodesWithPositions(rawNodes, width, height);
+    const nodeMap = new Map(nodes.map(node => [node.id, node]));
+    const edges = (data.edges || [])
+      .filter(edge => nodeMap.has(edge.source_id) && nodeMap.has(edge.target_id))
+      .map(edge => ({ ...edge, source: edge.source_id, target: edge.target_id }));
+
+    allNodeData = nodes;
+    allLinkData = edges;
+
+    const linkJoin = linkLayer.selectAll('line').data(edges, edgeKey);
+    linkJoin.exit()
+      .interrupt()
+      .transition()
+      .duration(250)
+      .style('opacity', 0)
+      .remove();
+
+    const linkEnter = linkJoin.enter().append('line')
+      .attr('class', edge => `link link-${edge.edge_type}`)
+      .attr('stroke-width', edge => Math.max(0.5, Number(edge.weight || 0) * 1.5))
+      .style('opacity', animate ? 0 : 1);
+
+    allLinkLines = linkEnter.merge(linkJoin)
+      .attr('class', edge => `link link-${edge.edge_type}`)
+      .attr('stroke-width', edge => Math.max(0.5, Number(edge.weight || 0) * 1.5))
+      .style('opacity', 1);
+
+    if (animate) {
+      linkEnter.transition().duration(250).style('opacity', 1);
+    }
+
+    const nodeJoin = nodeLayer.selectAll('circle').data(nodes, node => node.id);
+    nodeJoin.exit()
+      .interrupt()
+      .transition()
+      .duration(250)
+      .attr('r', 0)
+      .style('opacity', 0)
+      .remove();
+
+    const nodeEnter = nodeJoin.enter().append('circle')
+      .attr('class', node => `node node-${node.type}`)
+      .attr('cx', node => node.x)
+      .attr('cy', node => node.y)
+      .attr('r', animate ? 0 : radiusForNode)
+      .attr('stroke', '#0d1117')
+      .attr('stroke-width', 1)
+      .style('cursor', 'pointer')
+      .on('click', (event, node) => { event.stopPropagation(); showNodeDetail(node); })
+      .on('dblclick', (event, node) => { event.stopPropagation(); focusNode(node); })
+      .on('mouseover', showTooltip)
+      .on('mouseout', hideTooltip)
+      .call(d3.drag().on('start', dragStart).on('drag', dragging).on('end', dragEnd));
+
+    allNodeCircles = nodeEnter.merge(nodeJoin)
+      .attr('class', node => `node node-${node.type}`)
+      .attr('r', node => radiusForNode(node))
+      .style('opacity', 1);
+
+    if (animate) {
+      nodeEnter.transition().duration(350).attr('r', node => radiusForNode(node));
+    }
+
+    const labelJoin = labelLayer.selectAll('text').data(nodes, node => node.id);
+    labelJoin.exit()
+      .interrupt()
+      .transition()
+      .duration(200)
+      .style('opacity', 0)
+      .remove();
+
+    const labelEnter = labelJoin.enter().append('text')
+      .attr('class', 'node-label')
+      .style('opacity', animate ? 0 : 1);
+
+    allLabels = labelEnter.merge(labelJoin)
+      .text(node => node.text.length > 35 ? node.text.slice(0, 33) + '…' : node.text)
+      .attr('dy', node => radiusForNode(node) + 12)
+      .style('opacity', 1);
+
+    if (animate) {
+      labelEnter.transition().duration(250).style('opacity', 1);
+    }
+
+    labelLayer.style('display', labelsVisible ? null : 'none');
+
+    if (!simulation) {
+      simulation = d3.forceSimulation(nodes)
+        .force('link', d3.forceLink(edges).id(node => node.id).distance(80).strength(edge => Number(edge.weight || 0) * 0.3))
+        .force('charge', d3.forceManyBody().strength(-120).distanceMax(400))
+        .force('center', d3.forceCenter(width / 2, height / 2))
+        .force('collision', d3.forceCollide(14))
+        .on('tick', tickGraph);
+    } else {
+      simulation.nodes(nodes);
+      simulation.force('link').links(edges);
+      simulation.force('center', d3.forceCenter(width / 2, height / 2));
+      simulation.alpha(animate ? 0.45 : 0.8).restart();
+    }
+    tickGraph();
+    animateLiveActivity(live);
+
+    if (fitAfter) {
+      setTimeout(() => fitToScreen(), animate ? 900 : 1500);
+    }
   }
 
   // ── Zoom ──
@@ -290,7 +555,7 @@
   window.toggleLabels = function() {
     labelsVisible = !labelsVisible;
     document.getElementById('g-labels-btn').classList.toggle('active',labelsVisible);
-    if (graphG) graphG.select('.labels-group').style('display',labelsVisible?null:'none');
+    if (labelLayer) labelLayer.style('display', labelsVisible ? null : 'none');
   };
 
   // ── Tooltip ──
@@ -375,30 +640,25 @@
     if (liveActive) {
       btn.textContent = '⏸ Live'; btn.classList.add('active');
       liveRefresh();
-      liveInterval = setInterval(liveRefresh, 5000);
+      liveInterval = setInterval(liveRefresh, LIVE_INTERVAL_MS);
     } else {
       btn.textContent = '▶ Live'; btn.classList.remove('active');
       if (liveInterval) { clearInterval(liveInterval); liveInterval=null; }
+      renderLiveBadge({});
     }
   };
   async function liveRefresh() {
     const agent = currentAgent();
     if (!agent) return;
-    const params = new URLSearchParams({
-      agent,
-      type: document.getElementById('g-type').value,
-      status: document.getElementById('g-status').value,
-      search: document.getElementById('g-search').value,
-      limit: document.getElementById('g-limit').value,
-    });
     try {
-      const r = await fetch('/dashboard/api/graph?'+params);
+      const r = await fetch('/dashboard/api/graph?' + buildParams());
       const data = await r.json();
-      const hash = `${data.stats._total_nodes}:${data.stats._total_edges}:${data.stats._latest_ts||''}`;
+      const hash = graphHash(data);
       if (hash !== lastHash) {
         lastHash = hash;
-        renderGraph(data);
-        renderStats(data.stats);
+        updateGraphData(data, { animate: true, fitAfter: false });
+      } else {
+        renderLiveBadge(data.live || {});
       }
     } catch(e) { /* ignore */ }
   }

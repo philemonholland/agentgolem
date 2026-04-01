@@ -4,11 +4,13 @@ from __future__ import annotations
 import sys
 import types
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
@@ -352,6 +354,8 @@ async def test_graph_page_returns_html(client: httpx.AsyncClient):
     assert "text/html" in resp.headers["content-type"]
     assert "Memory Graph" in resp.text
     assert "graph-svg" in resp.text
+    assert "graph-live-badge" in resp.text
+    assert "node-pulse-ring" in resp.text
     assert "d3.v7" in resp.text
 
 
@@ -361,6 +365,63 @@ async def test_graph_api_returns_json_no_agent(client: httpx.AsyncClient):
     data = resp.json()
     assert data["nodes"] == []
     assert data["edges"] == []
+    assert data["live"]["graph_hash"] == "0:0:"
+
+
+async def test_graph_api_returns_live_activity_for_resolved_agent(
+    client: httpx.AsyncClient,
+    tmp_path: Path,
+):
+    import agentgolem.dashboard.api as api_mod
+    from agentgolem.logging.audit import AuditLogger
+    from agentgolem.memory.models import ConceptualNode, EdgeType, MemoryEdge, NodeType
+    from agentgolem.memory.schema import close_db, init_db
+    from agentgolem.memory.store import SQLiteMemoryStore
+
+    original_agents = list(getattr(api_mod.state, "agents", []))
+    original_data_dir = getattr(api_mod.state, "data_dir", None)
+    agent_dir = tmp_path / "council_1"
+    (agent_dir / "memory").mkdir(parents=True, exist_ok=True)
+    (agent_dir / "logs").mkdir(parents=True, exist_ok=True)
+
+    api_mod.state.data_dir = tmp_path
+    api_mod.state.agents = [
+        types.SimpleNamespace(
+            agent_name="Council-1",
+            _initial_agent_name="Council-1",
+            _data_dir=agent_dir,
+        )
+    ]
+
+    db = await init_db(agent_dir / "memory" / "graph.db")
+    store = SQLiteMemoryStore(db)
+    await store.add_node(ConceptualNode(id="node-a", text="Animated node", type=NodeType.FACT))
+    await store.add_node(ConceptualNode(id="node-b", text="Connected node", type=NodeType.FACT))
+    await store.add_edge(
+        MemoryEdge(
+            id="edge-ab",
+            source_id="node-a",
+            target_id="node-b",
+            edge_type=EdgeType.RELATED_TO,
+        )
+    )
+    AuditLogger(agent_dir).log("trust_update", "node-a", {"reason": "test"})
+
+    try:
+        resp = await client.get("/dashboard/api/graph?agent=Council-1")
+        assert resp.status_code == 200
+        data = resp.json()
+    finally:
+        await close_db(db)
+        api_mod.state.agents = original_agents
+        api_mod.state.data_dir = original_data_dir
+
+    assert {node["id"] for node in data["nodes"]} == {"node-a", "node-b"}
+    assert data["stats"]["_latest_ts"]
+    assert data["live"]["activity_count"] >= 1
+    assert "node-a" in data["live"]["activated_node_ids"]
+    assert "edge-ab" in data["live"]["activated_edge_ids"]
+    assert data["live"]["graph_hash"]
 
 
 async def test_graph_node_api_returns_error_no_agent(client: httpx.AsyncClient):
