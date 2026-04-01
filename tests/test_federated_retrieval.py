@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from agentgolem.memory.federated_retrieval import FederatedMemoryRetriever
-from agentgolem.memory.models import ConceptualNode, NodeType
+from agentgolem.memory.models import ConceptualNode, NodeType, Source, SourceKind
 from agentgolem.memory.mycelium import EntangledReference, MemoryReference
 from agentgolem.memory.schema import close_db, init_db
 from agentgolem.memory.shared_exports import SharedMemoryExporter
@@ -19,6 +19,7 @@ async def _create_export(
     agent_label: str,
     text: str,
     search_text: str,
+    source_origin: str | None = None,
 ) -> ConceptualNode:
     db = await init_db(tmp_path / f"{agent_id}.db")
     store = SQLiteMemoryStore(db)
@@ -32,6 +33,15 @@ async def _create_export(
         centrality=0.7,
     )
     await store.add_node(node)
+    if source_origin:
+        source = Source(
+            kind=SourceKind.HUMAN,
+            origin=source_origin,
+            reliability=0.9,
+            raw_reference="Relevant local excerpt.",
+        )
+        await store.add_source(source)
+        await store.link_node_source(node.id, source.id)
     exporter = SharedMemoryExporter(store, exports_dir / f"{agent_id}.sqlite")
     await exporter.export_snapshot(agent_id, agent_label)
     await close_db(db)
@@ -71,6 +81,38 @@ async def test_search_external_excludes_current_agent_and_matches_search_text(
     assert results[0].node_id == foreign.id
 
 
+async def test_search_external_matches_source_hint(tmp_path: Path) -> None:
+    exports_dir = tmp_path / "exports"
+    await _create_export(
+        tmp_path,
+        exports_dir,
+        agent_id="c1",
+        agent_label="Council-1",
+        text="Local reflection on vows.",
+        search_text="local vow reflection",
+    )
+    foreign = await _create_export(
+        tmp_path,
+        exports_dir,
+        agent_id="c2",
+        agent_label="Council-2",
+        text="A shared TFV interpretation.",
+        search_text="shared tfv interpretation",
+        source_origin="tfv/five_vows.txt",
+    )
+
+    retriever = FederatedMemoryRetriever(exports_dir)
+    results = await retriever.search_external(
+        "five_vows txt",
+        current_agent_id="c1",
+        top_k=5,
+    )
+
+    assert len(results) == 1
+    assert results[0].node_id == foreign.id
+    assert results[0].source_hint == "tfv/five_vows.txt"
+
+
 async def test_hydrate_entangled_refs_preserves_overlay_metadata(tmp_path: Path) -> None:
     exports_dir = tmp_path / "exports"
     foreign = await _create_export(
@@ -80,6 +122,7 @@ async def test_hydrate_entangled_refs_preserves_overlay_metadata(tmp_path: Path)
         agent_label="Council-3",
         text="Ethics and memory should stay provenance-aware.",
         search_text="ethics provenance memory",
+        source_origin="tfv/ethics_memory.txt",
     )
 
     retriever = FederatedMemoryRetriever(exports_dir)
@@ -100,6 +143,7 @@ async def test_hydrate_entangled_refs_preserves_overlay_metadata(tmp_path: Path)
     assert hydrated[0].agent_id == "c3"
     assert hydrated[0].agent_label == "Council-3"
     assert hydrated[0].node_id == foreign.id
+    assert hydrated[0].source_hint == "tfv/ethics_memory.txt"
     assert hydrated[0].overlay_weight == 0.7
 
 

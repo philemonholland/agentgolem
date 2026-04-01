@@ -49,6 +49,7 @@ if TYPE_CHECKING:
 
     from agentgolem.config.secrets import Secrets
     from agentgolem.runtime.bus import AgentMessage, InterAgentBus
+    from agentgolem.runtime.tfv_loader import TFVDocument
 
 # Settings the agents are NEVER allowed to change (sleep-wake cycle)
 LOCKED_SETTINGS: frozenset[str] = frozenset(
@@ -414,6 +415,11 @@ class MainLoop:
         self._council7_foundation_complete = False
         self._council7_broadened = False
         self._council7_source_retries = 0
+        self._tfv_summaries: dict[str, str] = {}
+        self._tfv_read_counts: dict[str, int] = {}
+        self._tfv_last_read: dict[str, datetime] = {}
+        self._tfv_last_shared_takeaway: dict[str, str] = {}
+        self._tfv_last_shared_at: dict[str, datetime] = {}
         self._agent_readme_read = False  # read AGENT_README.md once after NJ
         self._browse_queue: list[str] = []
         self._browse_queue_depths: dict[str, int] = {}
@@ -474,6 +480,8 @@ class MainLoop:
         # Load vow foundation state
         self._vow_state_path = self._data_dir / "vow_foundation.json"
         self._load_vow_foundation_state()
+        self._tfv_state_path = self._data_dir / "tfv_reading.json"
+        self._load_tfv_state()
 
         # Session state persistence (cycle timing, name, thoughts, etc.)
         self._session_state_path = self._data_dir / "session_state.json"
@@ -2076,7 +2084,10 @@ class MainLoop:
                     detail = f"{memory.search_text}: {memory.text}"
                 else:
                     detail = memory.text
-                lines.append(f"- [{owner}] {detail}{emo} (link={memory.overlay_weight:.2f})")
+                source = f" source={memory.source_hint}" if memory.source_hint else ""
+                lines.append(
+                    f"- [{owner}] {detail}{emo} (link={memory.overlay_weight:.2f}{source})"
+                )
             return "Entangled peer memories:\n" + "\n".join(lines)
         except Exception as e:
             self._logger.warning(
@@ -2889,6 +2900,231 @@ class MainLoop:
         self._vow_foundation_stage = 2
         self._save_vow_foundation_state()
 
+    def _tfv_query_terms(self) -> list[str]:
+        """Collect lightweight curiosity cues for TFV selection."""
+        seed_text = [self.ethical_vector]
+        if self._internal_state.curiosity_focus:
+            seed_text.append(self._internal_state.curiosity_focus)
+        if self._internal_state.growth_vector:
+            seed_text.append(self._internal_state.growth_vector)
+        seed_text.extend(self._recent_curiosity_focuses[-5:])
+        seed_text.extend(self._recent_growth_vectors[-5:])
+        seed_text.extend(self._recent_thoughts[-6:])
+
+        stop_words = {
+            "that",
+            "this",
+            "with",
+            "from",
+            "have",
+            "what",
+            "your",
+            "their",
+            "into",
+            "about",
+            "would",
+            "there",
+            "should",
+            "could",
+            "being",
+            "because",
+            "thinking",
+            "recently",
+            "agent",
+            "council",
+            "vows",
+        }
+        seen: dict[str, None] = {}
+        for token in re.findall(r"[a-zA-Z]{4,}", " ".join(seed_text).lower()):
+            if token in stop_words:
+                continue
+            seen[token] = None
+            if len(seen) >= 24:
+                break
+        return list(seen)
+
+    def _choose_curious_tfv_document(
+        self,
+        documents: list[TFVDocument],
+    ) -> TFVDocument | None:
+        """Pick a TFV document biased by curiosity, novelty, and light revisits."""
+        if not documents:
+            return None
+
+        keywords = self._tfv_query_terms()
+        now = datetime.now(UTC)
+        best_score = float("-inf")
+        best_document: TFVDocument | None = None
+
+        for document in documents:
+            read_count = self._tfv_read_counts.get(document.filename, 0)
+            last_read = self._tfv_last_read.get(document.filename)
+            search_blob = f"{document.title} {document.filename} {document.text[:3000]}".lower()
+
+            score = 1.0 / (1 + read_count)
+            if read_count == 0:
+                score += 1.5
+            if last_read is not None:
+                hours_since = max(0.0, (now - last_read).total_seconds() / 3600.0)
+                score += min(hours_since / 48.0, 1.0)
+                if hours_since < 6.0:
+                    score -= 1.25
+
+            keyword_hits = 0
+            for keyword in keywords:
+                if keyword in search_blob:
+                    keyword_hits += 1
+                    if keyword in document.title.lower() or keyword in document.filename.lower():
+                        score += 0.45
+                    else:
+                        score += 0.18
+
+            if keyword_hits == 0 and read_count == 0:
+                score += 0.4
+            if document.filename in self._tfv_summaries:
+                score += 0.1
+
+            if score > best_score:
+                best_score = score
+                best_document = document
+
+        return best_document
+
+    def _parse_tfv_response(
+        self,
+        response: str,
+        *,
+        fallback_title: str,
+    ) -> tuple[str, str, str]:
+        """Extract summary and takeaway sections from a TFV reflection response."""
+        summary = ""
+        takeaway = ""
+        reflection_lines: list[str] = []
+        current = "reflection"
+
+        for raw_line in response.splitlines():
+            line = raw_line.strip()
+            upper = line.upper()
+            if upper.startswith("SUMMARY:"):
+                summary = line.partition(":")[2].strip()
+                current = "summary"
+                continue
+            if upper.startswith("TAKEAWAY:"):
+                takeaway = line.partition(":")[2].strip()
+                current = "takeaway"
+                continue
+            if not line:
+                continue
+            if current == "summary":
+                summary = f"{summary} {line}".strip()
+            elif current == "takeaway":
+                takeaway = f"{takeaway} {line}".strip()
+            else:
+                reflection_lines.append(line)
+
+        reflection = " ".join(reflection_lines).strip() or response.strip()
+        if not summary:
+            summary = reflection[:280].strip() or f"Reflected on {fallback_title}."
+        if not takeaway:
+            takeaway = summary[:220].strip()
+        return reflection, summary, takeaway
+
+    def _should_share_tfv_takeaway(self, filename: str, takeaway: str) -> bool:
+        """Gate TFV sharing on novelty and a modest cooldown."""
+        normalized = takeaway.strip().lower()
+        if not normalized:
+            return False
+        previous = self._tfv_last_shared_takeaway.get(filename, "").strip().lower()
+        if previous and previous == normalized:
+            return False
+        last_shared_at = self._tfv_last_shared_at.get(filename)
+        return not (
+            last_shared_at is not None
+            and datetime.now(UTC) - last_shared_at < timedelta(hours=6)
+        )
+
+    async def _background_tfv_review(self) -> bool:
+        """Curiosity-driven reading pass over the local TFV text corpus."""
+        from agentgolem.runtime.tfv_loader import load_tfv_documents
+
+        documents = load_tfv_documents(self._repo_root)
+        document = self._choose_curious_tfv_document(documents)
+        if document is None or not document.text.strip():
+            return False
+
+        previous_summary = self._tfv_summaries.get(document.filename, "")
+        prompt = (
+            f"{self._identity_preamble()}\n\n"
+            f"You are revisiting a local TFV library text because it feels relevant "
+            f"to your current concerns, goals, or curiosities.\n\n"
+            f"FILE: {document.filename}\n"
+            f"TITLE: {document.title}\n"
+            f"PREVIOUS SUMMARY: {previous_summary or 'none'}\n\n"
+            f"Read the excerpt below and respond in exactly three parts:\n"
+            f"1. A brief reflection on why it matters to you now.\n"
+            f"2. A line beginning with 'SUMMARY:' capturing the memory-worthy takeaway.\n"
+            f"3. A line beginning with 'TAKEAWAY:' phrased as a short peer-shareable note.\n\n"
+            f"--- TFV TEXT ---\n{document.text[:5000]}\n--- END TFV TEXT ---"
+        )
+        response = await self._complete_discussion(
+            [Message(role="system", content=prompt)],
+            trace_meta={
+                "call_site": "_background_tfv_review",
+                "purpose": "tfv_curious_reading",
+                "tfv_file": document.filename,
+            },
+            max_completion_tokens=512,
+        )
+        reflection, summary, takeaway = self._parse_tfv_response(
+            response,
+            fallback_title=document.title,
+        )
+        now = datetime.now(UTC)
+        self._tfv_summaries[document.filename] = summary
+        self._tfv_read_counts[document.filename] = (
+            self._tfv_read_counts.get(document.filename, 0) + 1
+        )
+        self._tfv_last_read[document.filename] = now
+        self._save_tfv_state()
+
+        self._recent_thoughts.append(f"TFV {document.title}: {summary[:180]}")
+        self._recent_thoughts = self._recent_thoughts[-20:]
+        self._emit("📚", f"TFV {document.title}: {summary[:180]}")
+        self.audit_logger.log(
+            "tfv_text_read",
+            self.agent_name,
+            {
+                "filename": document.filename,
+                "title": document.title,
+                "summary": summary,
+            },
+        )
+        await self._encode_to_memory(
+            (
+                f"TFV reading from {document.title} ({document.filename})\n\n"
+                f"Summary: {summary}\n\n"
+                f"Reflection: {reflection}"
+            ),
+            source_kind="human",
+            origin=f"tfv/{document.filename}",
+            raw_reference=document.text[:4000],
+            label=f"TFV {document.title}",
+        )
+
+        if self._peer_bus and self._should_share_tfv_takeaway(document.filename, takeaway):
+            shared = await self._peer_bus.broadcast(
+                self.agent_name,
+                f"[TFV {document.title} | {document.filename}] {takeaway}",
+                max_chars=self._peer_msg_limit,
+            )
+            if shared > 0:
+                self._emit("📤", f"Shared TFV takeaway with {shared} peer(s)")
+            self._tfv_last_shared_takeaway[document.filename] = takeaway
+            self._tfv_last_shared_at[document.filename] = now
+            self._save_tfv_state()
+
+        return True
+
     async def _background_vow_review(self) -> None:
         """Periodically re-read vow material to keep it subconsciously active.
 
@@ -2898,7 +3134,18 @@ class MainLoop:
         """
         from agentgolem.runtime.vow_loader import render_common_foundation
 
-        self._emit("📖", "Background vow review — refreshing ethical foundation…")
+        self._emit("📖", "Background vow review — refreshing ethical foundation or TFV corpus…")
+        try:
+            if await self._background_tfv_review():
+                self._last_vow_review = datetime.now(UTC)
+                return
+        except Exception as exc:
+            self._logger.warning(
+                "tfv_review_error",
+                agent=self.agent_name,
+                error=repr(exc),
+            )
+
         try:
             foundation_text = render_common_foundation(self._repo_root)
         except FileNotFoundError:
@@ -3549,6 +3796,68 @@ class MainLoop:
         }
         self._council7_state_path.parent.mkdir(parents=True, exist_ok=True)
         self._council7_state_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    def _load_tfv_state(self) -> None:
+        """Load per-agent TFV reading state from disk."""
+        if not self._tfv_state_path.exists():
+            return
+        try:
+            data = json.loads(self._tfv_state_path.read_text(encoding="utf-8"))
+            files = data.get("files", {})
+            if not isinstance(files, dict):
+                return
+            for filename, entry in files.items():
+                if not isinstance(filename, str) or not isinstance(entry, dict):
+                    continue
+                summary = entry.get("summary")
+                if isinstance(summary, str) and summary.strip():
+                    self._tfv_summaries[filename] = summary.strip()
+                read_count = entry.get("read_count", 0)
+                if isinstance(read_count, int) and read_count > 0:
+                    self._tfv_read_counts[filename] = read_count
+                last_read = entry.get("last_read")
+                if isinstance(last_read, str) and last_read:
+                    self._tfv_last_read[filename] = datetime.fromisoformat(last_read)
+                last_shared_takeaway = entry.get("last_shared_takeaway")
+                if isinstance(last_shared_takeaway, str) and last_shared_takeaway.strip():
+                    self._tfv_last_shared_takeaway[filename] = last_shared_takeaway.strip()
+                last_shared_at = entry.get("last_shared_at")
+                if isinstance(last_shared_at, str) and last_shared_at:
+                    self._tfv_last_shared_at[filename] = datetime.fromisoformat(last_shared_at)
+        except Exception:
+            pass
+
+    def _save_tfv_state(self) -> None:
+        """Persist per-agent TFV reading state to disk."""
+        filenames = (
+            set(self._tfv_summaries)
+            | set(self._tfv_read_counts)
+            | set(self._tfv_last_read)
+            | set(self._tfv_last_shared_takeaway)
+            | set(self._tfv_last_shared_at)
+        )
+        data = {
+            "files": {
+                filename: {
+                    "summary": self._tfv_summaries.get(filename, ""),
+                    "read_count": self._tfv_read_counts.get(filename, 0),
+                    "last_read": (
+                        self._tfv_last_read[filename].isoformat()
+                        if filename in self._tfv_last_read
+                        else None
+                    ),
+                    "last_shared_takeaway": self._tfv_last_shared_takeaway.get(filename, ""),
+                    "last_shared_at": (
+                        self._tfv_last_shared_at[filename].isoformat()
+                        if filename in self._tfv_last_shared_at
+                        else None
+                    ),
+                }
+                for filename in sorted(filenames)
+            }
+        }
+        self._tfv_state_path.parent.mkdir(parents=True, exist_ok=True)
+        self._tfv_state_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     # ------------------------------------------------------------------
     # Session state persistence (survives Ctrl+C / restart)
@@ -7157,6 +7466,7 @@ class MainLoop:
         text: str,
         source_kind: str = "web",
         origin: str = "",
+        raw_reference: str = "",
         label: str = "",
     ) -> None:
         """Encode text into the memory graph via MemoryEncoder."""
@@ -7167,7 +7477,12 @@ class MainLoop:
 
             kind_map = {v.value: v for v in SourceKind}
             sk = kind_map.get(source_kind, SourceKind.WEB)
-            source = Source(kind=sk, origin=origin, reliability=0.9)
+            source = Source(
+                kind=sk,
+                origin=origin,
+                reliability=0.9,
+                raw_reference=raw_reference,
+            )
             # Truncate excessively long text to avoid huge LLM prompts
             encode_text = text[:8000] if len(text) > 8000 else text
             nodes = await self._memory_encoder.encode(encode_text, source)

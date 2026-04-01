@@ -2,14 +2,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import aiosqlite
 
-from agentgolem.memory.store import SQLiteMemoryStore
+if TYPE_CHECKING:
+    from pathlib import Path
 
-EXPORT_SCHEMA_VERSION = 1
+    from agentgolem.memory.store import SQLiteMemoryStore
+
+EXPORT_SCHEMA_VERSION = 2
 DEFAULT_EXPORT_LIMIT = 2000
 
 
@@ -28,6 +31,7 @@ class ExportedMemory:
     centrality: float
     emotion_label: str
     emotion_score: float
+    source_hint: str
     last_accessed: str
     exported_at: str
 
@@ -48,28 +52,43 @@ class SharedMemoryExporter:
     async def export_snapshot(self, agent_id: str, agent_label: str) -> int:
         """Rewrite the export snapshot from the authoritative local store."""
         self._export_path.parent.mkdir(parents=True, exist_ok=True)
-        exported_at = datetime.now(timezone.utc).isoformat()
+        exported_at = datetime.now(UTC).isoformat()
 
         async with self._store._db.execute(
             """
             SELECT
-                id AS node_id,
-                text,
-                COALESCE(search_text, '') AS search_text,
-                type AS node_type,
-                (base_usefulness * trustworthiness) AS trust_useful,
-                salience,
-                centrality,
-                emotion_label,
-                emotion_score,
-                last_accessed
-            FROM nodes
-            WHERE status = 'active'
+                n.id AS node_id,
+                n.text,
+                COALESCE(n.search_text, '') AS search_text,
+                n.type AS node_type,
+                (n.base_usefulness * n.trustworthiness) AS trust_useful,
+                n.salience,
+                n.centrality,
+                n.emotion_label,
+                n.emotion_score,
+                n.last_accessed,
+                COALESCE(
+                    (
+                        SELECT GROUP_CONCAT(origin, ' | ')
+                        FROM (
+                            SELECT DISTINCT s.origin AS origin
+                            FROM node_sources ns
+                            JOIN sources s ON ns.source_id = s.id
+                            WHERE ns.node_id = n.id
+                              AND COALESCE(s.origin, '') != ''
+                            ORDER BY s.timestamp DESC
+                            LIMIT 3
+                        )
+                    ),
+                    ''
+                ) AS source_hint
+            FROM nodes n
+            WHERE n.status = 'active'
             ORDER BY
-                (base_usefulness * trustworthiness) DESC,
-                salience DESC,
-                centrality DESC,
-                last_accessed DESC
+                (n.base_usefulness * n.trustworthiness) DESC,
+                n.salience DESC,
+                n.centrality DESC,
+                n.last_accessed DESC
             LIMIT ?
             """,
             (self._max_nodes,),
@@ -94,9 +113,10 @@ class SharedMemoryExporter:
                     centrality,
                     emotion_label,
                     emotion_score,
+                    source_hint,
                     last_accessed,
                     exported_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -111,6 +131,7 @@ class SharedMemoryExporter:
                         float(row["centrality"] or 0.0),
                         row["emotion_label"] or "neutral",
                         float(row["emotion_score"] or 0.0),
+                        row["source_hint"] or "",
                         row["last_accessed"],
                         exported_at,
                     )
@@ -144,13 +165,19 @@ def _row_to_exported_memory(row: aiosqlite.Row) -> ExportedMemory:
         centrality=float(row["centrality"]),
         emotion_label=row["emotion_label"],
         emotion_score=float(row["emotion_score"]),
+        source_hint=row["source_hint"],
         last_accessed=row["last_accessed"],
         exported_at=row["exported_at"],
     )
 
 
 async def _ensure_export_schema(db: aiosqlite.Connection) -> None:
-    await db.execute(f"PRAGMA user_version = {EXPORT_SCHEMA_VERSION}")
+    async with db.execute("PRAGMA user_version") as cur:
+        row = await cur.fetchone()
+    current_version = int(row[0] or 0) if row else 0
+    if current_version != EXPORT_SCHEMA_VERSION:
+        await db.execute("DROP TABLE IF EXISTS exported_nodes")
+
     await db.execute(
         """
         CREATE TABLE IF NOT EXISTS exported_nodes (
@@ -165,15 +192,23 @@ async def _ensure_export_schema(db: aiosqlite.Connection) -> None:
             centrality REAL NOT NULL,
             emotion_label TEXT NOT NULL,
             emotion_score REAL NOT NULL,
+            source_hint TEXT NOT NULL,
             last_accessed TEXT NOT NULL,
             exported_at TEXT NOT NULL
         )
         """
     )
+    await db.execute(f"PRAGMA user_version = {EXPORT_SCHEMA_VERSION}")
     await db.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_exported_nodes_search
         ON exported_nodes(search_text)
+        """
+    )
+    await db.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_exported_nodes_source_hint
+        ON exported_nodes(source_hint)
         """
     )
     await db.execute(

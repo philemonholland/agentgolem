@@ -2,17 +2,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
+from typing import TYPE_CHECKING
 
 import aiosqlite
 
-from agentgolem.memory.models import ConceptualNode
-from agentgolem.memory.mycelium import EntangledReference
 from agentgolem.memory.shared_exports import (
     ExportedMemory,
     _row_to_exported_memory,
     find_export_paths,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from agentgolem.memory.models import ConceptualNode
+    from agentgolem.memory.mycelium import EntangledReference
 
 
 @dataclass(frozen=True)
@@ -30,6 +34,7 @@ class FederatedMemory:
     centrality: float
     emotion_label: str
     emotion_score: float
+    source_hint: str = ""
     overlay_weight: float = 0.0
 
 
@@ -106,6 +111,7 @@ class FederatedMemoryRetriever:
                         centrality=exported.centrality,
                         emotion_label=exported.emotion_label,
                         emotion_score=exported.emotion_score,
+                        source_hint=exported.source_hint,
                         overlay_weight=weights.get(exported.node_id, 0.0),
                     )
                 )
@@ -156,10 +162,12 @@ class FederatedMemoryRetriever:
         if not words:
             return []
 
-        clauses = " OR ".join("(text LIKE ? OR search_text LIKE ?)" for _ in words)
+        clauses = " OR ".join(
+            "(text LIKE ? OR search_text LIKE ? OR source_hint LIKE ?)" for _ in words
+        )
         params: list[str | int] = []
         for word in words:
-            params.extend([f"%{word}%", f"%{word}%"])
+            params.extend([f"%{word}%", f"%{word}%", f"%{word}%"])
         params.append(limit)
 
         async with aiosqlite.connect(export_path) as db:
@@ -185,7 +193,7 @@ class FederatedMemoryRetriever:
         query_words = {word.lower() for word in query.split() if len(word) >= 3}
         scored: list[tuple[float, ExportedMemory]] = []
         for row in rows:
-            searchable = f"{row.text} {row.search_text}".lower()
+            searchable = f"{row.text} {row.search_text} {row.source_hint}".lower()
             match_score = sum(1 for word in query_words if word in searchable) / max(
                 len(query_words), 1
             )
@@ -208,7 +216,7 @@ class FederatedMemoryRetriever:
         query_words = {word.lower() for word in query.split() if len(word) >= 3}
         scored: list[tuple[float, FederatedMemory]] = []
         for row in rows:
-            searchable = f"{row.text} {row.search_text}".lower()
+            searchable = f"{row.text} {row.search_text} {row.source_hint}".lower()
             match_score = sum(1 for word in query_words if word in searchable) / max(
                 len(query_words), 1
             )

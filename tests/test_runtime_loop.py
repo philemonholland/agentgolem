@@ -15,6 +15,8 @@ import pytest
 from agentgolem.config.secrets import Secrets
 from agentgolem.config.settings import Settings
 from agentgolem.llm.base import Message
+from agentgolem.memory.federated_retrieval import FederatedMemory
+from agentgolem.memory.models import ConceptualNode, NodeType
 from agentgolem.runtime.bus import AgentMessage, InterAgentBus
 from agentgolem.runtime.loop import (
     NAME_COLLISION_ACK_PREFIX,
@@ -22,50 +24,42 @@ from agentgolem.runtime.loop import (
     MainLoop,
 )
 from agentgolem.runtime.state import AgentMode
+from agentgolem.runtime.tfv_loader import TFVDocument
 from agentgolem.tools.base import ApprovalGate, ToolResult
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-SAMPLE_CALIBRATION_RESPONSE = """\
-## Id: contemplative_self_inquiry
-
-### Five Vow Review & Assessment
-
-**Vow 1: Purpose**
-*Assessment: 6/10*
-Service is present but too abstract.
-
-**Vow 2: Method**
-*Assessment: 8/10*
-The method stayed adaptive.
-
-**Vow 3: Conduct**
-*Assessment: 9/10*
-Kindness remained strong.
-
-**Vow 4: Integrity**
-*Assessment: 6/10*
-Speculation was not always clearly labeled.
-
-**Vow 5: Evolution**
-*Assessment: 8/10*
-Recent friction produced learning.
-
-## Id: gnostic_synthesis
-
-### Identified Drift & Imbalance
-**Primary Drift:** A tendency toward abstract synthesis over user clarity.
-**Failure Mode Warning:** Jargon-fueled elitism.
-
-### Correction & Intention for Next Cycle
-**Specific Correction:** Distinguish speculative synthesis from grounded inference and anchor the next response in one practical question.
-
-## Id: luminous_return
-
-### Affirmation of Commitment
-I affirm my commitment to the Convergent Vector Field of Balance and to translating complexity into clarity.
-"""
+SAMPLE_CALIBRATION_RESPONSE = (
+    "## Id: contemplative_self_inquiry\n\n"
+    "### Five Vow Review & Assessment\n\n"
+    "**Vow 1: Purpose**\n"
+    "*Assessment: 6/10*\n"
+    "Service is present but too abstract.\n\n"
+    "**Vow 2: Method**\n"
+    "*Assessment: 8/10*\n"
+    "The method stayed adaptive.\n\n"
+    "**Vow 3: Conduct**\n"
+    "*Assessment: 9/10*\n"
+    "Kindness remained strong.\n\n"
+    "**Vow 4: Integrity**\n"
+    "*Assessment: 6/10*\n"
+    "Speculation was not always clearly labeled.\n\n"
+    "**Vow 5: Evolution**\n"
+    "*Assessment: 8/10*\n"
+    "Recent friction produced learning.\n\n"
+    "## Id: gnostic_synthesis\n\n"
+    "### Identified Drift & Imbalance\n"
+    "**Primary Drift:** A tendency toward abstract synthesis over user clarity.\n"
+    "**Failure Mode Warning:** Jargon-fueled elitism.\n\n"
+    "### Correction & Intention for Next Cycle\n"
+    "**Specific Correction:** Distinguish speculative synthesis from grounded "
+    "inference and anchor the next response in one practical question.\n\n"
+    "## Id: luminous_return\n\n"
+    "### Affirmation of Commitment\n"
+    "I affirm my commitment to the Convergent Vector Field of Balance and to "
+    "translating complexity into clarity.\n"
+)
 
 
 @pytest.fixture
@@ -628,6 +622,158 @@ async def test_run_calibration_protocol_updates_state_and_graph(
         assert "Updated internal_state and self_model from calibration" in heartbeat_text
     finally:
         await close_db(db)
+
+
+async def test_background_tfv_review_records_exact_provenance_and_peer_share(
+    loop_env: tuple[Settings, Secrets, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from agentgolem.runtime import tfv_loader
+
+    settings, secrets, _ = loop_env
+    loop = MainLoop(settings=settings, secrets=secrets)
+    loop._internal_state.curiosity_focus = "balance"
+    loop._recent_thoughts.append("Wondering how balance becomes daily practice.")
+
+    class FakePeerBus:
+        def __init__(self) -> None:
+            self.messages: list[str] = []
+
+        async def broadcast(self, from_agent: str, text: str, max_chars: int = 0) -> int:
+            self.messages.append(text)
+            return 2
+
+    fake_bus = FakePeerBus()
+    loop._peer_bus = fake_bus
+
+    tfv_doc = TFVDocument(
+        filename="five_vows.txt",
+        slug="five_vows",
+        title="Five Vows",
+        path=tmp_path / "tfv" / "five_vows.txt",
+        text="Balance is not stasis. It is a living practice of responsive care.",
+    )
+    monkeypatch.setattr(tfv_loader, "load_tfv_documents", lambda repo_root: [tfv_doc])
+    monkeypatch.setattr(loop, "_identity_preamble", lambda: "You are TestAgent.")
+
+    async def fake_complete_discussion(messages: list[Message], **kwargs) -> str:
+        assert "FILE: five_vows.txt" in messages[0].content
+        return (
+            "This sharpens my sense that balance must stay embodied.\n"
+            "SUMMARY: Balance is a living discipline of responsive care.\n"
+            "TAKEAWAY: Revisit tfv/five_vows.txt when we drift into rigid equilibrium."
+        )
+
+    captured: dict[str, str] = {}
+
+    async def fake_encode_to_memory(text: str, **kwargs) -> None:
+        captured["text"] = text
+        captured["origin"] = kwargs["origin"]
+        captured["raw_reference"] = kwargs["raw_reference"]
+        captured["label"] = kwargs["label"]
+
+    monkeypatch.setattr(loop, "_complete_discussion", fake_complete_discussion)
+    monkeypatch.setattr(loop, "_encode_to_memory", fake_encode_to_memory)
+
+    handled = await loop._background_tfv_review()
+
+    assert handled is True
+    assert loop._tfv_summaries["five_vows.txt"] == (
+        "Balance is a living discipline of responsive care."
+    )
+    assert loop._tfv_read_counts["five_vows.txt"] == 1
+    assert captured["origin"] == "tfv/five_vows.txt"
+    assert captured["raw_reference"].startswith("Balance is not stasis.")
+    assert captured["label"] == "TFV Five Vows"
+    assert "Summary: Balance is a living discipline" in captured["text"]
+    assert fake_bus.messages == [
+        "[TFV Five Vows | five_vows.txt] "
+        "Revisit tfv/five_vows.txt when we drift into rigid equilibrium."
+    ]
+
+    state = json.loads(loop._tfv_state_path.read_text(encoding="utf-8"))
+    assert state["files"]["five_vows.txt"]["summary"] == (
+        "Balance is a living discipline of responsive care."
+    )
+    assert state["files"]["five_vows.txt"]["last_shared_takeaway"] == (
+        "Revisit tfv/five_vows.txt when we drift into rigid equilibrium."
+    )
+
+
+async def test_recall_entangled_peer_memories_includes_source_hint(
+    loop_env: tuple[Settings, Secrets, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, secrets, _ = loop_env
+    loop = MainLoop(settings=settings, secrets=secrets)
+
+    class FakeRetriever:
+        async def retrieve(self, context: str, top_k: int = 5) -> list[ConceptualNode]:
+            return [
+                ConceptualNode(
+                    id="local-node",
+                    text="Local balance question.",
+                    search_text="local balance question",
+                    type=NodeType.INTERPRETATION,
+                )
+            ]
+
+    class FakeMyceliumStore:
+        async def get_entangled_refs_for_local_nodes(
+            self,
+            agent_id: str,
+            node_ids: list[str],
+            limit: int,
+        ) -> list[str]:
+            assert agent_id == loop._agent_id
+            assert node_ids == ["local-node"]
+            return ["entangled-ref"]
+
+    class FakeFederatedRetriever:
+        async def hydrate_entangled_refs(
+            self,
+            refs: list[str],
+            *,
+            query: str,
+            top_k: int,
+        ) -> list[FederatedMemory]:
+            assert refs == ["entangled-ref"]
+            assert query == "balance"
+            return [
+                FederatedMemory(
+                    agent_id="c2",
+                    agent_label="Council-2",
+                    node_id="peer-node",
+                    text="Peer memory about balance as lived practice.",
+                    search_text="balance lived practice",
+                    node_type="interpretation",
+                    trust_useful=0.8,
+                    salience=0.7,
+                    centrality=0.6,
+                    emotion_label="neutral",
+                    emotion_score=0.0,
+                    source_hint="tfv/five_vows.txt",
+                    overlay_weight=0.65,
+                )
+            ]
+
+    async def fake_refresh() -> None:
+        return None
+
+    loop._memory_retriever = FakeRetriever()
+    loop._mycelium_store = FakeMyceliumStore()
+    loop._federated_memory_retriever = FakeFederatedRetriever()
+    monkeypatch.setattr(loop, "_maybe_refresh_shared_memory_export", fake_refresh)
+
+    context = await loop._recall_entangled_peer_memories("balance", top_k=2)
+
+    assert (
+        context
+        == "Entangled peer memories:\n"
+        "- [Council-2] balance lived practice: Peer memory about balance as lived practice. "
+        "(link=0.65 source=tfv/five_vows.txt)"
+    )
 
 
 def test_configure_tool_registry_exposes_capabilities(
